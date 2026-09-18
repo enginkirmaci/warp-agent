@@ -66,10 +66,24 @@
 			<Setter Property="Background" Value="Transparent" />
 			<Setter Property="BorderThickness" Value="0" />
 		</Style>
+		<!--  the focused chat's row keeps a soft accent tint; hover still wins while pointing  -->
+		<Style Selector="Border.row-card.selected">
+			<Setter Property="Background" Value="{DynamicResource AccentDimBrush}" />
+		</Style>
 		<Style Selector="Border.row-card:pointerover">
 			<Setter Property="Background" Value="{DynamicResource HoverBrush}" />
 		</Style>
-		<Style Selector="Border.row-card.selected" />
+
+		<!--  workspace selection indicator: keeps its column so unselected names stay aligned  -->
+		<Style Selector="Border.ws-marker">
+			<Setter Property="Width" Value="3" />
+			<Setter Property="Margin" Value="0,4,7,4" />
+			<Setter Property="CornerRadius" Value="2" />
+			<Setter Property="Background" Value="Transparent" />
+		</Style>
+		<Style Selector="Border.ws-marker.selected">
+			<Setter Property="Background" Value="{DynamicResource AccentBrush}" />
+		</Style>
 
 		<!--  workspace row actions appear on hover only  -->
 		<Style Selector="Button.ws-action">
@@ -79,6 +93,18 @@
 			<Setter Property="BorderThickness" Value="0" />
 		</Style>
 		<Style Selector="Border.row-card:pointerover Button.ws-action">
+			<Setter Property="Opacity" Value="1" />
+			<Setter Property="IsHitTestVisible" Value="True" />
+		</Style>
+
+		<!--  the Projects header's + behaves the same: hidden until the header is hovered  -->
+		<Style Selector="Grid.projects-header Button.ws-action">
+			<Setter Property="Opacity" Value="0" />
+			<Setter Property="IsHitTestVisible" Value="False" />
+			<Setter Property="Background" Value="Transparent" />
+			<Setter Property="BorderThickness" Value="0" />
+		</Style>
+		<Style Selector="Grid.projects-header:pointerover Button.ws-action">
 			<Setter Property="Opacity" Value="1" />
 			<Setter Property="IsHitTestVisible" Value="True" />
 		</Style>
@@ -112,13 +138,28 @@
 			<Setter Property="CornerRadius" Value="8" />
 			<Setter Property="MinHeight" Value="30" />
 		</Style>
+
+		<!--  sidebar resize handle: invisible until hovered  -->
+		<Style Selector="GridSplitter">
+			<Setter Property="Background" Value="Transparent" />
+		</Style>
+		<Style Selector="GridSplitter:pointerover">
+			<Setter Property="Background" Value="{DynamicResource HoverBrush}" />
+		</Style>
 	</suki:SukiWindow.Styles>
 
-	<Grid ColumnDefinitions="250,*">
+	<Grid x:Name="LayoutRoot">
+		<Grid.ColumnDefinitions>
+			<ColumnDefinition Width="250" />
+			<ColumnDefinition Width="4" />
+			<ColumnDefinition Width="*" />
+		</Grid.ColumnDefinitions>
 
 		<!--  Sidebar: workspaces + their chats  -->
 		<Border
 			Grid.Column="0"
+			MinWidth="180"
+			MaxWidth="480"
 			Margin="10,10,0,10"
 			CornerRadius="12"
 			Background="{DynamicResource SurfaceBrush}"
@@ -126,7 +167,7 @@
 				<Grid RowDefinitions="*">
 					<ScrollViewer HorizontalScrollBarVisibility="Disabled">
 						<StackPanel Spacing="10">
-							<Grid ColumnDefinitions="*,Auto" ColumnSpacing="4">
+							<Grid ColumnDefinitions="*,Auto" ColumnSpacing="4" Classes="projects-header">
 								<TextBlock
 									Text="Projects"
 									FontSize="12"
@@ -135,7 +176,7 @@
 									VerticalAlignment="Center" />
 								<Button
 									Grid.Column="1"
-									Classes="icon"
+									Classes="icon ws-action"
 									Click="OnAddWorkspaceClicked"
 									ToolTip.Tip="Add workspace folder">
 									<PathIcon Data="{StaticResource IconPlus}" Width="13" Height="13" />
@@ -146,12 +187,10 @@
 									<DataTemplate>
 										<StackPanel Margin="0,1">
 											<Grid ColumnDefinitions="Auto,*">
-												<!--  folder marker: same accent as the selection highlight  -->
+												<!--  selection indicator: accent bar on the selected workspace only  -->
 												<Border
-													Width="3"
-													Margin="0,4,7,4"
-													CornerRadius="2"
-													Background="{DynamicResource AccentBrush}" />
+													Classes="ws-marker"
+													Classes.selected="{Binding IsSelected}" />
 												<Border
 													Grid.Column="1"
 													Classes="row-card"
@@ -295,81 +334,20 @@
 				</Grid>
 			</Border>
 
-		<Grid Grid.Column="1" Margin="10,10,10,10">
-			<Grid RowDefinitions="Auto,*">
+		<!--  drag to resize the sidebar  -->
+		<GridSplitter
+			Grid.Column="1"
+			Background="Transparent"
+			ResizeBehavior="PreviousAndNext"
+			ResizeDirection="Columns"
+			HorizontalAlignment="Stretch"
+			VerticalAlignment="Stretch" />
 
-					<!--  Header: connection row + workspace row  -->
-					<StackPanel Grid.Row="0" Spacing="8">
-						<Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
-							<StackPanel
-								Grid.Column="0"
-								Orientation="Horizontal"
-								Spacing="6"
-								HorizontalAlignment="Left"
-								VerticalAlignment="Center"
-								IsVisible="{Binding AnyBusy}">
-								<Ellipse Classes="pulse" />
-								<Ellipse Classes="pulse d2" />
-								<Ellipse Classes="pulse d3" />
-								<TextBlock
-									Text="{Binding WorkingLabel}"
-									FontSize="12"
-									Foreground="{DynamicResource AccentBrush}"
-									VerticalAlignment="Center" />
-							</StackPanel>
-						</Grid>
-						<Grid ColumnDefinitions="*,Auto,Auto" ColumnSpacing="8">
-							<Border
-								Grid.Column="1"
-								Classes="pill"
-								IsVisible="{Binding FocusedTile.HasContext}"
-								VerticalAlignment="Center"
-								ToolTip.Tip="Context usage of the focused chat's last assistant turn">
-								<TextBlock Text="{Binding FocusedTile.ContextText}" FontSize="11" VerticalAlignment="Center" />
-							</Border>
-							<Button
-								Grid.Column="2"
-								Classes="btn-soft"
-								IsVisible="{Binding FocusedTile.HasChanges}"
-								ToolTip.Tip="Files the focused chat touched — click a row for its diff">
-								<Button.Flyout>
-									<Flyout Placement="BottomEdgeAlignedLeft">
-										<Border MaxWidth="620" MaxHeight="420">
-											<ScrollViewer HorizontalScrollBarVisibility="Disabled">
-												<ItemsControl ItemsSource="{Binding FocusedTile.Changes}" Margin="4">
-													<ItemsControl.ItemTemplate>
-														<DataTemplate>
-															<Expander Classes="disclose" Margin="0,2" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch">
-																<Expander.Header>
-																	<Grid ColumnDefinitions="*,Auto,Auto,Auto" ColumnSpacing="10" Margin="0,2">
-																		<TextBlock Text="{Binding Name}" TextTrimming="CharacterEllipsis" MaxWidth="300" VerticalAlignment="Center" ToolTip.Tip="{Binding FilePath}" />
-																		<TextBlock Grid.Column="1" Text="+" FontSize="11" Opacity="0.5" VerticalAlignment="Center" />
-																		<TextBlock Grid.Column="2" Text="{Binding Additions}" Foreground="{DynamicResource AddBrush}" FontSize="11" VerticalAlignment="Center" />
-																		<TextBlock Grid.Column="3" Text="{Binding Deletions}" Foreground="{DynamicResource DelBrush}" FontSize="11" VerticalAlignment="Center" />
-																	</Grid>
-																</Expander.Header>
-																<Border
-																	Background="{DynamicResource DiffBgBrush}"
-																	CornerRadius="8"
-																	Padding="9,7"
-																	HorizontalAlignment="Stretch">
-																	<c:DiffTextBlock Text="{Binding Patch}" />
-																</Border>
-															</Expander>
-														</DataTemplate>
-													</ItemsControl.ItemTemplate>
-												</ItemsControl>
-											</ScrollViewer>
-										</Border>
-									</Flyout>
-								</Button.Flyout>
-									<TextBlock Text="Changes" VerticalAlignment="Center" />
-							</Button>
-						</Grid>
-					</StackPanel>
+		<Grid Grid.Column="2" Margin="10,10,10,10">
+				<Grid RowDefinitions="*">
 
 					<!--  Tile grid: every open chat is one tile  -->
-					<Grid Grid.Row="1" Margin="0,8,0,0">
+					<Grid Margin="0,8,0,0">
 						<ItemsControl ItemsSource="{Binding OpenTiles}">
 							<ItemsControl.ItemsPanel>
 								<ItemsPanelTemplate>
@@ -385,7 +363,7 @@
 						<StackPanel
 							HorizontalAlignment="Center"
 							VerticalAlignment="Center"
-							IsVisible="{Binding HasNoTiles}">
+							IsVisible="{Binding !HasTiles}">
 							<TextBlock
 								Classes="sidebar-hint"
 								IsVisible="{Binding HasNoWorkspace}"
@@ -394,130 +372,163 @@
 								Classes="sidebar-hint"
 								IsVisible="{Binding HasIdleWorkspace}"
 								Text="Start the server to load your chats." />
+							<TextBlock
+								Classes="sidebar-hint"
+								IsVisible="{Binding HasRunningWorkspace}"
+								Text="Open a chat from the sidebar, or start a new one with the + next to a workspace." />
 						</StackPanel>
 
-						<!--  Tasks + background agents float over the grid's top-right corner  -->
-						<StackPanel
+						<!--  Tasks + agents flyout, pinned to the grid's top-right corner  -->
+						<Button
 							HorizontalAlignment="Right"
 							VerticalAlignment="Top"
-							Spacing="8"
-							IsVisible="{Binding HasSidePanel}">
-							<Border
-								HorizontalAlignment="Right"
-								Width="264"
-								CornerRadius="12"
-								Background="{DynamicResource SurfaceBrush}"
-								BorderBrush="{DynamicResource HairlineBrush}"
-								BorderThickness="1"
-								Padding="10"
-								IsVisible="{Binding FocusedTile.HasTasks}">
-								<ScrollViewer MaxHeight="420" HorizontalScrollBarVisibility="Disabled">
-									<StackPanel Spacing="2">
-										<TextBlock Text="Tasks" FontWeight="SemiBold" FontSize="13" Margin="2,0,0,4" />
-										<ItemsControl ItemsSource="{Binding FocusedTile.Tasks}">
-											<ItemsControl.ItemTemplate>
-												<DataTemplate>
-													<StackPanel Orientation="Horizontal" Spacing="8" Margin="2,3">
-														<PathIcon
-															Data="{StaticResource IconCircle}"
-															Width="12"
-															Height="12"
-															Foreground="{DynamicResource TextMutedBrush}"
-															VerticalAlignment="Top"
-															Margin="0,3,0,0"
-															IsVisible="{Binding Pending}" />
-														<PathIcon
-															Data="{StaticResource IconPlay}"
-															Width="11"
-															Height="11"
-															Foreground="{DynamicResource AccentBrush}"
-															VerticalAlignment="Top"
-															Margin="0,3,0,0"
-															IsVisible="{Binding InProgress}" />
-														<PathIcon
-															Data="{StaticResource IconCheck}"
-															Width="12"
-															Height="12"
-															Foreground="{DynamicResource SuccessBrush}"
-															VerticalAlignment="Top"
-															Margin="0,3,0,0"
-															IsVisible="{Binding Completed}" />
-														<PathIcon
-															Data="{StaticResource IconDash}"
-															Width="12"
-															Height="12"
-															Foreground="{DynamicResource TextMutedBrush}"
-															VerticalAlignment="Top"
-															Margin="0,3,0,0"
-															IsVisible="{Binding Cancelled}" />
-														<TextBlock Text="{Binding Content}" TextWrapping="Wrap" FontSize="12.5" Classes.task-done="{Binding Done}" />
-													</StackPanel>
-												</DataTemplate>
-											</ItemsControl.ItemTemplate>
-										</ItemsControl>
-									</StackPanel>
-								</ScrollViewer>
-							</Border>
-							<Border
-								HorizontalAlignment="Right"
-								Width="264"
-								CornerRadius="12"
-								Background="{DynamicResource SurfaceBrush}"
-								BorderBrush="{DynamicResource HairlineBrush}"
-								BorderThickness="1"
-								Padding="10"
-								IsVisible="{Binding HasBackgroundAgents}">
-								<StackPanel Spacing="2">
-									<TextBlock Text="Background agents" FontWeight="SemiBold" FontSize="13" Margin="2,0,0,4" />
-									<ItemsControl ItemsSource="{Binding RunningAgents}">
-										<ItemsControl.ItemTemplate>
-											<DataTemplate>
-												<StackPanel
-													Orientation="Horizontal"
-													Spacing="7"
-													Margin="2,3"
-													IsVisible="{Binding IsBackground}">
-													<Ellipse Classes="pulse" VerticalAlignment="Center" />
-													<PathIcon
-														Data="{StaticResource IconWarn}"
-														Width="13"
-														Height="13"
-														Foreground="{DynamicResource WarnBrush}"
-														VerticalAlignment="Center"
-														IsVisible="{Binding NeedsAttention}"
-														ToolTip.Tip="Waiting for a permission answer" />
-													<StackPanel
-														VerticalAlignment="Center"
-														Background="Transparent"
-														Cursor="Hand"
-														Tapped="OnRunningClick"
-														ToolTip.Tip="Open this chat">
-														<TextBlock
-															Text="{Binding Title}"
-															TextTrimming="CharacterEllipsis"
-															MaxWidth="180"
-															FontSize="12.5" />
-														<TextBlock
-															Text="{Binding Workspace}"
-															FontSize="10"
-															Opacity="0.5"
-															IsVisible="{Binding $parent[ItemsControl].DataContext.MultipleWorkspaces}" />
-													</StackPanel>
-													<Button
-														Classes="icon"
-														Command="{Binding $parent[ItemsControl].DataContext.StopRunningCommand}"
-														CommandParameter="{Binding SessionId}"
-														VerticalAlignment="Center"
-														ToolTip.Tip="Stop this agent">
-														<PathIcon Data="{StaticResource IconStop}" Width="11" Height="11" />
-													</Button>
+							Margin="0,2,2,0"
+							Classes="btn-soft"
+							IsVisible="{Binding HasSidePanel}"
+							ToolTip.Tip="Tasks and running agents of this grid">
+							<Button.Flyout>
+								<Flyout Placement="BottomEdgeAlignedRight">
+									<StackPanel MinWidth="300" MaxWidth="440" Spacing="10">
+										<Border
+											CornerRadius="12"
+											Background="{DynamicResource SurfaceBrush}"
+											BorderBrush="{DynamicResource HairlineBrush}"
+											BorderThickness="1"
+											Padding="10"
+											IsVisible="{Binding HasFocusedTasks}">
+											<ScrollViewer MaxHeight="380" HorizontalScrollBarVisibility="Disabled">
+												<StackPanel Spacing="2">
+													<TextBlock Text="Tasks" FontWeight="SemiBold" FontSize="13" Margin="2,0,0,4" />
+													<ItemsControl ItemsSource="{Binding FocusedTile.Tasks}">
+														<ItemsControl.ItemTemplate>
+															<DataTemplate>
+																<StackPanel Orientation="Horizontal" Spacing="8" Margin="2,3">
+																	<PathIcon
+																		Data="{StaticResource IconCircle}"
+																		Width="12"
+																		Height="12"
+																		Foreground="{DynamicResource TextMutedBrush}"
+																		VerticalAlignment="Top"
+																		Margin="0,3,0,0"
+																		IsVisible="{Binding Pending}" />
+																	<PathIcon
+																		Data="{StaticResource IconPlay}"
+																		Width="11"
+																		Height="11"
+																		Foreground="{DynamicResource AccentBrush}"
+																		VerticalAlignment="Top"
+																		Margin="0,3,0,0"
+																		IsVisible="{Binding InProgress}" />
+																	<PathIcon
+																		Data="{StaticResource IconCheck}"
+																		Width="12"
+																		Height="12"
+																		Foreground="{DynamicResource SuccessBrush}"
+																		VerticalAlignment="Top"
+																		Margin="0,3,0,0"
+																		IsVisible="{Binding Completed}" />
+																	<PathIcon
+																		Data="{StaticResource IconDash}"
+																		Width="12"
+																		Height="12"
+																		Foreground="{DynamicResource TextMutedBrush}"
+																		VerticalAlignment="Top"
+																		Margin="0,3,0,0"
+																		IsVisible="{Binding Cancelled}" />
+																	<TextBlock Text="{Binding Content}" TextWrapping="Wrap" FontSize="12.5" Classes.task-done="{Binding Done}" />
+																</StackPanel>
+															</DataTemplate>
+														</ItemsControl.ItemTemplate>
+													</ItemsControl>
 												</StackPanel>
-											</DataTemplate>
-										</ItemsControl.ItemTemplate>
-									</ItemsControl>
-								</StackPanel>
-							</Border>
-						</StackPanel>
+											</ScrollViewer>
+										</Border>
+										<Border
+											CornerRadius="12"
+											Background="{DynamicResource SurfaceBrush}"
+											BorderBrush="{DynamicResource HairlineBrush}"
+											BorderThickness="1"
+											Padding="10"
+											IsVisible="{Binding HasBackgroundAgents}">
+											<StackPanel Spacing="2">
+												<TextBlock Text="Background agents" FontWeight="SemiBold" FontSize="13" Margin="2,0,0,4" />
+												<ItemsControl ItemsSource="{Binding RunningAgents}">
+													<ItemsControl.ItemTemplate>
+														<DataTemplate>
+															<StackPanel
+																Orientation="Horizontal"
+																Spacing="7"
+																Margin="2,3"
+																IsVisible="{Binding IsBackground}">
+																<Ellipse
+																	Width="5"
+																	Height="5"
+																	Fill="{DynamicResource AccentBrush}"
+																	VerticalAlignment="Center" />
+																<PathIcon
+																	Data="{StaticResource IconPlay}"
+																	Width="9"
+																	Height="9"
+																	Foreground="{DynamicResource AccentBrush}"
+																	VerticalAlignment="Center"
+																	IsVisible="{Binding IsSubagent}"
+																	ToolTip.Tip="Subagent run — click to open the chat that spawned it" />
+																<PathIcon
+																	Data="{StaticResource IconWarn}"
+																	Width="13"
+																	Height="13"
+																	Foreground="{DynamicResource WarnBrush}"
+																	VerticalAlignment="Center"
+																	IsVisible="{Binding NeedsAttention}"
+																	ToolTip.Tip="Waiting for a permission answer" />
+																<StackPanel
+																	VerticalAlignment="Center"
+																	Background="Transparent"
+																	Cursor="Hand"
+																	Tapped="OnRunningClick"
+																	ToolTip.Tip="Open this chat">
+																	<TextBlock
+																		Text="{Binding Title}"
+																		TextTrimming="CharacterEllipsis"
+																		MaxWidth="220"
+																		FontSize="12.5" />
+																	<TextBlock
+																		Text="{Binding Workspace}"
+																		FontSize="10"
+																		Opacity="0.5"
+																		IsVisible="{Binding $parent[ItemsControl].DataContext.MultipleWorkspaces}" />
+																</StackPanel>
+																<Button
+																	Classes="icon"
+																	Command="{Binding $parent[ItemsControl].DataContext.StopRunningCommand}"
+																	CommandParameter="{Binding SessionId}"
+																	VerticalAlignment="Center"
+																	ToolTip.Tip="Stop this agent">
+																	<PathIcon Data="{StaticResource IconStop}" Width="11" Height="11" />
+																</Button>
+															</StackPanel>
+														</DataTemplate>
+													</ItemsControl.ItemTemplate>
+												</ItemsControl>
+											</StackPanel>
+										</Border>
+									</StackPanel>
+								</Flyout>
+							</Button.Flyout>
+							<StackPanel Orientation="Horizontal" Spacing="7">
+								<PathIcon
+									Data="{StaticResource IconWarn}"
+									Width="11"
+									Height="11"
+									Foreground="{DynamicResource WarnBrush}"
+									VerticalAlignment="Center"
+									IsVisible="{Binding HasAttentionNeeded}"
+									ToolTip.Tip="An agent is waiting for a permission answer" />
+								<TextBlock Text="Tasks" VerticalAlignment="Center" IsVisible="{Binding HasFocusedTasks}" />
+								<TextBlock Text="·" VerticalAlignment="Center" IsVisible="{Binding HasTasksAndAgents}" />
+								<TextBlock Text="Agents" VerticalAlignment="Center" IsVisible="{Binding HasBackgroundAgents}" />
+							</StackPanel>
+						</Button>
 
 						<!--  Settings page: covers the tile grid while open  -->
 						<Border

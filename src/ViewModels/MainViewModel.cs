@@ -1,4 +1,5 @@
 using System.Collections.ObjectModel;
+using System.Collections.Specialized;
 using System.Diagnostics;
 using System.IO;
 using System.Text;
@@ -26,11 +27,10 @@ public partial class MainViewModel : ObservableObject
     private readonly Dictionary<string, string> _titleBySession = new();
     private readonly Dictionary<string, List<PermissionItem>> _pendingBySession = new();
     private readonly Dictionary<string, ChatTileViewModel> _tileBySession = new();
+    // when the running turn's prompt was sent; drives the done-in note on completion
+    private readonly Dictionary<string, DateTime> _turnStartBySession = new();
     private readonly List<QueueEntry> _queue = [];
     private int _workspaceGeneration;
-    // OpenSessions captured when a workspace is selected; the draft tile a stopped
-    // workspace spawns would otherwise persist an empty grid over the saved list
-    private List<string> _restoreTiles = [];
     private Task? _switchTask;
     private readonly HashSet<string> _runningBySession = new();
     private Dictionary<string, List<string>> _variantsByModel = new();
@@ -45,6 +45,14 @@ public partial class MainViewModel : ObservableObject
 
     private sealed record QueueEntry(string SessionId, string Text, List<FileAttachment> Attachments, QueuedMessageItem Item);
 
+    /// <summary>A subagent (child) session seen on the event stream: the chat that spawned it and which agent runs there.</summary>
+    private sealed record SubagentInfo(string ParentSessionId, string Agent);
+
+    private readonly Dictionary<string, SubagentInfo> _subagentBySession = new();
+    private readonly HashSet<string> _runningSubagents = new();
+
+    /// <summary>The grid is shared: it holds open chats of every workspace and selecting
+    /// a workspace never clears it.</summary>
     public ObservableCollection<ChatTileViewModel> OpenTiles { get; } = [];
     public ObservableCollection<WorkspaceItem> Workspaces { get; } = [];
     public ObservableCollection<SessionItem> Sessions { get; } = [];
@@ -57,12 +65,16 @@ public partial class MainViewModel : ObservableObject
     public bool HasTiles => OpenTiles.Count > 0;
     public bool HasNoWorkspace => Workspaces.Count == 0;
     public bool HasIdleWorkspace => Workspaces.Count > 0 && !IsServerRunning;
+    public bool HasRunningWorkspace => Workspaces.Count > 0 && IsServerRunning;
     public bool CanStartSelected => SelectedWorkspace is not null && !IsServerRunning;
     public bool CanStopSelected => IsServerRunning;
     public bool MultipleWorkspaces => Workspaces.Count > 1;
     public bool HasAgents => Agents.Count > 1;
     public bool HasBackgroundAgents => RunningAgents.Any(r => r.IsBackground);
     public bool HasSidePanel => HasBackgroundAgents || (FocusedTile?.HasTasks ?? false);
+    public bool HasFocusedTasks => FocusedTile?.HasTasks ?? false;
+    public bool HasTasksAndAgents => HasBackgroundAgents && HasFocusedTasks;
+    public bool HasAttentionNeeded => RunningAgents.Any(r => r.NeedsAttention);
 
     public bool AnyBusy => _runningBySession.Count > 0;
     public string WorkingLabel => AnyBusy ? $"{_runningBySession.Count} working" : "working";
@@ -89,6 +101,18 @@ public partial class MainViewModel : ObservableObject
     internal string SeedVariant => _settings.DefaultVariant ?? DefaultVariantEntry;
     internal string SeedAgent => _state.Agent ?? _settings.DefaultAgent ?? DefaultAgentEntry;
 
+    public double? SidebarWidth => _state.SidebarWidth;
+
+    /// <summary>Persists the dragged sidebar width; clamped to the same bounds as the view.</summary>
+    public void SetSidebarWidth(double width)
+    {
+        width = Math.Clamp(width, 180, 480);
+        if (Math.Abs(_state.SidebarWidth.GetValueOrDefault(250) - width) < 1)
+            return;
+        _state.SidebarWidth = width;
+        _state.Save();
+    }
+
     /// <summary>Edited in place by the settings page; Save persists and re-applies.</summary>
     public AppSettings Settings => _settings;
 
@@ -107,17 +131,38 @@ public partial class MainViewModel : ObservableObject
         _contextLimitByModel.TryGetValue(model, out limit);
 
     private ChatTileViewModel? _focusedTile;
+    private INotifyCollectionChanged? _focusedTasksHook;
 
-    /// <summary>The tile that header actions (Changes, ctx pill) act on.</summary>
+    /// <summary>The tile that header actions act on; its tasks drive the corner flyout.</summary>
     public ChatTileViewModel? FocusedTile
     {
         get => _focusedTile;
         private set
         {
+            if (_focusedTasksHook is { } oldHook)
+            {
+                oldHook.CollectionChanged -= OnFocusedTasksChanged;
+                _focusedTasksHook = null;
+            }
             if (SetProperty(ref _focusedTile, value))
+            {
                 OnPropertyChanged(nameof(HasSidePanel));
+                OnPropertyChanged(nameof(HasTasksAndAgents));
+            }
+            if (_focusedTile is { } tile)
+            {
+                _focusedTasksHook = tile.Tasks;
+                tile.Tasks.CollectionChanged += OnFocusedTasksChanged;
+            }
             UpdateSidebarSelection();
         }
+    }
+
+    private void OnFocusedTasksChanged(object? sender, NotifyCollectionChangedEventArgs e)
+    {
+        // todos can land on an already-focused tile; the corner flyout gates on them
+        OnPropertyChanged(nameof(HasSidePanel));
+        OnPropertyChanged(nameof(HasTasksAndAgents));
     }
 
     [ObservableProperty] private WorkspaceItem? _selectedWorkspace;
@@ -154,6 +199,8 @@ public partial class MainViewModel : ObservableObject
         OnPropertyChanged(nameof(CanStartSelected));
         OnPropertyChanged(nameof(CanStopSelected));
         OnPropertyChanged(nameof(HasIdleWorkspace));
+        OnPropertyChanged(nameof(HasRunningWorkspace));
+        RefreshTileConnectivity();
     }
 
     partial void OnSelectedWorkspaceChanged(WorkspaceItem? value)
@@ -167,11 +214,12 @@ public partial class MainViewModel : ObservableObject
             Sessions.Clear();
             return;
         }
-        _switchTask = SwitchWorkspaceAsync(value);
+        _switchTask = SelectWorkspaceAsync(value);
     }
 
     /// <summary>Opens the clicked sidebar chat: focuses its tile when one exists, otherwise
-    /// switches to the chat's workspace and restores it there.</summary>
+    /// loads it from its own workspace's server — without switching the selected
+    /// workspace, so chats of different workspaces share one grid.</summary>
     public async Task SelectSessionAsync(SessionItem session)
     {
         if (session.Id == FocusedTile?.SessionId)
@@ -181,25 +229,13 @@ public partial class MainViewModel : ObservableObject
             FocusTile(existing);
             return;
         }
-        if (_workspaceBySession.TryGetValue(session.Id, out var path) &&
-            Workspaces.FirstOrDefault(w => w.FolderPath == path) is { } owner &&
-            !ReferenceEquals(owner, SelectedWorkspace))
+        if (!_workspaceBySession.TryGetValue(session.Id, out var path) ||
+            Workspaces.FirstOrDefault(w => w.FolderPath == path) is not { } owner)
         {
-            SelectedWorkspace = owner; // the change hook stores its switch task in _switchTask
-            if (_switchTask is { } task)
-            {
-                try
-                {
-                    await task;
-                }
-                catch
-                {
-                    // switch failures surface through notes elsewhere
-                }
-            }
+            SnapSelection();
+            return;
         }
-        var current = SelectedWorkspace?.Chats.FirstOrDefault(s => s.Id == session.Id) ?? session;
-        await OpenSessionAsync(current);
+        await OpenSessionIntoGridAsync(owner, session.Id);
     }
 
     public void SelectWorkspace(WorkspaceItem ws)
@@ -208,10 +244,20 @@ public partial class MainViewModel : ObservableObject
             SelectedWorkspace = ws; // the change hook stores its switch task in _switchTask
     }
 
+    /// <summary>Expanding a workspace's chat list shows intent to work in it: connect its
+    /// server so the chat list fills; an already-running workspace is left alone.</summary>
+    public void ConnectExpandedWorkspace(WorkspaceItem ws)
+    {
+        if (!IsServerUp(ws))
+            _ = StartWorkspaceCommand.ExecuteAsync(ws);
+    }
+
     private void OnSidePanelChanged()
     {
         OnPropertyChanged(nameof(HasBackgroundAgents));
         OnPropertyChanged(nameof(HasSidePanel));
+        OnPropertyChanged(nameof(HasTasksAndAgents));
+        OnPropertyChanged(nameof(HasAttentionNeeded));
     }
 
     public MainViewModel()
@@ -224,8 +270,10 @@ public partial class MainViewModel : ObservableObject
         SettingsPage.Saved += (_, _) => IsSettingsOpen = false;
         if (_state.Workspaces.Count == 0 && !string.IsNullOrWhiteSpace(_state.Folder))
             _state.Workspaces.Add(new WorkspaceState { Path = NormalizeDir(_state.Folder) });
+        // every launch starts with the workspace sections collapsed, whatever was saved
         foreach (var ws in _state.Workspaces)
         {
+            ws.Collapsed = true;
             var item = new WorkspaceItem(ws) { StateChanged = SaveState };
             Workspaces.Add(item);
             foreach (var sid in ws.Sessions)
@@ -237,6 +285,7 @@ public partial class MainViewModel : ObservableObject
         {
             OnPropertyChanged(nameof(HasNoWorkspace));
             OnPropertyChanged(nameof(HasIdleWorkspace));
+            OnPropertyChanged(nameof(HasRunningWorkspace));
             OnPropertyChanged(nameof(CanStartSelected));
             OnPropertyChanged(nameof(MultipleWorkspaces));
             UpdateSidebarSelection();
@@ -263,17 +312,22 @@ public partial class MainViewModel : ObservableObject
         _state.Save();
     }
 
-    /// <summary>Writes the selected workspace's tiled chats and focused session; only while its
-    /// data is actually loaded — a stopped workspace keeps its saved list untouched.</summary>
+    /// <summary>Writes every running workspace's tiled chats; a stopped workspace keeps
+    /// its saved list untouched.</summary>
     private void PersistTiles()
     {
-        if (SelectedWorkspace is not { } ws || !_runtimes.ContainsKey(ws.FolderPath))
-            return;
-        ws.State.OpenSessions = OpenTiles
-            .Where(t => t.SessionId is not null)
-            .Select(t => t.SessionId!)
-            .ToList();
-        ws.State.ActiveSession = FocusedTile?.SessionId;
+        foreach (var ws in Workspaces)
+        {
+            if (!_runtimes.ContainsKey(ws.FolderPath))
+                continue;
+            var ids = OpenTiles
+                .Where(t => t.SessionId is { } sid && _workspaceBySession.TryGetValue(sid, out var path) && path == ws.FolderPath)
+                .Select(t => t.SessionId!)
+                .ToList();
+            ws.State.OpenSessions = ids;
+            if (ReferenceEquals(ws, SelectedWorkspace))
+                ws.State.ActiveSession = FocusedTile?.SessionId is { } focus && ids.Contains(focus) ? focus : null;
+        }
     }
 
     internal void PersistComposer(ChatTileViewModel tile)
@@ -296,7 +350,38 @@ public partial class MainViewModel : ObservableObject
         SelectedWorkspace is { } ws && _runtimes.TryGetValue(ws.FolderPath, out var rt) ? rt.Api : null;
 
     private OpenCodeApiClient? ApiFor(string sessionId) =>
-        _workspaceBySession.TryGetValue(sessionId, out var path) && _runtimes.TryGetValue(path, out var rt) ? rt.Api : null;
+        EffectiveWorkspacePath(sessionId) is { } path && _runtimes.TryGetValue(path, out var rt) ? rt.Api : null;
+
+    /// <summary>A subagent session lives on the server of the chat that spawned it.</summary>
+    private string? EffectiveWorkspacePath(string sessionId) =>
+        _workspaceBySession.TryGetValue(sessionId, out var path) ? path
+        : _subagentBySession.TryGetValue(sessionId, out var sub) && _workspaceBySession.TryGetValue(sub.ParentSessionId, out var parentPath)
+            ? parentPath
+            : null;
+
+    private string WorkspaceFor(string sessionId) =>
+        EffectiveWorkspacePath(sessionId) is { } path && Workspaces.FirstOrDefault(w => w.FolderPath == path) is { } ws
+            ? ws.Name
+            : "";
+
+    private bool IsServerUp(WorkspaceItem ws) =>
+        _runtimes.TryGetValue(ws.FolderPath, out var rt) && rt.Server.IsRunning;
+
+    private void DropSubagentRows(string folderPath)
+    {
+        foreach (var childId in _runningSubagents
+                     .Where(id => EffectiveWorkspacePath(id) == folderPath)
+                     .ToList())
+            SetSubagentRunning(childId, false);
+    }
+
+    internal bool HasRuntime(string sessionId) => ApiFor(sessionId) is not null;
+
+    private void RefreshTileConnectivity()
+    {
+        foreach (var tile in OpenTiles)
+            tile.RefreshConnectivity();
+    }
 
     private bool IsAppSession(string sessionId) => _workspaceBySession.ContainsKey(sessionId);
 
@@ -308,12 +393,15 @@ public partial class MainViewModel : ObservableObject
     internal ChatTileViewModel? TileFor(string? sessionId) =>
         sessionId is { } id && _tileBySession.TryGetValue(id, out var tile) ? tile : null;
 
-    private ChatTileViewModel? TileFromData(JsonElement data)
+    private ChatTileViewModel? TileFromData(JsonElement data, WorkspaceItem ws)
     {
         if (ReadSessionId(data) is { } id)
             return TileFor(id);
-        // events without a session id belong to whatever is open
-        return FocusedTile;
+        // events without a session id belong to a tile of the same workspace
+        return FocusedTile is { } focused && focused.SessionId is { } sid &&
+               _workspaceBySession.TryGetValue(sid, out var path) && path == ws.FolderPath
+            ? focused
+            : null;
     }
 
     // ---- tile grid: open, close, focus ----
@@ -325,7 +413,9 @@ public partial class MainViewModel : ObservableObject
         if (FocusedTile is { } old)
             old.IsFocused = false;
         FocusedTile = tile;
-        if (SelectedWorkspace is { } ws)
+        // record the focused chat only on the workspace it belongs to
+        if (SelectedWorkspace is { } ws &&
+            (tile?.SessionId is not { } sid || (_workspaceBySession.TryGetValue(sid, out var owner) && owner == ws.FolderPath)))
             ws.State.ActiveSession = tile?.SessionId;
         if (tile is { } focused)
             focused.IsFocused = true;
@@ -353,13 +443,7 @@ public partial class MainViewModel : ObservableObject
             _tileBySession.Remove(id);
         if (!ReferenceEquals(FocusedTile, tile))
             return;
-        var next = OpenTiles.LastOrDefault();
-        if (next is null && SelectedWorkspace is not null)
-        {
-            next = new ChatTileViewModel(this);
-            OpenTiles.Add(next);
-        }
-        FocusTile(next);
+        FocusTile(OpenTiles.LastOrDefault());
     }
 
     private void DetachTile(string sessionId)
@@ -375,15 +459,6 @@ public partial class MainViewModel : ObservableObject
         OpenTiles.Clear();
         _tileBySession.Clear();
         FocusedTile = null;
-    }
-
-    private void AddDraftTile()
-    {
-        if (SelectedWorkspace is null)
-            return;
-        var tile = new ChatTileViewModel(this);
-        OpenTiles.Add(tile);
-        FocusTile(tile);
     }
 
     /// <summary>Drafts without content are dropped once real chats are restored.</summary>
@@ -425,7 +500,7 @@ public partial class MainViewModel : ObservableObject
             FocusTile(tile);
         }
         // a new chat is an explicit intent to talk: connect the server if it isn't up
-        if (!_runtimes.ContainsKey(SelectedWorkspace.FolderPath))
+        if (!IsServerUp(SelectedWorkspace))
             _ = StartWorkspaceCommand.ExecuteAsync(SelectedWorkspace);
     }
 
@@ -486,6 +561,7 @@ public partial class MainViewModel : ObservableObject
             rt.Server.Stop();
             _runtimes.Remove(ws.FolderPath);
         }
+        DropSubagentRows(ws.FolderPath);
         foreach (var sid in ws.State.Sessions)
             SetRunning(sid, false);
         DropQueue(ws.State.Sessions);
@@ -495,15 +571,24 @@ public partial class MainViewModel : ObservableObject
             _workspaceBySession.Remove(sid);
             _titleBySession.Remove(sid);
         }
+        // only this workspace's tiles leave the grid; other workspaces' stay
+        foreach (var tile in OpenTiles
+                     .Where(t => t.SessionId is { } sid && ws.State.Sessions.Contains(sid))
+                     .ToList())
+            DetachTile(tile);
         _state.Workspaces.Remove(ws.State);
         Workspaces.Remove(ws);
         if (wasSelected)
         {
-            ClearTiles();
-            Sessions.Clear();
-            IsServerRunning = false;
-            StatusText = "Server stopped";
+            // hand selection to the next workspace; null only when the last one is gone
+            SelectedWorkspace = Workspaces.FirstOrDefault();
+            if (SelectedWorkspace is null)
+            {
+                IsServerRunning = false;
+                StatusText = "Server stopped";
+            }
         }
+        RefreshTileConnectivity();
         SaveState();
     }
 
@@ -521,11 +606,15 @@ public partial class MainViewModel : ObservableObject
             var rt = new WorkspaceRuntime { Server = server, Api = new OpenCodeApiClient(server.BaseUrl) };
             _runtimes[ws.FolderPath] = rt;
             ws.IsRunning = true;
+            RefreshTileConnectivity();
             rt.Events = new CancellationTokenSource();
-            _ = PumpEventsAsync(rt.Api, rt.Events.Token, ws.Name);
+            _ = PumpEventsAsync(rt.Api, rt.Events.Token, ws);
+            var gen = ++_workspaceGeneration;
+            _ = LoadModelsAsync(rt, gen);
+            _ = LoadAgentsAsync(rt, gen);
             if (!ReferenceEquals(ws, SelectedWorkspace))
             {
-                // started from the context menu; the open workspace's tiles stay untouched
+                // started from the context menu; the grid keeps whatever is tiled
                 StatusText = $"Server ready — {ws.Name} ({server.BaseUrl})";
                 _ = PrimeWorkspaceTitlesAsync(ws, rt);
                 _ = LoadWorkspaceChatsAsync(ws, rt);
@@ -533,9 +622,9 @@ public partial class MainViewModel : ObservableObject
             }
             IsServerRunning = true;
             StatusText = (server.Spawned ? "Server ready — " : "Attached — ") + server.BaseUrl;
-            var wanted = _restoreTiles.Count > 0 ? _restoreTiles : ws.State.OpenSessions.ToList();
-            _restoreTiles = [];
-            await LoadWorkspaceDataAsync(ws, rt, wanted);
+            await RefreshSessionsAsync();
+            // restore this workspace's saved tiles; sessions already tiled are skipped
+            await RestoreOpenTilesAsync(ws, rt, gen, ws.State.OpenSessions.ToList());
         }
         catch (Exception ex)
         {
@@ -553,8 +642,10 @@ public partial class MainViewModel : ObservableObject
         var wasAttached = !rt.Server.Spawned;
         rt.Server.Stop();
         _runtimes.Remove(ws.FolderPath);
+        DropSubagentRows(ws.FolderPath);
         ws.IsRunning = false;
         ws.Chats.Clear();
+        RefreshTileConnectivity();
         var sessionIds = ws.State.Sessions.ToList();
         foreach (var sid in sessionIds)
             SetRunning(sid, false);
@@ -581,37 +672,33 @@ public partial class MainViewModel : ObservableObject
         _runtimes.Clear();
     }
 
-    private async Task SwitchWorkspaceAsync(WorkspaceItem ws)
+    /// <summary>Selecting a workspace retargets the sidebar, status line and new chats;
+    /// the grid keeps every open tile, so different workspaces share it. An empty grid
+    /// stays empty — chats open through the sidebar or the workspace's + button.</summary>
+    private async Task SelectWorkspaceAsync(WorkspaceItem ws)
     {
-        // captured before anything can persist an empty grid over the saved list
-        _restoreTiles = ws.State.OpenSessions.ToList();
-        var wanted = _restoreTiles;
-        ClearTiles();
         Sessions.Clear();
         if (!_runtimes.TryGetValue(ws.FolderPath, out var rt) || !rt.Server.IsRunning)
         {
             IsServerRunning = false;
             StatusText = $"Server stopped — {ws.Name}";
-            AddDraftTile();
             return;
         }
         IsServerRunning = true;
         StatusText = (rt.Server.Spawned ? "Server ready — " : "Attached — ") + rt.Server.BaseUrl;
-        await LoadWorkspaceDataAsync(ws, rt, wanted);
-    }
-
-    /// <summary>Models, agents and the tiled chats of a workspace whose server is already up.</summary>
-    private async Task LoadWorkspaceDataAsync(WorkspaceItem ws, WorkspaceRuntime rt, List<string> wanted)
-    {
         var gen = ++_workspaceGeneration;
         _ = LoadModelsAsync(rt, gen);
         _ = LoadAgentsAsync(rt, gen);
         await RefreshSessionsAsync();
-        await RestoreOpenTilesAsync(ws, rt, gen, wanted);
+        if (OpenTiles.Count == 0)
+            await RestoreOpenTilesAsync(ws, rt, gen, ws.State.OpenSessions.ToList());
     }
 
+    /// <summary>Refills the grid from a workspace's saved open chats; sessions already tiled
+    /// are skipped, and focus only moves when something was actually added.</summary>
     private async Task RestoreOpenTilesAsync(WorkspaceItem ws, WorkspaceRuntime rt, int gen, List<string> wanted)
     {
+        var added = 0;
         foreach (var id in wanted)
         {
             if (!Sessions.Any(s => s.Id == id) || _tileBySession.ContainsKey(id))
@@ -628,6 +715,7 @@ public partial class MainViewModel : ObservableObject
                 tile.Restore(messages);
                 FlushPendingPermissions(id);
                 ShowQueuedFor(tile);
+                added++;
             }
             catch (Exception ex)
             {
@@ -639,11 +727,8 @@ public partial class MainViewModel : ObservableObject
         if (gen != _workspaceGeneration || !ReferenceEquals(SelectedWorkspace, ws))
             return;
         PruneUntouchedDrafts();
-        if (OpenTiles.Count == 0)
-        {
-            AddDraftTile();
+        if (added == 0 || OpenTiles.Count == 0)
             return;
-        }
         var focus = ws.State.ActiveSession is { } active && TileFor(active) is { } activeTile
             ? activeTile
             : OpenTiles.Last();
@@ -653,34 +738,38 @@ public partial class MainViewModel : ObservableObject
     // ---- chats ----
 
     [RelayCommand]
-    private async Task OpenSessionAsync(SessionItem? session)
+    private Task OpenSessionAsync(SessionItem? session) =>
+        session is null ? Task.CompletedTask : SelectSessionAsync(session);
+
+    /// <summary>Loads a chat into a grid tile through its own workspace's server, starting
+    /// that server if needed; the selected workspace is left alone.</summary>
+    private async Task OpenSessionIntoGridAsync(WorkspaceItem ws, string sessionId)
     {
-        if (session is null)
-            return;
-        if (TileFor(session.Id) is { } existing)
+        if (!_runtimes.TryGetValue(ws.FolderPath, out var rt))
         {
-            FocusTile(existing);
-            return;
-        }
-        if (SelectedWorkspace is not { } ws || !_runtimes.TryGetValue(ws.FolderPath, out var rt))
-        {
-            SnapSelection();
-            return;
+            await StartWorkspaceCommand.ExecuteAsync(ws);
+            if (!_runtimes.TryGetValue(ws.FolderPath, out rt))
+                return; // start failed; its note is already on screen
         }
         try
         {
-            var messages = await rt.Api.GetMessagesAsync(session.Id, CancellationToken.None);
-            if (!ReferenceEquals(SelectedWorkspace, ws) || !_runtimes.TryGetValue(ws.FolderPath, out rt))
+            var messages = await rt.Api.GetMessagesAsync(sessionId, CancellationToken.None);
+            if (TileFor(sessionId) is { } existing)
+            {
+                FocusTile(existing);
                 return;
+            }
+            if (!_runtimes.ContainsKey(ws.FolderPath))
+                return; // workspace removed while loading
             var tile = new ChatTileViewModel(this);
-            tile.SetSession(session.Id, TitleFor(session.Id));
-            _tileBySession[session.Id] = tile;
+            tile.SetSession(sessionId, TitleFor(sessionId));
+            _tileBySession[sessionId] = tile;
             OpenTiles.Add(tile);
             tile.Restore(messages);
-            FlushPendingPermissions(session.Id);
+            FlushPendingPermissions(sessionId);
             ShowQueuedFor(tile);
-            ws.State.ActiveSession = session.Id;
-            FocusTile(tile);
+            ws.State.ActiveSession = sessionId;
+            FocusTile(tile); // also persists the open-tile lists
         }
         catch (Exception ex)
         {
@@ -689,36 +778,32 @@ public partial class MainViewModel : ObservableObject
         }
     }
 
-    /// <summary>Opens a chat from the running-agents panel, switching workspaces if needed.</summary>
+    /// <summary>Opens a chat from the running-agents panel straight into the grid; a
+    /// subagent row opens the chat that spawned it. The selected workspace stays put.</summary>
     public async Task OpenRunningAsync(RunningAgentItem running)
     {
-        if (!_workspaceBySession.TryGetValue(running.SessionId, out var path))
+        var target = running.ParentSessionId ?? running.SessionId;
+        if (!_workspaceBySession.TryGetValue(target, out var path) ||
+            Workspaces.FirstOrDefault(w => w.FolderPath == path) is not { } ws)
             return;
-        var ws = Workspaces.FirstOrDefault(w => w.FolderPath == path);
-        if (ws is null)
-            return;
-        if (!ReferenceEquals(SelectedWorkspace, ws))
-            SelectedWorkspace = ws; // the change hook stores its switch task in _switchTask
-        if (_switchTask is { } task)
-        {
-            try
-            {
-                await task;
-            }
-            catch
-            {
-                // switch failures surface through notes elsewhere
-            }
-        }
-        var session = Sessions.FirstOrDefault(s => s.Id == running.SessionId);
-        if (session is not null)
-            await OpenSessionAsync(session);
+        await OpenSessionIntoGridAsync(ws, target);
     }
 
     internal async Task SendFromTileAsync(ChatTileViewModel tile)
     {
         var text = tile.Input.Trim();
-        if ((text.Length == 0 && tile.Attachments.Count == 0) || !IsServerRunning || SelectedApi is null)
+        if (text.Length == 0 && tile.Attachments.Count == 0)
+            return;
+        // an existing chat talks to its own workspace's server; a draft to the selected one
+        if (tile.SessionId is { } id)
+        {
+            if (ApiFor(id) is null)
+            {
+                tile.AddNote("This chat's workspace server is stopped — start it to continue.", error: true);
+                return;
+            }
+        }
+        else if (!IsServerRunning || SelectedApi is null)
             return;
         RecordPrompt(text);
         tile.ResetPromptHistory();
@@ -727,7 +812,12 @@ public partial class MainViewModel : ObservableObject
         if (tile.IsBusy)
         {
             // park the message on this chat; it is sent when that chat goes idle
-            var item = new QueuedMessageItem(text, attachments.Count) { Remove = RemoveQueued };
+            var item = new QueuedMessageItem(text, attachments.Count)
+            {
+                Remove = RemoveQueued,
+                Steer = queued => _ = SteerQueuedAsync(tile, queued),
+                Edit = queued => EditQueued(tile, queued),
+            };
             _queue.Add(new QueueEntry(tile.SessionId!, text, attachments, item));
             tile.ChatItems.Add(item);
             return;
@@ -764,6 +854,7 @@ public partial class MainViewModel : ObservableObject
                     : new SystemNoteItem($"Attachment: {attachment.FileName}"));
         }
         SetRunning(sessionId, true);
+        _turnStartBySession[sessionId] = sentAt;
         AutoTitle(sessionId, api, text.Length > 0 ? text : attachments.FirstOrDefault()?.FileName ?? DraftTitle);
         var model = tile?.SelectedModel is { } m && m != DefaultModelEntry ? m : null;
         var variant = tile?.SelectedVariant is { } v && v != DefaultVariantEntry ? v : null;
@@ -779,6 +870,44 @@ public partial class MainViewModel : ObservableObject
                 PostNote(sessionId, $"Message failed: {ex.Message}", error: true);
             }
         });
+    }
+
+    /// <summary>Steer: jump the queue and interrupt the running turn so this prompt runs next.</summary>
+    private async Task SteerQueuedAsync(ChatTileViewModel tile, QueuedMessageItem item)
+    {
+        var index = _queue.FindIndex(e => ReferenceEquals(e.Item, item));
+        if (index < 0 || tile.SessionId is not { } sid)
+            return;
+        var entry = _queue[index];
+        if (!IsBusy(sid))
+        {
+            // nothing running anymore: dispatch it right away
+            _queue.RemoveAt(index);
+            tile.ChatItems.Remove(item);
+            SendCoreAsync(sid, entry.Text, entry.Attachments);
+            return;
+        }
+        // put it in front; the running turn's idle then sends this one first
+        if (index > 0)
+        {
+            _queue.RemoveAt(index);
+            _queue.Insert(0, entry);
+        }
+        await AbortTileAsync(tile);
+    }
+
+    /// <summary>Edit: pull a queued prompt back into the composer, dropping it from the queue.</summary>
+    private void EditQueued(ChatTileViewModel tile, QueuedMessageItem item)
+    {
+        var index = _queue.FindIndex(e => ReferenceEquals(e.Item, item));
+        if (index < 0)
+            return;
+        var entry = _queue[index];
+        _queue.RemoveAt(index);
+        tile.ChatItems.Remove(item);
+        tile.LoadIntoInput(entry.Text);
+        foreach (var attachment in entry.Attachments)
+            tile.AttachFile(attachment.FileName, attachment.Mime, attachment.Data);
     }
 
     private void RemoveQueued(QueuedMessageItem item)
@@ -812,8 +941,8 @@ public partial class MainViewModel : ObservableObject
     /// <summary>Sends the oldest queued message after that chat finishes its turn; called on session.idle.</summary>
     private void TryDrainQueue(string sessionId)
     {
-        if (ApiFor(sessionId) is null)
-            return;
+        if (ApiFor(sessionId) is null || IsBusy(sessionId))
+            return; // busy: a steered prompt already took over; the rest stay queued
         var entry = _queue.FirstOrDefault(e => e.SessionId == sessionId);
         if (entry is null)
             return;
@@ -846,10 +975,12 @@ public partial class MainViewModel : ObservableObject
         {
             await api.AbortAsync(sessionId, CancellationToken.None);
             SetRunning(sessionId, false);
+            SetSubagentRunning(sessionId, false);
         }
         catch (Exception ex)
         {
-            PostNote(sessionId, $"Abort failed: {ex.Message}", error: true);
+            PostNote(_subagentBySession.TryGetValue(sessionId, out var sub) ? sub.ParentSessionId : sessionId,
+                $"Abort failed: {ex.Message}", error: true);
         }
     }
 
@@ -989,6 +1120,7 @@ public partial class MainViewModel : ObservableObject
     private void ForgetSession(string id)
     {
         DetachTile(id);
+        _turnStartBySession.Remove(id);
         _workspaceBySession.Remove(id);
         foreach (var ws in _state.Workspaces)
             ws.Sessions.Remove(id);
@@ -1103,14 +1235,15 @@ public partial class MainViewModel : ObservableObject
         UpdateSidebarSelection();
     }
 
-    /// <summary>Sidebar highlight mirrors the selected workspace and the focused tile's chat.</summary>
+    /// <summary>Sidebar highlight mirrors the selected workspace and the focused tile's chat,
+    /// which may live in another workspace's section.</summary>
     private void UpdateSidebarSelection()
     {
         foreach (var ws in Workspaces)
         {
             ws.IsSelected = ReferenceEquals(ws, SelectedWorkspace);
             foreach (var chat in ws.Chats)
-                chat.IsSelected = ws.IsSelected && chat.Id == FocusedTile?.SessionId;
+                chat.IsSelected = chat.Id == FocusedTile?.SessionId;
         }
     }
 
@@ -1163,12 +1296,14 @@ public partial class MainViewModel : ObservableObject
                     return;
                 // clearing ItemsSource echo-writes each tile's Selected*=null; capture and restore per tile
                 var restore = OpenTiles.Select(t => (Tile: t, Model: t.SelectedModel, Variant: t.SelectedVariant)).ToList();
-                Models.Clear();
-                Models.Add(DefaultModelEntry);
-                _variantsByModel = models.ToDictionary(m => m.Key, m => m.Variants.ToList());
-                _contextLimitByModel = models.ToDictionary(m => m.Key, m => m.ContextLimit, StringComparer.OrdinalIgnoreCase);
+                // merge: every running server contributes; existing entries stay for its own tiles
                 foreach (var m in models)
-                    Models.Add(m.Key);
+                {
+                    _variantsByModel[m.Key] = m.Variants.ToList();
+                    _contextLimitByModel[m.Key] = m.ContextLimit;
+                    if (!Models.Contains(m.Key))
+                        Models.Add(m.Key);
+                }
                 foreach (var entry in restore)
                 {
                     entry.Tile.SelectedModel = entry.Model is { } saved && Models.Contains(saved) ? saved : DefaultModelEntry;
@@ -1193,10 +1328,9 @@ public partial class MainViewModel : ObservableObject
                 if (gen != _workspaceGeneration)
                     return;
                 var restore = OpenTiles.Select(t => (Tile: t, Agent: t.SelectedAgent)).ToList();
-                Agents.Clear();
-                Agents.Add(DefaultAgentEntry);
                 foreach (var agent in agents.Where(a => !a.Hidden && a.Mode is "primary" or "all"))
-                    Agents.Add(agent.Name);
+                    if (!Agents.Contains(agent.Name))
+                        Agents.Add(agent.Name);
                 foreach (var entry in restore)
                     entry.Tile.SelectedAgent = entry.Agent is { } saved && Agents.Contains(saved)
                         ? saved
@@ -1242,23 +1376,23 @@ public partial class MainViewModel : ObservableObject
 
     // ---- event stream ----
 
-    private async Task PumpEventsAsync(OpenCodeApiClient api, CancellationToken ct, string workspaceName)
+    private async Task PumpEventsAsync(OpenCodeApiClient api, CancellationToken ct, WorkspaceItem ws)
     {
         try
         {
             await foreach (var evt in api.StreamEventsAsync(ct))
-                HandleEvent(evt);
+                HandleEvent(evt, ws);
         }
         catch (OperationCanceledException)
         {
         }
         catch (Exception ex)
         {
-            PostNote($"[{workspaceName}] event stream ended: {ex.Message}", error: true);
+            PostNote($"[{ws.Name}] event stream ended: {ex.Message}", error: true);
         }
     }
 
-    private void HandleEvent(JsonElement evt)
+    private void HandleEvent(JsonElement evt, WorkspaceItem ws)
     {
         var type = evt.TryGetProperty("type", out var t) ? t.GetString() : null;
         var data = evt.TryGetProperty("properties", out var p) ? p : evt;
@@ -1267,11 +1401,22 @@ public partial class MainViewModel : ObservableObject
             case "server.connected":
                 PostNote("Connected to the opencode event stream.");
                 break;
+            case "session.created":
+            case "session.updated":
+                // child sessions carry parentID: a subagent run spawned by a chat
+                if (data.TryGetProperty("info", out var info))
+                {
+                    var trackedId = info.TryGetProperty("id", out var tracked) ? tracked.GetString() : null;
+                    var parentId = info.TryGetProperty("parentID", out var parent) ? parent.GetString() : null;
+                    var agent = info.TryGetProperty("agent", out var agentEl) ? agentEl.GetString() : null;
+                    Dispatcher.UIThread.Post(() => TrackSessionInfo(trackedId, parentId, agent));
+                }
+                break;
             case "message.updated":
-                Dispatcher.UIThread.Post(() => TileFromData(data)?.OnMessageUpdated(data));
+                Dispatcher.UIThread.Post(() => TileFromData(data, ws)?.OnMessageUpdated(data));
                 break;
             case "message.part.updated":
-                Dispatcher.UIThread.Post(() => TileFromData(data)?.OnPartUpdated(data));
+                Dispatcher.UIThread.Post(() => TileFromData(data, ws)?.OnPartUpdated(data));
                 break;
             case "permission.asked":
                 Dispatcher.UIThread.Post(() => OnPermissionAsked(data, v2: false));
@@ -1286,25 +1431,42 @@ public partial class MainViewModel : ObservableObject
             case "session.status":
                 var status = ReadStatus(data);
                 var statusSession = ReadSessionId(data);
-                Dispatcher.UIThread.Post(() => SetRunning(statusSession, status is "busy" or "retry"));
+                var busy = status is "busy" or "retry";
+                Dispatcher.UIThread.Post(() =>
+                {
+                    if (statusSession is { } sid && _subagentBySession.ContainsKey(sid))
+                        SetSubagentRunning(sid, busy);
+                    else
+                        SetRunning(statusSession, busy);
+                });
                 break;
             case "session.idle":
                 var idleSession = ReadSessionId(data);
                 Dispatcher.UIThread.Post(() =>
                 {
                     SetRunning(idleSession, false);
-                    if (idleSession is not { } sid)
-                        return;
-                    if (sid == FocusedTile?.SessionId)
-                        _ = RefreshSessionsAsync();
-                    TryDrainQueue(sid);
+                    if (idleSession is { } sid)
+                    {
+                        SetSubagentRunning(sid, false);
+                        NoteTurnDuration(sid);
+                        // refresh the chat list of the workspace the chat belongs to
+                        if (_workspaceBySession.TryGetValue(sid, out var idlePath) &&
+                            Workspaces.FirstOrDefault(w => w.FolderPath == idlePath) is { } owner)
+                        {
+                            if (ReferenceEquals(owner, SelectedWorkspace))
+                                _ = RefreshSessionsAsync();
+                            else if (_runtimes.TryGetValue(idlePath, out var ort))
+                                _ = LoadWorkspaceChatsAsync(owner, ort);
+                        }
+                        TryDrainQueue(sid);
+                    }
                 });
                 break;
             case "todo.updated":
-                Dispatcher.UIThread.Post(() => TileFromData(data)?.OnTodosUpdated(data));
+                Dispatcher.UIThread.Post(() => TileFromData(data, ws)?.OnTodosUpdated(data));
                 break;
             case "message.part.removed":
-                Dispatcher.UIThread.Post(() => TileFromData(data)?.OnPartRemoved(data));
+                Dispatcher.UIThread.Post(() => TileFromData(data, ws)?.OnPartRemoved(data));
                 break;
             case "session.error":
                 var message = ReadError(data);
@@ -1320,6 +1482,16 @@ public partial class MainViewModel : ObservableObject
         }
     }
 
+    /// <summary>Turn finished: drop a muted note telling how long the prompt took, send to final answer.</summary>
+    private void NoteTurnDuration(string sessionId)
+    {
+        if (!_turnStartBySession.Remove(sessionId, out var start))
+            return;
+        if (TileFor(sessionId) is not { } tile)
+            return;
+        tile.AddNote($"done in {ChatParsing.FormatDuration(DateTime.Now - start)}");
+    }
+
     private void SetRunning(string? sessionId, bool running)
     {
         if (string.IsNullOrEmpty(sessionId) || !IsAppSession(sessionId))
@@ -1332,11 +1504,7 @@ public partial class MainViewModel : ObservableObject
         {
             if (existing is null)
             {
-                var workspace = _workspaceBySession.TryGetValue(sessionId, out var path) &&
-                                Workspaces.FirstOrDefault(w => w.FolderPath == path) is { } wsItem
-                    ? wsItem.Name
-                    : "";
-                RunningAgents.Add(new RunningAgentItem(sessionId, workspace, TitleFor(sessionId))
+                RunningAgents.Add(new RunningAgentItem(sessionId, WorkspaceFor(sessionId), TitleFor(sessionId))
                 {
                     NeedsAttention = _pendingBySession.ContainsKey(sessionId),
                 });
@@ -1348,6 +1516,53 @@ public partial class MainViewModel : ObservableObject
         }
         RefreshBackgroundFlags();
         NotifyBusyChanged();
+    }
+
+    private void TrackSessionInfo(string? sessionId, string? parentId, string? agent)
+    {
+        if (sessionId is null)
+            return;
+        if (parentId is null || parentId == sessionId)
+        {
+            if (_subagentBySession.Remove(sessionId))
+                SetSubagentRunning(sessionId, false);
+            return;
+        }
+        _subagentBySession[sessionId] = new SubagentInfo(parentId, string.IsNullOrWhiteSpace(agent) ? "subagent" : agent);
+        // keep the label of an already-listed run fresh
+        if (_runningSubagents.Contains(sessionId) &&
+            RunningAgents.FirstOrDefault(r => r.SessionId == sessionId) is { } row)
+            row.Title = SubagentRowTitle(sessionId);
+    }
+
+    private string SubagentRowTitle(string childId) =>
+        _subagentBySession.TryGetValue(childId, out var info)
+            ? $"{info.Agent} → {TitleFor(info.ParentSessionId)}"
+            : TitleFor(childId);
+
+    /// <summary>Subagent runs surface in the running panel attributed to the chat that spawned them.</summary>
+    private void SetSubagentRunning(string childId, bool running)
+    {
+        if (!_subagentBySession.ContainsKey(childId))
+            return;
+        var changed = running ? _runningSubagents.Add(childId) : _runningSubagents.Remove(childId);
+        if (!changed)
+            return;
+        var existing = RunningAgents.FirstOrDefault(r => r.SessionId == childId);
+        if (running)
+        {
+            if (existing is null)
+                RunningAgents.Add(new RunningAgentItem(childId, WorkspaceFor(childId), SubagentRowTitle(childId))
+                {
+                    IsSubagent = true,
+                    ParentSessionId = _subagentBySession[childId].ParentSessionId,
+                });
+        }
+        else if (existing is not null)
+        {
+            RunningAgents.Remove(existing);
+        }
+        RefreshBackgroundFlags();
     }
 
     /// <summary>Background = running with no open tile: a closed chat that kept going, or another workspace's chat.</summary>
@@ -1410,16 +1625,18 @@ public partial class MainViewModel : ObservableObject
                 _ = RespondToPermission(item, "always", isAuto: true);
             return;
         }
+        // a subagent's ask belongs to the chat that spawned it
+        var owner = _subagentBySession.TryGetValue(sessionId, out var sub) ? sub.ParentSessionId : sessionId;
         // another chat's ask: answer it from its own workspace's server, or park it until its tile opens
-        if (!IsAppSession(sessionId))
+        if (!IsAppSession(owner))
             return;
         if (AutoAllow)
         {
             _ = RespondToPermission(item, "always", isAuto: true);
             return;
         }
-        if (!_pendingBySession.TryGetValue(sessionId, out var pending))
-            _pendingBySession[sessionId] = pending = [];
+        if (!_pendingBySession.TryGetValue(owner, out var pending))
+            _pendingBySession[owner] = pending = [];
         pending.Add(item);
         MarkAttention(sessionId, true);
     }
@@ -1436,9 +1653,12 @@ public partial class MainViewModel : ObservableObject
 
     private void MarkAttention(string sessionId, bool attention)
     {
-        var item = RunningAgents.FirstOrDefault(r => r.SessionId == sessionId);
+        // light the row itself, or the run that spawned it for subagent asks
+        var item = RunningAgents.FirstOrDefault(r => r.SessionId == sessionId)
+                ?? RunningAgents.FirstOrDefault(r => r.ParentSessionId == sessionId);
         if (item is not null)
             item.NeedsAttention = attention;
+        OnPropertyChanged(nameof(HasAttentionNeeded));
     }
 
     private void OnPermissionReplied(JsonElement data)
@@ -1545,26 +1765,28 @@ public partial class MainViewModel : ObservableObject
     public void Announce(string text, bool error = false) => AddNote(text, error);
 }
 
-/// <summary>One touched file in the Changes flyout; Patch is the unified diff when known.</summary>
-public sealed record FileChange(string FilePath, string? Patch, int Additions, int Deletions)
-{
-    public string Name => Path.GetFileName(FilePath);
-    public bool HasPatch => Patch is { Length: > 0 };
-}
-
-/// <summary>A chat whose turn is currently running, any workspace; the side panel lists only background ones.</summary>
+/// <summary>A chat whose turn is currently running, any workspace; the side panel lists only background ones.
+/// Subagent runs are listed too, attributed to the chat that spawned them.</summary>
 public sealed class RunningAgentItem(string sessionId, string workspace, string title) : ObservableObject
 {
     private string _title = title;
     private bool _needsAttention;
     private bool _isBackground;
+    private bool _isSubagent;
 
     public string SessionId { get; } = sessionId;
+
+    /// <summary>The chat that spawned this subagent run; null for a chat's own turn.</summary>
+    public string? ParentSessionId { get; init; }
+
     public string Workspace { get; } = workspace;
     public string Title { get => _title; set => SetProperty(ref _title, value); }
 
     /// <summary>True while no open tile shows this chat, so the side panel is its only surface.</summary>
     public bool IsBackground { get => _isBackground; set => SetProperty(ref _isBackground, value); }
+
+    /// <summary>A subagent (child session) run rather than a chat's own turn.</summary>
+    public bool IsSubagent { get => _isSubagent; set => SetProperty(ref _isSubagent, value); }
 
     /// <summary>A permission ask is waiting in this chat (auto-allow off).</summary>
     public bool NeedsAttention { get => _needsAttention; set => SetProperty(ref _needsAttention, value); }

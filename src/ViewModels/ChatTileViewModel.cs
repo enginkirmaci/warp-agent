@@ -23,7 +23,9 @@ public partial class ChatTileViewModel : ObservableObject
     private readonly Dictionary<string, ReasoningItem> _reasoningByPart = new();
     private readonly Dictionary<string, ImageItem> _imageByPart = new();
     private string? _lastUsedModel;
-    private long _contextTokens;
+    // token total of every assistant message; the ctx pill shows their sum,
+    // i.e. the conversation's total usage — not just the last turn's
+    private readonly Dictionary<string, long> _tokensByMessage = new();
     private int _contextLimit;
     private bool _isFocused;
     private string _title = MainViewModel.DraftTitle;
@@ -37,7 +39,6 @@ public partial class ChatTileViewModel : ObservableObject
         ChatItems.CollectionChanged += (_, _) => OnPropertyChanged(nameof(HasMessages));
         Attachments.CollectionChanged += (_, _) => OnPropertyChanged(nameof(HasAttachments));
         Variants.CollectionChanged += (_, _) => OnPropertyChanged(nameof(HasVariants));
-        Changes.CollectionChanged += (_, _) => OnPropertyChanged(nameof(HasChanges));
         Tasks.CollectionChanged += (_, _) => OnPropertyChanged(nameof(HasTasks));
     }
 
@@ -46,13 +47,11 @@ public partial class ChatTileViewModel : ObservableObject
     public ObservableCollection<object> ChatItems { get; } = [];
     public ObservableCollection<AttachmentItem> Attachments { get; } = [];
     public ObservableCollection<string> Variants { get; } = [];
-    public ObservableCollection<FileChange> Changes { get; } = [];
     public ObservableCollection<TaskItem> Tasks { get; } = [];
 
     public bool HasMessages => ChatItems.Count > 0;
     public bool HasAttachments => Attachments.Count > 0;
     public bool HasVariants => Variants.Count > 1;
-    public bool HasChanges => Changes.Count > 0;
     public bool HasTasks => Tasks.Count > 0;
 
     /// <summary>Null while the tile is an unsent draft; the session is created on first send.</summary>
@@ -81,9 +80,16 @@ public partial class ChatTileViewModel : ObservableObject
     {
         SessionId = id;
         Title = title;
+        RefreshConnectivity();
     }
 
     internal void SetTitle(string title) => Title = title;
+
+    /// <summary>Whether this tile can reach a server: an existing chat uses its own
+    /// workspace's server, a draft uses the selected workspace's one.</summary>
+    public bool IsConnected => SessionId is { } id ? _owner.HasRuntime(id) : _owner.IsServerRunning;
+
+    internal void RefreshConnectivity() => OnPropertyChanged(nameof(IsConnected));
 
     public void Focus() => _owner.FocusTile(this);
 
@@ -232,7 +238,7 @@ public partial class ChatTileViewModel : ObservableObject
         var total = ChatParsing.ReadTokenTotal(info);
         if (total > 0)
         {
-            _contextTokens = total;
+            _tokensByMessage[id] = total;
             UpdateContextText();
         }
     }
@@ -242,10 +248,17 @@ public partial class ChatTileViewModel : ObservableObject
 
     private void UpdateContextText()
     {
-        var used = ChatParsing.FormatTokens(_contextTokens);
+        if (_tokensByMessage.Count == 0)
+        {
+            ContextText = null;
+            return;
+        }
+        var total = 0L;
+        foreach (var value in _tokensByMessage.Values)
+            total += value;
         ContextText = _contextLimit > 0
-            ? $"Ctx {_contextTokens * 100 / _contextLimit}% · {used} / {ChatParsing.FormatTokens(_contextLimit)}"
-            : $"Ctx {used} tok";
+            ? $"Ctx {ChatParsing.FormatPercent(total * 100.0 / _contextLimit)}% · {ChatParsing.FormatTokens(total)} / {ChatParsing.FormatTokens(_contextLimit)}"
+            : $"Ctx {ChatParsing.FormatTokens(total)} tok";
     }
 
     internal void OnPartUpdated(JsonElement data)
@@ -336,7 +349,6 @@ public partial class ChatTileViewModel : ObservableObject
         if (removed is null)
             return;
         ChatItems.Remove(removed);
-        RefreshChanges();
     }
 
     internal void OnTodosUpdated(JsonElement data)
@@ -374,10 +386,7 @@ public partial class ChatTileViewModel : ObservableObject
                 }
                 var total = ChatParsing.ReadTokenTotal(msg.Info);
                 if (total > 0)
-                {
-                    _contextTokens = total;
-                    UpdateContextText();
-                }
+                    _tokensByMessage[msg.Id] = total;
             }
             var createdAt = ChatParsing.FromMs(msg.CreatedMs);
             foreach (var part in msg.Parts)
@@ -447,7 +456,7 @@ public partial class ChatTileViewModel : ObservableObject
         if (todos is not null)
             foreach (var t in todos)
                 Tasks.Add(t);
-        RefreshChanges();
+        UpdateContextText();
     }
 
     private void ApplyToolState(JsonElement state, ToolItem toolItem)
@@ -478,22 +487,6 @@ public partial class ChatTileViewModel : ObservableObject
             toolItem.Additions = fd.TryGetProperty("additions", out var add) && add.TryGetInt32(out var a) ? a : 0;
             toolItem.Deletions = fd.TryGetProperty("deletions", out var del) && del.TryGetInt32(out var d) ? d : 0;
         }
-        RefreshChanges();
-    }
-
-    /// <summary>Files touched by this transcript, last edit per path wins.</summary>
-    private void RefreshChanges()
-    {
-        var byFile = new Dictionary<string, FileChange>(StringComparer.OrdinalIgnoreCase);
-        foreach (var tool in ChatItems.OfType<ToolItem>())
-        {
-            if (tool.FilePath.Length == 0)
-                continue;
-            byFile[tool.FilePath] = new FileChange(tool.FilePath, tool.FileDiff, tool.Additions, tool.Deletions);
-        }
-        Changes.Clear();
-        foreach (var change in byFile.Values)
-            Changes.Add(change);
     }
 
     private DateTime? CreatedAtFor(string? messageId) =>
@@ -519,6 +512,15 @@ internal static class ChatParsing
 
     public static DateTime? FromMs(long ms) =>
         ms > 0 ? DateTimeOffset.FromUnixTimeMilliseconds(ms).ToLocalTime().DateTime : null;
+
+    /// <summary>Keeps one decimal below 10 so small fills don't round down to a bare 0%.</summary>
+    public static string FormatPercent(double value) =>
+        value >= 10 ? value.ToString("F0") : value.ToString("0.#");
+
+    public static string FormatDuration(TimeSpan elapsed) =>
+        elapsed.TotalSeconds < 1 ? $"{elapsed.TotalMilliseconds:F0} ms"
+        : elapsed.TotalSeconds < 60 ? $"{elapsed.TotalSeconds:F0}s"
+        : $"{(int)elapsed.TotalMinutes}m {elapsed.Seconds:00}s";
 
     public static long ReadTokenTotal(JsonElement info)
     {

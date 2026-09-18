@@ -17,7 +17,9 @@ public partial class ChatTile : UserControl
     private ScrollViewer? _chatScroll;
     private Button? _jumpLatest;
     private TextBox? _input;
-    private bool _atBottom = true;
+    // follow-the-latest intent, not a position: recomputing it from the scroll position
+    // while content grows is what killed autoscroll right after sending a prompt
+    private bool _pinned = true;
 
     public ChatTile()
     {
@@ -38,23 +40,26 @@ public partial class ChatTile : UserControl
 
     private void InitializeComponent() => AvaloniaXamlLoader.Load(this);
 
-    // ScrollChanged carries the post-layout extent, so pinning is decided entirely here:
-    // extent growth under a pinned view is streaming content arriving, never a scroll-up.
+    // ScrollChanged carries the post-layout extent, so pinning is decided entirely here.
+    // Content growth re-sticks while pinned; only genuine offset moves (user scrolling,
+    // no growth) may unpin — position alone can't decide, because right after a send
+    // the offset lags the already-grown extent in the same event.
     private void OnChatScrollChanged(object? sender, ScrollChangedEventArgs e)
     {
         if (_chatScroll is null || Vm is not { } vm)
             return;
-        if (Math.Abs(e.OffsetDelta.Y) > 0.5)
-        {
-            // real offset moves: user scrolling, or the re-stick below landing at the bottom
-            _atBottom = _chatScroll.Offset.Y + _chatScroll.Viewport.Height >= _chatScroll.Extent.Height - 1;
-        }
-        else if (_atBottom && e.ExtentDelta.Y > 0.5)
+        var userScrolledUp = e.OffsetDelta.Y < -0.5;
+        if (e.ExtentDelta.Y > 0.5 && _pinned && !userScrolledUp)
         {
             _chatScroll.ScrollToEnd();
         }
+        else if (e.ExtentDelta.Y <= 0.5 || userScrolledUp)
+        {
+            var atBottom = _chatScroll.Offset.Y + _chatScroll.Viewport.Height >= _chatScroll.Extent.Height - 1;
+            _pinned = atBottom;
+        }
         if (_jumpLatest is not null)
-            _jumpLatest.IsVisible = !_atBottom && vm.HasMessages;
+            _jumpLatest.IsVisible = !_pinned && vm.HasMessages;
     }
 
     private void OnJumpLatestClicked(object? sender, RoutedEventArgs e)
@@ -64,7 +69,7 @@ public partial class ChatTile : UserControl
 
     private void PinToLatest()
     {
-        _atBottom = true;
+        _pinned = true;
         _chatScroll?.ScrollToEnd();
         if (_jumpLatest is not null)
             _jumpLatest.IsVisible = false;

@@ -12,12 +12,20 @@ namespace WarpAgent.Views;
 
 public partial class MainWindow : SukiWindow
 {
+    private const double SidebarMinWidth = 180;
+    private const double SidebarMaxWidth = 480;
+
     private readonly MainViewModel _vm = new();
+    private Grid? _layoutRoot;
+    private ColumnDefinition? SidebarColumn => _layoutRoot?.ColumnDefinitions[0];
 
     public MainWindow()
     {
         InitializeComponent();
+        _layoutRoot = this.FindControl<Grid>("LayoutRoot");
         DataContext = _vm;
+        if (SidebarColumn is { } column && _vm.SidebarWidth is { } width)
+            column.Width = new GridLength(Math.Clamp(width, SidebarMinWidth, SidebarMaxWidth));
     }
 
     private void InitializeComponent() => AvaloniaXamlLoader.Load(this);
@@ -35,7 +43,11 @@ public partial class MainWindow : SukiWindow
         if ((sender as Control)?.DataContext is WorkspaceItem ws)
         {
             e.Handled = true;
-            ws.IsExpanded = !ws.IsExpanded;
+            var expanding = !ws.IsExpanded;
+            ws.IsExpanded = expanding;
+            // opening the chat list is intent to work in that workspace
+            if (expanding)
+                _vm.ConnectExpandedWorkspace(ws);
         }
     }
 
@@ -163,6 +175,8 @@ public partial class MainWindow : SukiWindow
 
     protected override void OnClosing(WindowClosingEventArgs e)
     {
+        if (SidebarColumn is { } column && column.Width.IsAbsolute)
+            _vm.SetSidebarWidth(column.Width.Value);
         _vm.Shutdown();
         base.OnClosing(e);
     }

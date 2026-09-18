@@ -12,16 +12,25 @@ public sealed class UserMessageItem(string text, DateTime? createdAt = null) : C
     public string TimeLabel => TimeLabels.Message(CreatedAt);
 }
 
-/// <summary>A message parked while a turn is still running; sent when the session goes idle.</summary>
+/// <summary>A message parked while a turn is still running; sent when the session goes idle.
+/// Rows offer steer (send next, interrupting the turn), edit (back to composer) and remove.</summary>
 public sealed partial class QueuedMessageItem(string text, int imageCount) : ChatItem
 {
     public string Text { get; } = text;
     public int ImageCount { get; } = imageCount;
     public bool HasImages => ImageCount > 0;
     public required Action<QueuedMessageItem> Remove { get; init; }
+    public required Action<QueuedMessageItem> Steer { get; init; }
+    public required Action<QueuedMessageItem> Edit { get; init; }
 
     [RelayCommand]
     private void RemoveSelf() => Remove(this);
+
+    [RelayCommand]
+    private void SteerSelf() => Steer(this);
+
+    [RelayCommand]
+    private void EditSelf() => Edit(this);
 }
 
 public sealed class AssistantTextItem(DateTime? createdAt = null) : ChatItem

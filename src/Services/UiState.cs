@@ -25,6 +25,9 @@ public sealed class UiState
     /// <summary>Null = never chosen; auto-allow defaults to on (always-allow) until explicitly unticked.</summary>
     public bool? AutoAllowAlways { get; set; }
 
+    /// <summary>Last dragged sidebar width in DIPs; null keeps the 250 default.</summary>
+    public double? SidebarWidth { get; set; }
+
     private static string FilePath => Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
         "opencode-agent",
@@ -68,6 +71,7 @@ public sealed class WorkspaceState
     /// <summary>Chats currently tiled in the grid, in reading order; restored when the workspace opens.</summary>
     public List<string> OpenSessions { get; set; } = new();
 
-    /// <summary>Sidebar folder collapsed state; the chat list hides while set.</summary>
+    /// <summary>Sidebar folder collapsed state; forced to collapsed on every launch —
+    /// sections start closed and expanding one connects its server.</summary>
     public bool Collapsed { get; set; }
 }

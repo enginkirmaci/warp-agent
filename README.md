@@ -27,6 +27,11 @@ execute: echo hello. You must really run it."* — bash/edit/webfetch are forced
   per-workspace (button acts on the selected workspace, or via the workspace context
   menu); switching workspaces never stops a running one, so background chats keep
   generating.
+- **Shared tile grid**: open chats of different workspaces sit side by side in the
+  grid; selecting a workspace never clears it. Clicking a chat opens it from its own
+  workspace's server (auto-started if stopped) next to the existing tiles, and each
+  tile sends through its own server. Per-workspace model/agent lists merge, so every
+  tile keeps its picker entries.
 - **Only chats created from this app appear** under a workspace; chats made elsewhere
   (CLI, other clients) in the same folder are never listed. *Remove from workspace*
   (chat context menu) unlinks a chat without deleting it server-side; *Delete* still

@@ -1,0 +1,692 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<UserControl
+	x:Class="WarpAgent.Views.ChatTile"
+	xmlns="https://github.com/avaloniaui"
+	xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+	xmlns:c="using:WarpAgent.Controls"
+	xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+	xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+	xmlns:m="using:WarpAgent.Models"
+	xmlns:vm="using:WarpAgent.ViewModels"
+	x:DataType="vm:ChatTileViewModel"
+	mc:Ignorable="d">
+
+	<UserControl.Styles>
+		<Style Selector="Border.tile-root">
+			<Setter Property="CornerRadius" Value="12" />
+			<Setter Property="Background" Value="{DynamicResource CardBrush}" />
+			<Setter Property="BorderThickness" Value="1" />
+			<Setter Property="BorderBrush" Value="{DynamicResource HairlineBrush}" />
+		</Style>
+		<Style Selector="Border.tile-root.focused">
+			<Setter Property="BorderBrush" Value="{DynamicResource AccentBrush}" />
+		</Style>
+
+		<Style Selector="TextBlock.note">
+			<Setter Property="Opacity" Value="0.55" />
+			<Setter Property="FontStyle" Value="Italic" />
+			<Setter Property="FontSize" Value="12" />
+			<Setter Property="HorizontalAlignment" Value="Center" />
+			<Setter Property="Margin" Value="0,3" />
+			<Setter Property="TextWrapping" Value="Wrap" />
+		</Style>
+		<Style Selector="TextBlock.note.error">
+			<Setter Property="Opacity" Value="1" />
+			<Setter Property="Foreground" Value="{DynamicResource DangerBrush}" />
+			<Setter Property="HorizontalAlignment" Value="Left" />
+			<Setter Property="FontFamily" Value="{StaticResource CodeFont}" />
+			<Setter Property="FontSize" Value="11.5" />
+			<Setter Property="Margin" Value="8,3" />
+		</Style>
+		<Style Selector="TextBlock.tool-error">
+			<Setter Property="Foreground" Value="{DynamicResource DangerBrush}" />
+			<Setter Property="FontSize" Value="11.5" />
+		</Style>
+		<Style Selector="TextBlock.mono-detail">
+			<Setter Property="FontFamily" Value="{StaticResource CodeFont}" />
+			<Setter Property="FontSize" Value="11.5" />
+			<Setter Property="TextWrapping" Value="Wrap" />
+			<Setter Property="Opacity" Value="0.75" />
+		</Style>
+		<Style Selector="TextBlock.msg-time">
+			<Setter Property="FontSize" Value="10.5" />
+			<Setter Property="Opacity" Value="0.55" />
+			<Setter Property="HorizontalAlignment" Value="Right" />
+			<Setter Property="VerticalAlignment" Value="Center" />
+		</Style>
+
+		<!--  hover-revealed copy on message bubbles — bare glyph, no button chrome  -->
+		<Style Selector="Button.msg-copy">
+			<Setter Property="Opacity" Value="0" />
+			<Setter Property="Background" Value="Transparent" />
+			<Setter Property="BorderThickness" Value="0" />
+			<Setter Property="Padding" Value="3" />
+			<Setter Property="MinHeight" Value="0" />
+			<Setter Property="MinWidth" Value="0" />
+			<Setter Property="HorizontalContentAlignment" Value="Center" />
+			<Setter Property="VerticalContentAlignment" Value="Center" />
+		</Style>
+		<Style Selector="Border.msg-surface:pointerover Button.msg-copy">
+			<Setter Property="Opacity" Value="1" />
+		</Style>
+
+		<!--  markdown code-block copy affordance  -->
+		<Style Selector="Button.code-copy">
+			<Setter Property="Opacity" Value="0" />
+			<Setter Property="Background" Value="Transparent" />
+			<Setter Property="Padding" Value="3" />
+		</Style>
+		<Style Selector="Border.code-block:pointerover Button.code-copy">
+			<Setter Property="Opacity" Value="1" />
+		</Style>
+
+		<!--  status dots  -->
+		<Style Selector="Ellipse.tool-dot">
+			<Setter Property="Width" Value="7" />
+			<Setter Property="Height" Value="7" />
+			<Setter Property="Fill" Value="{DynamicResource TextMutedBrush}" />
+			<Setter Property="VerticalAlignment" Value="Center" />
+		</Style>
+		<Style Selector="Ellipse.tool-dot.running">
+			<Setter Property="Fill" Value="{DynamicResource AccentBrush}" />
+			<Style.Animations>
+				<Animation Duration="0:0:1.1" IterationCount="Infinite">
+					<KeyFrame Cue="0%"><Setter Property="Opacity" Value="0.25" /></KeyFrame>
+					<KeyFrame Cue="35%"><Setter Property="Opacity" Value="1" /></KeyFrame>
+					<KeyFrame Cue="70%"><Setter Property="Opacity" Value="0.25" /></KeyFrame>
+				</Animation>
+			</Style.Animations>
+		</Style>
+		<Style Selector="Ellipse.tool-dot.completed">
+			<Setter Property="Fill" Value="{DynamicResource SuccessBrush}" />
+		</Style>
+		<Style Selector="Ellipse.tool-dot.error">
+			<Setter Property="Fill" Value="{DynamicResource DangerBrush}" />
+		</Style>
+
+		<!--  buttons  -->
+		<Style Selector="Button.btn-send">
+			<Setter Property="Width" Value="34" />
+			<Setter Property="Height" Value="34" />
+			<Setter Property="Padding" Value="0" />
+			<Setter Property="CornerRadius" Value="17" />
+			<Setter Property="Background" Value="{DynamicResource AccentBrush}" />
+			<Setter Property="Foreground" Value="#FF0E1116" />
+		</Style>
+		<Style Selector="Button.btn-stop">
+			<Setter Property="Width" Value="34" />
+			<Setter Property="Height" Value="34" />
+			<Setter Property="Padding" Value="0" />
+			<Setter Property="CornerRadius" Value="17" />
+			<Setter Property="Background" Value="{DynamicResource DangerDimBrush}" />
+			<Setter Property="Foreground" Value="{DynamicResource DangerBrush}" />
+		</Style>
+
+		<!--  flat composer pills (model / variant / agent) — bare text + chevron  -->
+		<Style Selector="Button.composer-pill">
+			<Setter Property="Background" Value="Transparent" />
+			<Setter Property="BorderThickness" Value="0" />
+			<Setter Property="Padding" Value="7,4" />
+			<Setter Property="CornerRadius" Value="8" />
+			<Setter Property="Foreground" Value="{DynamicResource TextMutedBrush}" />
+			<Setter Property="HorizontalContentAlignment" Value="Center" />
+			<Setter Property="VerticalContentAlignment" Value="Center" />
+		</Style>
+		<Style Selector="Button.composer-pill:pointerover">
+			<Setter Property="Background" Value="{DynamicResource HoverBrush}" />
+			<Setter Property="Foreground" Value="{DynamicResource AccentBrush}" />
+		</Style>
+
+		<!--  attach chip above the composer text  -->
+		<Style Selector="Button.attach-btn">
+			<Setter Property="Width" Value="28" />
+			<Setter Property="Height" Value="28" />
+			<Setter Property="Padding" Value="0" />
+			<Setter Property="CornerRadius" Value="7" />
+			<Setter Property="Background" Value="{DynamicResource ChipBrush}" />
+			<Setter Property="Foreground" Value="{DynamicResource TextMutedBrush}" />
+			<Setter Property="HorizontalContentAlignment" Value="Center" />
+			<Setter Property="VerticalContentAlignment" Value="Center" />
+		</Style>
+		<Style Selector="Button.attach-btn:pointerover">
+			<Setter Property="Foreground" Value="{DynamicResource AccentBrush}" />
+		</Style>
+		<Style Selector="Button.btn-allow">
+			<Setter Property="Background" Value="{DynamicResource AccentBrush}" />
+			<Setter Property="Foreground" Value="#FF0E1116" />
+			<Setter Property="CornerRadius" Value="7" />
+			<Setter Property="Padding" Value="11,4" />
+			<Setter Property="FontSize" Value="12" />
+			<Setter Property="FontWeight" Value="SemiBold" />
+		</Style>
+		<Style Selector="Button.btn-soft-accent">
+			<Setter Property="Background" Value="{DynamicResource AccentDimBrush}" />
+			<Setter Property="Foreground" Value="{DynamicResource AccentBrush}" />
+			<Setter Property="CornerRadius" Value="7" />
+			<Setter Property="Padding" Value="11,4" />
+			<Setter Property="FontSize" Value="12" />
+		</Style>
+		<Style Selector="Button.btn-deny">
+			<Setter Property="Background" Value="{DynamicResource DangerDimBrush}" />
+			<Setter Property="Foreground" Value="{DynamicResource DangerBrush}" />
+			<Setter Property="CornerRadius" Value="7" />
+			<Setter Property="Padding" Value="11,4" />
+			<Setter Property="FontSize" Value="12" />
+		</Style>
+		<Style Selector="Button.jump-btn">
+			<Setter Property="Background" Value="{DynamicResource ChipBrush}" />
+			<Setter Property="BorderBrush" Value="{DynamicResource HairlineBrush}" />
+			<Setter Property="BorderThickness" Value="1" />
+			<Setter Property="CornerRadius" Value="16" />
+			<Setter Property="Padding" Value="11,6" />
+			<Setter Property="FontSize" Value="12" />
+		</Style>
+
+		<!--  composer focus ring  -->
+		<Style Selector="Border.input-card">
+			<Setter Property="BorderBrush" Value="{DynamicResource HairlineBrush}" />
+		</Style>
+		<Style Selector="Border.input-card:focus-within">
+			<Setter Property="BorderBrush" Value="{DynamicResource AccentBrush}" />
+		</Style>
+
+		<!--  auto-allow on/off toggle  -->
+		<Style Selector="ToggleButton.allow-toggle">
+			<Setter Property="Padding" Value="7" />
+			<Setter Property="CornerRadius" Value="8" />
+			<Setter Property="Background" Value="Transparent" />
+			<Setter Property="Foreground" Value="{DynamicResource TextMutedBrush}" />
+		</Style>
+		<Style Selector="ToggleButton.allow-toggle:on">
+			<Setter Property="Background" Value="{DynamicResource AccentDimBrush}" />
+			<Setter Property="Foreground" Value="{DynamicResource AccentBrush}" />
+		</Style>
+	</UserControl.Styles>
+
+	<Border
+		Classes="tile-root"
+		Classes.focused="{Binding IsFocused}"
+		Tapped="OnTileTapped">
+		<Grid RowDefinitions="Auto,*,Auto">
+
+			<!--  tile header  -->
+			<Grid Grid.Row="0" Margin="10,7,7,0" ColumnDefinitions="Auto,Auto,*,Auto">
+				<Button
+					Classes="icon"
+					Command="{Binding CloseCommand}"
+					ToolTip.Tip="Close this tile — the chat stays in the sidebar and keeps running">
+					<PathIcon Data="{StaticResource IconClose}" Width="11" Height="11" />
+				</Button>
+				<Ellipse Grid.Column="1" Classes="pulse" Margin="6,0,0,0" VerticalAlignment="Center" IsVisible="{Binding IsBusy}" />
+				<TextBlock
+					Grid.Column="2"
+					Text="{Binding Title}"
+					Margin="7,0,0,0"
+					FontSize="12.5"
+					FontWeight="SemiBold"
+					VerticalAlignment="Center"
+					TextTrimming="CharacterEllipsis"
+					ToolTip.Tip="{Binding Title}" />
+			</Grid>
+
+			<!--  transcript  -->
+			<Grid Grid.Row="1" Margin="4,2,4,4">
+				<ScrollViewer x:Name="ChatScroll" HorizontalScrollBarVisibility="Disabled">
+					<StackPanel Margin="4">
+						<ItemsControl ItemsSource="{Binding ChatItems}">
+							<ItemsControl.DataTemplates>
+
+								<DataTemplate DataType="{x:Type m:UserMessageItem}">
+									<Border
+										Classes="msg-surface"
+										HorizontalAlignment="Right"
+										CornerRadius="12"
+										Background="{DynamicResource BubbleUserBrush}"
+										Padding="11,8"
+										MaxWidth="560"
+										Margin="40,4,0,4">
+										<Border.ContextMenu>
+											<ContextMenu>
+												<MenuItem Header="Copy" Click="OnCopyMessage" />
+												<MenuItem Header="Edit in input" Click="OnEditMessageClick" />
+											</ContextMenu>
+										</Border.ContextMenu>
+										<StackPanel Spacing="2">
+											<TextBlock Text="{Binding Text}" TextWrapping="Wrap" FontSize="13" LineHeight="19" />
+											<StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Spacing="2">
+												<Button
+													Classes="msg-copy"
+													Click="OnCopyMessage"
+													ToolTip.Tip="Copy">
+													<PathIcon Data="{StaticResource IconCopy}" Width="12" Height="12" />
+												</Button>
+												<TextBlock Classes="msg-time" Text="{Binding TimeLabel}" />
+											</StackPanel>
+										</StackPanel>
+									</Border>
+								</DataTemplate>
+
+								<DataTemplate DataType="{x:Type m:QueuedMessageItem}">
+									<Border
+										HorizontalAlignment="Right"
+										CornerRadius="12"
+										Background="{DynamicResource BubbleQueuedBrush}"
+										Padding="11,8"
+										MaxWidth="560"
+										Margin="40,4,0,4"
+										BorderBrush="{DynamicResource QueuedBorderBrush}"
+										BorderThickness="1"
+										ToolTip.Tip="Queued — sent when the current turn finishes">
+										<StackPanel Orientation="Horizontal" Spacing="8">
+											<PathIcon
+												Data="{StaticResource IconClock}"
+												Width="13"
+												Height="13"
+												Opacity="0.7"
+												VerticalAlignment="Center" />
+											<TextBlock Text="{Binding Text}" TextWrapping="Wrap" MaxWidth="440" FontSize="13" VerticalAlignment="Center" />
+											<TextBlock
+												Text="{Binding ImageCount}"
+												FontSize="11"
+												Opacity="0.6"
+												VerticalAlignment="Center"
+												IsVisible="{Binding HasImages}" />
+											<Button
+												Classes="icon"
+												Command="{Binding RemoveSelfCommand}"
+												VerticalAlignment="Center"
+												ToolTip.Tip="Remove from queue">
+												<PathIcon Data="{StaticResource IconClose}" Width="11" Height="11" />
+											</Button>
+										</StackPanel>
+									</Border>
+								</DataTemplate>
+
+								<DataTemplate DataType="{x:Type m:AssistantTextItem}">
+									<Border
+										Classes="msg-surface"
+										HorizontalAlignment="Left"
+										CornerRadius="12"
+										Background="{DynamicResource BubbleAssistantBrush}"
+										BorderBrush="{DynamicResource HairlineBrush}"
+										BorderThickness="1"
+										Padding="11,8"
+										MaxWidth="640"
+										Margin="0,4,40,4">
+										<Border.ContextMenu>
+											<ContextMenu>
+												<MenuItem Header="Copy" Click="OnCopyMessage" />
+											</ContextMenu>
+										</Border.ContextMenu>
+											<StackPanel Spacing="2">
+												<c:MarkdownTextBlock Text="{Binding Text}" />
+												<StackPanel Orientation="Horizontal" Spacing="2" HorizontalAlignment="Right">
+													<Button
+														Classes="msg-copy"
+														Click="OnCopyMessage"
+														ToolTip.Tip="Copy">
+														<PathIcon Data="{StaticResource IconCopy}" Width="12" Height="12" />
+													</Button>
+													<TextBlock Classes="msg-time" Text="{Binding TimeLabel}" Margin="6,0,0,0" />
+												</StackPanel>
+											</StackPanel>
+									</Border>
+								</DataTemplate>
+
+								<DataTemplate DataType="{x:Type m:ReasoningItem}">
+									<Expander Classes="disclose" IsExpanded="False" HorizontalAlignment="Stretch" MaxWidth="640" Margin="0,2">
+										<Expander.Header>
+											<StackPanel Orientation="Horizontal" Spacing="6">
+												<PathIcon
+													Data="{StaticResource IconBulb}"
+													Width="12"
+													Height="12"
+													Foreground="{DynamicResource TextMutedBrush}"
+													VerticalAlignment="Center" />
+												<TextBlock Text="thinking" FontStyle="Italic" Opacity="0.5" FontSize="11.5" />
+											</StackPanel>
+										</Expander.Header>
+										<TextBlock Text="{Binding Text}" FontStyle="Italic" Opacity="0.65" FontSize="12" TextWrapping="Wrap" />
+									</Expander>
+								</DataTemplate>
+
+								<DataTemplate DataType="{x:Type m:ToolItem}">
+									<StackPanel Margin="0,3" Spacing="3">
+										<StackPanel.ContextMenu>
+											<ContextMenu>
+												<MenuItem Header="Copy" Click="OnCopyMessage" />
+											</ContextMenu>
+										</StackPanel.ContextMenu>
+										<StackPanel Orientation="Horizontal" Spacing="7" Margin="4,0,44,0" Background="Transparent" VerticalAlignment="Center">
+											<Ellipse
+												Classes="tool-dot"
+												Classes.running="{Binding IsRunning}"
+												Classes.completed="{Binding IsCompleted}"
+												Classes.error="{Binding IsError}" />
+											<Border CornerRadius="6" Padding="6,2" Background="{DynamicResource ChipBrush}">
+												<TextBlock Text="{Binding Tool}" FontSize="11" FontFamily="{StaticResource CodeFont}" />
+											</Border>
+											<TextBlock
+												Text="{Binding Title}"
+												Opacity="0.8"
+												TextTrimming="CharacterEllipsis"
+												MaxWidth="440"
+												FontSize="12.5"
+												VerticalAlignment="Center" />
+											<TextBlock
+												Text="{Binding Status}"
+												Opacity="0.5"
+												FontSize="11"
+												VerticalAlignment="Center" />
+										</StackPanel>
+										<TextBlock
+											Classes="tool-error"
+											Text="{Binding ErrorPreview}"
+											IsVisible="{Binding IsError}"
+											MaxWidth="520"
+											HorizontalAlignment="Left"
+											Margin="4,0,44,0"
+											TextTrimming="CharacterEllipsis"
+											ToolTip.Tip="{Binding ErrorPreview}" />
+										<Expander Classes="disclose" IsVisible="{Binding HasDiff}" IsExpanded="False" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch" MaxWidth="640">
+											<Expander.Header>
+												<StackPanel Orientation="Horizontal" Spacing="8">
+													<TextBlock Text="Changes" FontSize="11" Opacity="0.6" />
+													<StackPanel Orientation="Horizontal" Spacing="2" IsVisible="{Binding HasNumstat}">
+														<TextBlock Text="{Binding Additions}" Foreground="{DynamicResource AddBrush}" FontSize="11" />
+														<TextBlock Text="{Binding Deletions}" Foreground="{DynamicResource DelBrush}" FontSize="11" />
+													</StackPanel>
+												</StackPanel>
+											</Expander.Header>
+											<Border Background="{DynamicResource DiffBgBrush}" CornerRadius="8" Padding="9,7" HorizontalAlignment="Stretch">
+												<c:DiffTextBlock Text="{Binding FileDiff}" />
+											</Border>
+										</Expander>
+										<Expander Classes="disclose" IsVisible="{Binding HasDetails}" IsExpanded="False" HorizontalAlignment="Stretch" MaxWidth="640">
+											<Expander.Header>
+												<TextBlock Text="details" FontSize="11" Opacity="0.5" />
+											</Expander.Header>
+											<ScrollViewer MaxHeight="260" HorizontalScrollBarVisibility="Disabled">
+												<TextBlock Classes="mono-detail" Text="{Binding Details}" />
+											</ScrollViewer>
+										</Expander>
+									</StackPanel>
+								</DataTemplate>
+
+								<DataTemplate DataType="{x:Type m:ImageItem}">
+									<Border
+										Classes="msg-surface"
+										HorizontalAlignment="Right"
+										CornerRadius="12"
+										Background="{DynamicResource BubbleUserBrush}"
+										Padding="8"
+										MaxWidth="380"
+										Margin="40,4,0,4">
+										<Border.ContextMenu>
+											<ContextMenu>
+												<MenuItem Header="Copy image" Click="OnCopyMessage" />
+											</ContextMenu>
+										</Border.ContextMenu>
+										<StackPanel Spacing="3">
+											<Image
+												Source="{Binding Preview}"
+												MaxWidth="360"
+												MaxHeight="240"
+												Stretch="Uniform"
+												HorizontalAlignment="Left" />
+											<StackPanel Orientation="Horizontal" Spacing="6">
+												<TextBlock Text="{Binding FileName}" FontSize="11" Opacity="0.7" VerticalAlignment="Center" />
+												<TextBlock Classes="msg-time" Text="{Binding TimeLabel}" VerticalAlignment="Center" />
+											</StackPanel>
+										</StackPanel>
+									</Border>
+								</DataTemplate>
+
+								<DataTemplate DataType="{x:Type m:PermissionItem}">
+									<Border
+										HorizontalAlignment="Left"
+										CornerRadius="10"
+										Background="{DynamicResource WarnBgBrush}"
+										MaxWidth="640"
+										Margin="0,4,40,4">
+										<Border.ContextMenu>
+											<ContextMenu>
+												<MenuItem Header="Copy" Click="OnCopyMessage" />
+											</ContextMenu>
+										</Border.ContextMenu>
+										<Grid ColumnDefinitions="Auto,*">
+											<Border
+												Width="3"
+												Margin="6,8"
+												CornerRadius="2"
+												Background="{DynamicResource WarnBrush}" />
+											<StackPanel Grid.Column="1" Spacing="4" Margin="0,7,10,7">
+												<StackPanel Orientation="Horizontal" Spacing="8">
+													<PathIcon
+														Data="{StaticResource IconShield}"
+														Width="14"
+														Height="14"
+														Foreground="{DynamicResource WarnBrush}"
+														VerticalAlignment="Center" />
+													<TextBlock
+														Text="{Binding Kind}"
+														FontWeight="SemiBold"
+														Foreground="{DynamicResource WarnBrush}"
+														VerticalAlignment="Center" />
+													<TextBlock
+														Text="{Binding DetailPreview}"
+														FontFamily="{StaticResource CodeFont}"
+														FontSize="11.5"
+														MaxWidth="330"
+														TextTrimming="CharacterEllipsis"
+														VerticalAlignment="Center"
+														Opacity="0.9"
+														ToolTip.Tip="{Binding Detail}" />
+													<StackPanel Orientation="Horizontal" Spacing="6" IsVisible="{Binding IsPending}">
+														<Button Classes="btn-allow" Content="Allow" Command="{Binding AllowCommand}" />
+														<Button
+															Classes="btn-soft-accent"
+															Content="Always"
+															Command="{Binding AllowAlwaysCommand}"
+															ToolTip.Tip="Always allow this permission" />
+														<Button Classes="btn-deny" Content="Deny" Command="{Binding DenyCommand}" />
+													</StackPanel>
+													<TextBlock
+														Text="{Binding Answer}"
+														IsVisible="{Binding !IsPending}"
+														Opacity="0.85"
+														FontStyle="Italic"
+														VerticalAlignment="Center" />
+												</StackPanel>
+												<Expander Classes="disclose" IsVisible="{Binding HasDiff}" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch">
+													<Expander.Header>
+														<TextBlock Text="View diff" FontSize="11" Opacity="0.7" />
+													</Expander.Header>
+													<Border Background="{DynamicResource DiffBgBrush}" CornerRadius="8" Padding="9,7" HorizontalAlignment="Stretch">
+														<c:DiffTextBlock Text="{Binding Diff}" />
+													</Border>
+												</Expander>
+											</StackPanel>
+										</Grid>
+									</Border>
+								</DataTemplate>
+
+								<DataTemplate DataType="{x:Type m:SystemNoteItem}">
+									<TextBlock
+										Classes="note"
+										Classes.error="{Binding IsError}"
+										Text="{Binding Text}">
+										<TextBlock.ContextMenu>
+											<ContextMenu>
+												<MenuItem Header="Copy" Click="OnCopyMessage" />
+											</ContextMenu>
+										</TextBlock.ContextMenu>
+									</TextBlock>
+								</DataTemplate>
+
+							</ItemsControl.DataTemplates>
+						</ItemsControl>
+						<StackPanel
+							Orientation="Horizontal"
+							Spacing="7"
+							Margin="8,6,0,2"
+							IsVisible="{Binding IsBusy}">
+							<Ellipse Classes="pulse" />
+							<Ellipse Classes="pulse d2" />
+							<Ellipse Classes="pulse d3" />
+							<TextBlock
+								Text="opencode is working…"
+								FontStyle="Italic"
+								FontSize="12"
+								Foreground="{DynamicResource AccentBrush}"
+								Opacity="0.85"
+								VerticalAlignment="Center" />
+						</StackPanel>
+					</StackPanel>
+				</ScrollViewer>
+
+				<Button
+					x:Name="JumpLatest"
+					Classes="jump-btn"
+					IsVisible="False"
+					HorizontalAlignment="Right"
+					VerticalAlignment="Bottom"
+					Margin="0,0,8,8"
+					Click="OnJumpLatestClicked"
+					ToolTip.Tip="Jump to the latest message">
+					<StackPanel Orientation="Horizontal" Spacing="6">
+						<PathIcon Data="{StaticResource IconArrowDown}" Width="12" Height="12" />
+						<TextBlock Text="Latest" VerticalAlignment="Center" />
+					</StackPanel>
+				</Button>
+			</Grid>
+
+			<!--  Composer  -->
+			<Border
+				Grid.Row="2"
+				Classes="input-card"
+				CornerRadius="14"
+				Background="{DynamicResource InputBrush}"
+				BorderThickness="1"
+				Padding="8"
+				Margin="6,0,6,8"
+				DragDrop.DragOver="OnFileDragOver"
+				DragDrop.Drop="OnFileDrop">
+				<StackPanel Spacing="6">
+					<ItemsControl ItemsSource="{Binding Attachments}" IsVisible="{Binding HasAttachments}">
+						<ItemsControl.ItemsPanel>
+							<ItemsPanelTemplate>
+								<StackPanel Orientation="Horizontal" Spacing="6" />
+							</ItemsPanelTemplate>
+						</ItemsControl.ItemsPanel>
+						<ItemsControl.ItemTemplate>
+							<DataTemplate>
+								<Border CornerRadius="8" Background="{DynamicResource ChipBrush}" Padding="4">
+									<StackPanel>
+										<Image
+											Source="{Binding Preview}"
+											Width="56"
+											Height="56"
+											Stretch="Uniform"
+											IsVisible="{Binding IsImage}" />
+										<PathIcon
+											Data="{StaticResource IconDoc}"
+											Width="56"
+											Height="56"
+											Foreground="{DynamicResource TextMutedBrush}"
+											IsVisible="{Binding !IsImage}" />
+										<Button
+											Classes="icon"
+											HorizontalAlignment="Center"
+											Command="{Binding $parent[ItemsControl].DataContext.RemoveAttachmentCommand}"
+											CommandParameter="{Binding}"
+											ToolTip.Tip="Remove attachment">
+											<PathIcon Data="{StaticResource IconClose}" Width="11" Height="11" />
+										</Button>
+									</StackPanel>
+								</Border>
+							</DataTemplate>
+						</ItemsControl.ItemTemplate>
+					</ItemsControl>
+					<!--  attach affordance above the text, top-left of the card  -->
+					<Button
+						Classes="attach-btn"
+						HorizontalAlignment="Left"
+						Click="OnAttachClick"
+						ToolTip.Tip="Attach files">
+						<PathIcon Data="{StaticResource IconDoc}" Width="14" Height="14" />
+					</Button>
+					<TextBox
+						x:Name="InputBox"
+						Text="{Binding Input}"
+						PlaceholderText="Ask opencode…"
+						AcceptsReturn="True"
+						VerticalContentAlignment="Top"
+						MinHeight="52"
+						Background="Transparent"
+						BorderThickness="0"
+						Padding="4,0"
+						IsEnabled="{Binding Owner.IsServerRunning}"
+						ToolTip.Tip="Enter to send · Shift+Enter for a new line" />
+					<Grid ColumnDefinitions="Auto,Auto,Auto,Auto,Auto,Auto" ColumnSpacing="4">
+						<ToggleButton
+							Grid.Column="0"
+							Classes="icon allow-toggle"
+							Classes.on="{Binding Owner.AutoAllow}"
+							IsChecked="{Binding Owner.AutoAllow}"
+							VerticalAlignment="Center"
+							ToolTip.Tip="Auto-allow">
+							<PathIcon Data="{StaticResource IconShield}" Width="14" Height="14" />
+						</ToggleButton>
+						<Button Grid.Column="1" Classes="composer-pill" Click="OnAgentPillClick" IsVisible="{Binding Owner.HasAgents}" VerticalAlignment="Center">
+							<StackPanel Orientation="Horizontal" Spacing="5">
+								<TextBlock Text="{Binding SelectedAgent}" FontSize="12" VerticalAlignment="Center" />
+								<PathIcon Data="{StaticResource IconChevronDown}" Width="10" Height="10" Opacity="0.6" VerticalAlignment="Center" />
+							</StackPanel>
+						</Button>
+						<Button Grid.Column="2" Classes="composer-pill" Click="OnModelPillClick" VerticalAlignment="Center" ToolTip.Tip="Model for the next message">
+							<StackPanel Orientation="Horizontal" Spacing="5">
+								<TextBlock Text="{Binding SelectedModel}" FontSize="12" VerticalAlignment="Center" />
+								<PathIcon Data="{StaticResource IconChevronDown}" Width="10" Height="10" Opacity="0.6" VerticalAlignment="Center" />
+							</StackPanel>
+						</Button>
+						<Button
+							Grid.Column="3"
+							Classes="composer-pill"
+							Click="OnVariantPillClick"
+							IsEnabled="{Binding HasVariants}"
+							VerticalAlignment="Center"
+							ToolTip.Tip="Model variant (e.g. reasoning effort)">
+							<StackPanel Orientation="Horizontal" Spacing="5">
+								<PathIcon Data="{StaticResource IconGauge}" Width="13" Height="13" Opacity="0.8" VerticalAlignment="Center" />
+								<TextBlock Text="{Binding SelectedVariant}" FontSize="12" VerticalAlignment="Center" />
+								<PathIcon Data="{StaticResource IconChevronDown}" Width="10" Height="10" Opacity="0.6" VerticalAlignment="Center" />
+							</StackPanel>
+						</Button>
+						<Button
+							Grid.Column="4"
+							x:Name="SendButton"
+							Classes="btn-send"
+							VerticalAlignment="Center"
+							Command="{Binding SendCommand}"
+							IsVisible="{Binding !IsBusy}"
+							IsEnabled="{Binding Owner.IsServerRunning}"
+							ToolTip.Tip="Send — while a turn runs, the message is queued until it finishes">
+							<PathIcon Data="{StaticResource IconArrowUp}" Width="17" Height="17" />
+						</Button>
+						<Button
+							Grid.Column="4"
+							Classes="btn-stop"
+							VerticalAlignment="Center"
+							Command="{Binding AbortCommand}"
+							IsVisible="{Binding IsBusy}"
+							IsEnabled="{Binding Owner.IsServerRunning}"
+							ToolTip.Tip="Stop this chat's running turn">
+							<PathIcon Data="{StaticResource IconClose}" Width="15" Height="15" />
+						</Button>
+					</Grid>
+				</StackPanel>
+			</Border>
+		</Grid>
+	</Border>
+</UserControl>

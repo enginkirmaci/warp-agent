@@ -1,0 +1,588 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<suki:SukiWindow
+	x:Class="WarpAgent.Views.MainWindow"
+	xmlns="https://github.com/avaloniaui"
+	xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+	xmlns:c="using:WarpAgent.Controls"
+	xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+	xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+	xmlns:suki="https://github.com/kikipoulet/SukiUI"
+	xmlns:v="using:WarpAgent.Views"
+	xmlns:vm="using:WarpAgent.ViewModels"
+	Title="Warp Agent"
+	Icon="avares://WarpAgent/Assets/spark.png"
+	Width="1180"
+	Height="800"
+	MinWidth="860"
+	MinHeight="580"
+	BackgroundStyle="Flat"
+	WindowStartupLocation="CenterScreen"
+	x:DataType="vm:MainViewModel"
+	mc:Ignorable="d">
+
+	<suki:SukiWindow.LogoContent>
+		<PathIcon Data="{StaticResource IconSpark}" Width="15" Height="15" Foreground="{DynamicResource AccentBrush}" />
+	</suki:SukiWindow.LogoContent>
+
+	<!--  laid out right-to-left: the divider ends up between the cog and the caption buttons  -->
+	<suki:SukiWindow.RightWindowTitleBarControls>
+		<Border
+			Width="1"
+			Height="14"
+			Margin="2,0"
+			VerticalAlignment="Center"
+			Background="{DynamicResource HairlineBrush}" />
+		<Button
+			Classes="icon"
+			Command="{Binding OpenSettingsCommand}"
+			ToolTip.Tip="Settings">
+			<PathIcon Data="{StaticResource IconCog}" Width="14" Height="14" />
+		</Button>
+	</suki:SukiWindow.RightWindowTitleBarControls>
+
+	<suki:SukiWindow.Styles>
+		<Style Selector="Border.pill">
+			<Setter Property="CornerRadius" Value="20" />
+			<Setter Property="Padding" Value="11,4" />
+			<Setter Property="Background" Value="{DynamicResource HairlineBrush}" />
+		</Style>
+		<Style Selector="Border.pill.on">
+			<Setter Property="Background" Value="{DynamicResource SuccessDimBrush}" />
+		</Style>
+		<Style Selector="TextBlock.sidebar-hint">
+			<Setter Property="Opacity" Value="0.5" />
+			<Setter Property="FontSize" Value="12" />
+			<Setter Property="FontStyle" Value="Italic" />
+			<Setter Property="TextWrapping" Value="Wrap" />
+			<Setter Property="TextAlignment" Value="Center" />
+			<Setter Property="Margin" Value="4,8" />
+		</Style>
+
+		<!--  sidebar rows draw their own hover + selection; SukiUI's check badge and
+		      selected tint are suppressed — selection is the accent border only  -->
+		<Style Selector="Border.row-card">
+			<Setter Property="CornerRadius" Value="8" />
+			<Setter Property="Padding" Value="8,6" />
+			<Setter Property="Background" Value="Transparent" />
+			<Setter Property="BorderThickness" Value="1" />
+			<Setter Property="BorderBrush" Value="Transparent" />
+		</Style>
+		<Style Selector="Border.row-card:pointerover">
+			<Setter Property="Background" Value="{DynamicResource HoverBrush}" />
+		</Style>
+		<Style Selector="Border.row-card.selected">
+			<Setter Property="BorderBrush" Value="{DynamicResource AccentBrush}" />
+		</Style>
+
+		<!--  workspace row actions appear on hover only  -->
+		<Style Selector="Button.ws-action">
+			<Setter Property="Opacity" Value="0" />
+			<Setter Property="IsHitTestVisible" Value="False" />
+		</Style>
+		<Style Selector="Border.row-card:pointerover Button.ws-action">
+			<Setter Property="Opacity" Value="1" />
+			<Setter Property="IsHitTestVisible" Value="True" />
+		</Style>
+
+		<!--  collapse chevron: compact square so it fits the sidebar row  -->
+		<Style Selector="Button.chevron">
+			<Setter Property="Width" Value="20" />
+			<Setter Property="Height" Value="20" />
+			<Setter Property="Padding" Value="0" />
+			<Setter Property="Background" Value="Transparent" />
+			<Setter Property="HorizontalContentAlignment" Value="Center" />
+			<Setter Property="VerticalContentAlignment" Value="Center" />
+			<Setter Property="Opacity" Value="0.7" />
+		</Style>
+		<Style Selector="ListBoxItem /template/ PathIcon#CheckSelected">
+			<Setter Property="IsVisible" Value="False" />
+		</Style>
+		<Style Selector="ListBoxItem:selected /template/ suki|GlassCard#BorderBasicStyle">
+			<Setter Property="Background" Value="Transparent" />
+			<Setter Property="BorderThickness" Value="0" />
+		</Style>
+
+		<Style Selector="TextBlock.task-done">
+			<Setter Property="TextDecorations" Value="Strikethrough" />
+			<Setter Property="Opacity" Value="0.45" />
+		</Style>
+
+		<!--  buttons  -->
+		<Style Selector="Button.btn-soft">
+			<Setter Property="Padding" Value="10,5" />
+			<Setter Property="CornerRadius" Value="8" />
+			<Setter Property="MinHeight" Value="30" />
+		</Style>
+	</suki:SukiWindow.Styles>
+
+	<Grid ColumnDefinitions="250,*">
+
+		<!--  Sidebar: workspaces + their chats  -->
+		<Border
+			Grid.Column="0"
+			Margin="10,10,0,10"
+			CornerRadius="12"
+			Background="{DynamicResource SurfaceBrush}"
+			Padding="10">
+				<Grid RowDefinitions="*">
+					<ScrollViewer HorizontalScrollBarVisibility="Disabled">
+						<StackPanel Spacing="10">
+							<ItemsControl ItemsSource="{Binding Workspaces}">
+								<ItemsControl.ItemTemplate>
+									<DataTemplate>
+										<StackPanel Margin="0,1">
+											<Grid ColumnDefinitions="Auto,*">
+												<!--  folder marker: same accent as the selection highlight  -->
+												<Border
+													Width="3"
+													Margin="0,4,7,4"
+													CornerRadius="2"
+													Background="{DynamicResource AccentBrush}" />
+												<Border
+													Grid.Column="1"
+													Classes="row-card"
+													Classes.selected="{Binding IsSelected}"
+													ToolTip.Tip="{Binding FolderPath}"
+													Tapped="OnWorkspaceClick">
+													<Border.ContextMenu>
+														<ContextMenu>
+															<MenuItem Header="Start server" Click="OnWorkspaceStartClick" IsVisible="{Binding !IsRunning}" />
+															<MenuItem Header="Stop server" Click="OnWorkspaceStopClick" IsVisible="{Binding IsRunning}" />
+															<MenuItem Header="Remove workspace" Click="OnWorkspaceRemoveClick" />
+														</ContextMenu>
+													</Border.ContextMenu>
+													<Grid ColumnDefinitions="Auto,*,Auto">
+														<Button
+															Classes="icon chevron"
+															Click="OnWorkspaceCollapseClick"
+															ToolTip.Tip="Collapse / expand chats">
+															<Panel>
+																<PathIcon
+																	Data="{StaticResource IconChevronDown}"
+																	Width="11"
+																	Height="11"
+																	IsVisible="{Binding IsExpanded}" />
+																<PathIcon
+																	Data="{StaticResource IconChevronRight}"
+																	Width="11"
+																	Height="11"
+																	IsVisible="{Binding !IsExpanded}" />
+															</Panel>
+														</Button>
+														<StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="7" Margin="4,0,0,0">
+															<PathIcon
+																Data="{StaticResource IconFolder}"
+																Width="13"
+																Height="13"
+																Foreground="{DynamicResource TextMutedBrush}"
+																VerticalAlignment="Center" />
+															<TextBlock
+																Text="{Binding Name}"
+																TextTrimming="CharacterEllipsis"
+																FontSize="12.5"
+																VerticalAlignment="Center" />
+															<Ellipse
+																Width="6"
+																Height="6"
+																Fill="{DynamicResource SuccessBrush}"
+																VerticalAlignment="Center"
+																IsVisible="{Binding IsRunning}" />
+														</StackPanel>
+														<StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="2" VerticalAlignment="Center">
+															<Button
+																Classes="icon ws-action"
+																Click="OnWorkspaceMenuClick"
+																ToolTip.Tip="Workspace actions">
+																<PathIcon Data="{StaticResource IconKebab}" Width="13" Height="13" />
+															</Button>
+															<Button
+																Classes="icon ws-action"
+																Command="{Binding $parent[ItemsControl].DataContext.NewChatForWorkspaceCommand}"
+																CommandParameter="{Binding}"
+																ToolTip.Tip="New chat in this workspace">
+																<PathIcon Data="{StaticResource IconPlus}" Width="13" Height="13" />
+															</Button>
+														</StackPanel>
+													</Grid>
+												</Border>
+											</Grid>
+											<StackPanel IsVisible="{Binding IsExpanded}">
+												<TextBlock
+													Classes="sidebar-hint"
+													Margin="26,1,0,1"
+													HorizontalAlignment="Left"
+													TextAlignment="Left"
+													IsVisible="{Binding ShowEmptyHint}"
+													Text="No chats yet" />
+												<ItemsControl ItemsSource="{Binding Chats}">
+												<ItemsControl.ItemTemplate>
+													<DataTemplate>
+														<Border
+															Classes="row-card"
+															Classes.selected="{Binding IsSelected}"
+															Margin="22,0,0,0"
+															ToolTip.Tip="{Binding Title}"
+															Tapped="OnSessionClick">
+															<Border.ContextMenu>
+																<ContextMenu>
+																	<MenuItem Header="Pin" Click="OnPinClick" IsVisible="{Binding !IsPinned}" />
+																	<MenuItem Header="Unpin" Click="OnUnpinClick" IsVisible="{Binding IsPinned}" />
+																	<MenuItem Header="Rename" Click="OnRenameClick" />
+																	<MenuItem Header="Copy share link" Click="OnShareClick" />
+																	<MenuItem Header="Stop sharing" Click="OnUnshareClick" />
+																	<MenuItem Header="Remove from workspace" Click="OnUnlinkClick" />
+																	<MenuItem Header="Delete" Click="OnDeleteClick" />
+																</ContextMenu>
+															</Border.ContextMenu>
+															<Grid ColumnDefinitions="Auto,*,Auto" ColumnSpacing="5">
+																<PathIcon
+																	Data="{StaticResource IconPin}"
+																	Width="11"
+																	Height="11"
+																	Foreground="{DynamicResource AccentBrush}"
+																	VerticalAlignment="Center"
+																	IsVisible="{Binding IsPinned}" />
+																<TextBlock
+																	Grid.Column="1"
+																	Text="{Binding Title}"
+																	TextTrimming="CharacterEllipsis"
+																	FontSize="12.5"
+																	VerticalAlignment="Center"
+																	IsVisible="{Binding !IsEditing}" />
+																<TextBox
+																	Grid.Column="1"
+																	Text="{Binding DraftTitle}"
+																	IsVisible="{Binding IsEditing}"
+																	KeyDown="OnRenameKeyDown"
+																	LostFocus="OnRenameLostFocus" />
+																<TextBlock
+																	Grid.Column="2"
+																	Text="{Binding UpdatedLabel}"
+																	FontSize="10.5"
+																	Opacity="0.45"
+																	VerticalAlignment="Center"
+																	IsVisible="{Binding !IsEditing}" />
+															</Grid>
+														</Border>
+													</DataTemplate>
+												</ItemsControl.ItemTemplate>
+												</ItemsControl>
+											</StackPanel>
+										</StackPanel>
+									</DataTemplate>
+								</ItemsControl.ItemTemplate>
+							</ItemsControl>
+							<TextBlock
+								Classes="sidebar-hint"
+								IsVisible="{Binding HasNoWorkspace}"
+								Text="Add a workspace folder to begin." />
+						</StackPanel>
+					</ScrollViewer>
+				</Grid>
+			</Border>
+
+		<Grid Grid.Column="1" Margin="10,10,10,10">
+			<Grid RowDefinitions="Auto,*">
+
+					<!--  Header: connection row + workspace row  -->
+					<StackPanel Grid.Row="0" Spacing="8">
+						<Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
+							<StackPanel
+								Grid.Column="0"
+								Orientation="Horizontal"
+								Spacing="6"
+								HorizontalAlignment="Left"
+								VerticalAlignment="Center"
+								IsVisible="{Binding AnyBusy}">
+								<Ellipse Classes="pulse" />
+								<Ellipse Classes="pulse d2" />
+								<Ellipse Classes="pulse d3" />
+								<TextBlock
+									Text="{Binding WorkingLabel}"
+									FontSize="12"
+									Foreground="{DynamicResource AccentBrush}"
+									VerticalAlignment="Center" />
+							</StackPanel>
+							<Button
+								Grid.Column="1"
+								Classes="icon"
+								Command="{Binding NewChatCommand}"
+								ToolTip.Tip="New chat">
+								<PathIcon Data="{StaticResource IconPlus}" Width="15" Height="15" />
+							</Button>
+						</Grid>
+						<Grid ColumnDefinitions="*,Auto,Auto" ColumnSpacing="8">
+							<Border
+								Grid.Column="1"
+								Classes="pill"
+								IsVisible="{Binding FocusedTile.HasContext}"
+								VerticalAlignment="Center"
+								ToolTip.Tip="Context usage of the focused chat's last assistant turn">
+								<TextBlock Text="{Binding FocusedTile.ContextText}" FontSize="11" VerticalAlignment="Center" />
+							</Border>
+							<Button
+								Grid.Column="2"
+								Classes="btn-soft"
+								IsVisible="{Binding FocusedTile.HasChanges}"
+								ToolTip.Tip="Files the focused chat touched — click a row for its diff">
+								<Button.Flyout>
+									<Flyout Placement="BottomEdgeAlignedLeft">
+										<Border MaxWidth="620" MaxHeight="420">
+											<ScrollViewer HorizontalScrollBarVisibility="Disabled">
+												<ItemsControl ItemsSource="{Binding FocusedTile.Changes}" Margin="4">
+													<ItemsControl.ItemTemplate>
+														<DataTemplate>
+															<Expander Classes="disclose" Margin="0,2" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch">
+																<Expander.Header>
+																	<Grid ColumnDefinitions="*,Auto,Auto,Auto" ColumnSpacing="10" Margin="0,2">
+																		<TextBlock Text="{Binding Name}" TextTrimming="CharacterEllipsis" MaxWidth="300" VerticalAlignment="Center" ToolTip.Tip="{Binding FilePath}" />
+																		<TextBlock Grid.Column="1" Text="+" FontSize="11" Opacity="0.5" VerticalAlignment="Center" />
+																		<TextBlock Grid.Column="2" Text="{Binding Additions}" Foreground="{DynamicResource AddBrush}" FontSize="11" VerticalAlignment="Center" />
+																		<TextBlock Grid.Column="3" Text="{Binding Deletions}" Foreground="{DynamicResource DelBrush}" FontSize="11" VerticalAlignment="Center" />
+																	</Grid>
+																</Expander.Header>
+																<Border
+																	Background="{DynamicResource DiffBgBrush}"
+																	CornerRadius="8"
+																	Padding="9,7"
+																	HorizontalAlignment="Stretch">
+																	<c:DiffTextBlock Text="{Binding Patch}" />
+																</Border>
+															</Expander>
+														</DataTemplate>
+													</ItemsControl.ItemTemplate>
+												</ItemsControl>
+											</ScrollViewer>
+										</Border>
+									</Flyout>
+								</Button.Flyout>
+									<TextBlock Text="Changes" VerticalAlignment="Center" />
+							</Button>
+						</Grid>
+					</StackPanel>
+
+					<!--  Tile grid: every open chat is one tile  -->
+					<Grid Grid.Row="1" Margin="0,8,0,0">
+						<ItemsControl ItemsSource="{Binding OpenTiles}">
+							<ItemsControl.ItemsPanel>
+								<ItemsPanelTemplate>
+									<UniformGrid Columns="{Binding TileColumns}" />
+								</ItemsPanelTemplate>
+							</ItemsControl.ItemsPanel>
+							<ItemsControl.ItemTemplate>
+								<DataTemplate>
+									<v:ChatTile Margin="4" />
+								</DataTemplate>
+							</ItemsControl.ItemTemplate>
+						</ItemsControl>
+						<StackPanel
+							HorizontalAlignment="Center"
+							VerticalAlignment="Center"
+							IsVisible="{Binding HasNoTiles}">
+							<TextBlock
+								Classes="sidebar-hint"
+								IsVisible="{Binding HasNoWorkspace}"
+								Text="Add a workspace folder to begin." />
+							<TextBlock
+								Classes="sidebar-hint"
+								IsVisible="{Binding HasIdleWorkspace}"
+								Text="Start the server to load your chats." />
+						</StackPanel>
+
+						<!--  Tasks + background agents float over the grid's top-right corner  -->
+						<StackPanel
+							HorizontalAlignment="Right"
+							VerticalAlignment="Top"
+							Spacing="8"
+							IsVisible="{Binding HasSidePanel}">
+							<Border
+								HorizontalAlignment="Right"
+								Width="264"
+								CornerRadius="12"
+								Background="{DynamicResource SurfaceBrush}"
+								BorderBrush="{DynamicResource HairlineBrush}"
+								BorderThickness="1"
+								Padding="10"
+								IsVisible="{Binding FocusedTile.HasTasks}">
+								<ScrollViewer MaxHeight="420" HorizontalScrollBarVisibility="Disabled">
+									<StackPanel Spacing="2">
+										<TextBlock Text="Tasks" FontWeight="SemiBold" FontSize="13" Margin="2,0,0,4" />
+										<ItemsControl ItemsSource="{Binding FocusedTile.Tasks}">
+											<ItemsControl.ItemTemplate>
+												<DataTemplate>
+													<StackPanel Orientation="Horizontal" Spacing="8" Margin="2,3">
+														<PathIcon
+															Data="{StaticResource IconCircle}"
+															Width="12"
+															Height="12"
+															Foreground="{DynamicResource TextMutedBrush}"
+															VerticalAlignment="Top"
+															Margin="0,3,0,0"
+															IsVisible="{Binding Pending}" />
+														<PathIcon
+															Data="{StaticResource IconPlay}"
+															Width="11"
+															Height="11"
+															Foreground="{DynamicResource AccentBrush}"
+															VerticalAlignment="Top"
+															Margin="0,3,0,0"
+															IsVisible="{Binding InProgress}" />
+														<PathIcon
+															Data="{StaticResource IconCheck}"
+															Width="12"
+															Height="12"
+															Foreground="{DynamicResource SuccessBrush}"
+															VerticalAlignment="Top"
+															Margin="0,3,0,0"
+															IsVisible="{Binding Completed}" />
+														<PathIcon
+															Data="{StaticResource IconDash}"
+															Width="12"
+															Height="12"
+															Foreground="{DynamicResource TextMutedBrush}"
+															VerticalAlignment="Top"
+															Margin="0,3,0,0"
+															IsVisible="{Binding Cancelled}" />
+														<TextBlock Text="{Binding Content}" TextWrapping="Wrap" FontSize="12.5" Classes.task-done="{Binding Done}" />
+													</StackPanel>
+												</DataTemplate>
+											</ItemsControl.ItemTemplate>
+										</ItemsControl>
+									</StackPanel>
+								</ScrollViewer>
+							</Border>
+							<Border
+								HorizontalAlignment="Right"
+								Width="264"
+								CornerRadius="12"
+								Background="{DynamicResource SurfaceBrush}"
+								BorderBrush="{DynamicResource HairlineBrush}"
+								BorderThickness="1"
+								Padding="10"
+								IsVisible="{Binding HasBackgroundAgents}">
+								<StackPanel Spacing="2">
+									<TextBlock Text="Background agents" FontWeight="SemiBold" FontSize="13" Margin="2,0,0,4" />
+									<ItemsControl ItemsSource="{Binding RunningAgents}">
+										<ItemsControl.ItemTemplate>
+											<DataTemplate>
+												<StackPanel
+													Orientation="Horizontal"
+													Spacing="7"
+													Margin="2,3"
+													IsVisible="{Binding IsBackground}">
+													<Ellipse Classes="pulse" VerticalAlignment="Center" />
+													<PathIcon
+														Data="{StaticResource IconWarn}"
+														Width="13"
+														Height="13"
+														Foreground="{DynamicResource WarnBrush}"
+														VerticalAlignment="Center"
+														IsVisible="{Binding NeedsAttention}"
+														ToolTip.Tip="Waiting for a permission answer" />
+													<StackPanel
+														VerticalAlignment="Center"
+														Background="Transparent"
+														Cursor="Hand"
+														Tapped="OnRunningClick"
+														ToolTip.Tip="Open this chat">
+														<TextBlock
+															Text="{Binding Title}"
+															TextTrimming="CharacterEllipsis"
+															MaxWidth="180"
+															FontSize="12.5" />
+														<TextBlock
+															Text="{Binding Workspace}"
+															FontSize="10"
+															Opacity="0.5"
+															IsVisible="{Binding $parent[ItemsControl].DataContext.MultipleWorkspaces}" />
+													</StackPanel>
+													<Button
+														Classes="icon"
+														Command="{Binding $parent[ItemsControl].DataContext.StopRunningCommand}"
+														CommandParameter="{Binding SessionId}"
+														VerticalAlignment="Center"
+														ToolTip.Tip="Stop this agent">
+														<PathIcon Data="{StaticResource IconStop}" Width="11" Height="11" />
+													</Button>
+												</StackPanel>
+											</DataTemplate>
+										</ItemsControl.ItemTemplate>
+									</ItemsControl>
+								</StackPanel>
+							</Border>
+						</StackPanel>
+
+						<!--  Settings page: covers the tile grid while open  -->
+						<Border
+							Grid.Row="1"
+							Margin="0,8,0,0"
+							CornerRadius="12"
+							Background="{DynamicResource SurfaceBrush}"
+							IsVisible="{Binding IsSettingsOpen}">
+							<ScrollViewer HorizontalScrollBarVisibility="Disabled">
+								<StackPanel
+									Margin="28,24"
+									MaxWidth="620"
+									HorizontalAlignment="Left"
+									Spacing="16"
+									DataContext="{Binding SettingsPage}"
+									x:DataType="vm:SettingsPageViewModel">
+									<Grid ColumnDefinitions="*,Auto">
+										<TextBlock
+											Text="Settings"
+											FontSize="19"
+											FontWeight="SemiBold"
+											VerticalAlignment="Center" />
+										<Button
+											Grid.Column="1"
+											Classes="btn-soft"
+											Command="{Binding $parent[Window].DataContext.CloseSettingsCommand}"
+											ToolTip.Tip="Close without saving">
+											<StackPanel Orientation="Horizontal" Spacing="6">
+												<PathIcon Data="{StaticResource IconClose}" Width="11" Height="11" />
+												<TextBlock Text="Back" VerticalAlignment="Center" />
+											</StackPanel>
+										</Button>
+									</Grid>
+
+									<StackPanel Spacing="4">
+										<TextBlock Text="OpenCode executable" FontSize="12.5" FontWeight="SemiBold" />
+										<TextBox
+											Text="{Binding OpenCodeExecutable}"
+											PlaceholderText="opencode"
+											ToolTip.Tip="Binary name (resolved on PATH) or full path to the opencode executable" />
+										<TextBlock
+											Classes="sidebar-hint"
+											HorizontalAlignment="Left"
+											Text="Running servers keep their current binary until stopped and started again." />
+									</StackPanel>
+
+									<StackPanel Spacing="4">
+										<TextBlock Text="Default model" FontSize="12.5" FontWeight="SemiBold" />
+										<TextBox Text="{Binding DefaultModel}" PlaceholderText="provider/model-id — empty = server default" />
+									</StackPanel>
+									<StackPanel Spacing="4">
+										<TextBlock Text="Default variant" FontSize="12.5" FontWeight="SemiBold" />
+										<TextBox Text="{Binding DefaultVariant}" PlaceholderText="empty = model default" />
+									</StackPanel>
+									<StackPanel Spacing="4">
+										<TextBlock Text="Default agent" FontSize="12.5" FontWeight="SemiBold" />
+										<TextBox Text="{Binding DefaultAgent}" PlaceholderText="empty = default build" />
+									</StackPanel>
+
+									<CheckBox IsChecked="{Binding AutoAllow}" Content="Always allow tool permissions (edit, bash, webfetch)" />
+
+									<Button Classes="btn-soft" HorizontalAlignment="Left" Command="{Binding SaveCommand}">
+										<StackPanel Orientation="Horizontal" Spacing="6">
+											<PathIcon Data="{StaticResource IconCheck}" Width="11" Height="11" />
+											<TextBlock Text="Save" VerticalAlignment="Center" />
+										</StackPanel>
+									</Button>
+								</StackPanel>
+							</ScrollViewer>
+						</Border>
+					</Grid>
+				</Grid>
+			</Grid>
+		</Grid>
+	</suki:SukiWindow>

@@ -1,0 +1,179 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<Application
+	x:Class="WarpAgent.App"
+	xmlns="https://github.com/avaloniaui"
+	xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+	xmlns:suki="https://github.com/kikipoulet/SukiUI"
+	RequestedThemeVariant="Dark">
+	<Application.Resources>
+		<ResourceDictionary>
+			<FontFamily x:Key="CodeFont">DejaVu Sans Mono, Consolas, monospace</FontFamily>
+
+			<!--  surfaces  -->
+			<SolidColorBrush x:Key="SurfaceBrush" Color="#FF12151C" />
+			<SolidColorBrush x:Key="CardBrush" Color="#FF171A21" />
+			<SolidColorBrush x:Key="InputBrush" Color="#FF1E222B" />
+			<SolidColorBrush x:Key="HairlineBrush" Color="#FF2E333F" />
+			<SolidColorBrush x:Key="ChipBrush" Color="#FF262B36" />
+			<SolidColorBrush x:Key="DiffBgBrush" Color="#FF141822" />
+			<SolidColorBrush x:Key="HoverBrush" Color="#14FFFFFF" />
+
+			<!--  chat surfaces  -->
+			<SolidColorBrush x:Key="BubbleUserBrush" Color="#FF2B4C7E" />
+			<SolidColorBrush x:Key="BubbleAssistantBrush" Color="#FF23262E" />
+			<SolidColorBrush x:Key="BubbleQueuedBrush" Color="#FF25354F" />
+			<SolidColorBrush x:Key="QueuedBorderBrush" Color="#FF3D5B8C" />
+
+			<!--  accents  -->
+			<SolidColorBrush x:Key="AccentBrush" Color="#FF6EC0FF" />
+			<SolidColorBrush x:Key="AccentDimBrush" Color="#FF1D3A5F" />
+			<SolidColorBrush x:Key="SuccessBrush" Color="#FF4EC94E" />
+			<SolidColorBrush x:Key="SuccessDimBrush" Color="#FF1D4433" />
+			<SolidColorBrush x:Key="DangerBrush" Color="#FFEF6F6F" />
+			<SolidColorBrush x:Key="DangerDimBrush" Color="#FF3A2226" />
+			<SolidColorBrush x:Key="WarnBrush" Color="#FFD08B3C" />
+			<SolidColorBrush x:Key="WarnBgBrush" Color="#FF33291A" />
+			<SolidColorBrush x:Key="AddBrush" Color="#FF8FD694" />
+			<SolidColorBrush x:Key="DelBrush" Color="#FFEF8A80" />
+			<SolidColorBrush x:Key="TextMutedBrush" Color="#FF8A93A6" />
+
+			<!--  code  -->
+			<SolidColorBrush x:Key="CodeBlockBrush" Color="#FF1B1F28" />
+			<SolidColorBrush x:Key="CodeFgBrush" Color="#FFE8D9BC" />
+			<SolidColorBrush x:Key="SynKeywordBrush" Color="#FFC678DD" />
+			<SolidColorBrush x:Key="SynStringBrush" Color="#FF98C379" />
+			<SolidColorBrush x:Key="SynCommentBrush" Color="#FF6E7A8A" />
+			<SolidColorBrush x:Key="SynNumberBrush" Color="#FFD19A66" />
+
+			<!--  icons (24×24 filled)  -->
+			<StreamGeometry x:Key="IconPlus">M11 4 H13 V11 H20 V13 H13 V20 H11 V13 H4 V11 H11 Z</StreamGeometry>
+			<StreamGeometry x:Key="IconKebab">M5 10.2 A1.8 1.8 0 1 1 5 13.8 A1.8 1.8 0 1 1 5 10.2 Z M12 10.2 A1.8 1.8 0 1 1 12 13.8 A1.8 1.8 0 1 1 12 10.2 Z M19 10.2 A1.8 1.8 0 1 1 19 13.8 A1.8 1.8 0 1 1 19 10.2 Z</StreamGeometry>
+			<StreamGeometry x:Key="IconClose">M6.4 5 L5 6.4 L10.6 12 L5 17.6 L6.4 19 L12 13.4 L17.6 19 L19 17.6 L13.4 12 L19 6.4 L17.6 5 L12 10.6 Z</StreamGeometry>
+			<StreamGeometry x:Key="IconSend">M2 21 L23 12 L2 3 L2 10 L17 12 L2 14 Z</StreamGeometry>
+			<StreamGeometry x:Key="IconStop">M7 7 H17 V17 H7 Z</StreamGeometry>
+			<StreamGeometry x:Key="IconChevronDown">M6.5 9.5 L12 15 L17.5 9.5 L16.1 8.1 L12 12.2 L7.9 8.1 Z</StreamGeometry>
+			<StreamGeometry x:Key="IconChevronRight">M9.5 6.5 L15 12 L9.5 17.5 L8.1 16.1 L12.2 12 L8.1 7.9 Z</StreamGeometry>
+			<StreamGeometry x:Key="IconArrowDown">M11 4 H13 V14.2 L16.6 10.6 L18 12 L12 18 L6 12 L7.4 10.6 L11 14.2 Z</StreamGeometry>
+			<StreamGeometry x:Key="IconArrowUp">M11 20 H13 V9.8 L16.6 13.4 L18 12 L12 6 L6 12 L7.4 13.4 L11 9.8 Z</StreamGeometry>
+			<StreamGeometry x:Key="IconGauge">F0 M12 3 A9 9 0 1 0 12 21 A9 9 0 1 0 12 3 Z M12 5 A7 7 0 1 1 12 19 A7 7 0 1 1 12 5 Z M11.2 11.2 L16.2 7.8 L17.2 9.4 L12.8 13.2 A2 2 0 1 0 11.2 11.2 Z</StreamGeometry>
+			<StreamGeometry x:Key="IconClock">F0 M12 2 A10 10 0 1 0 12 22 A10 10 0 1 0 12 2 Z M11 6 H13 V12.4 L16.8 14.6 L15.8 16.3 L11 13.5 Z</StreamGeometry>
+			<StreamGeometry x:Key="IconDoc">F0 M6 2 H14 L19 7 V21 A1 1 0 0 1 18 22 H7 A1 1 0 0 1 6 21 Z M8 12 H17 V13.6 H8 Z M8 16 H17 V17.6 H8 Z</StreamGeometry>
+			<StreamGeometry x:Key="IconPin">M16 3 V5 L15 6 V10.5 L18 13.5 H6 L9 10.5 V6 L8 5 V3 Z M11 13.5 H13 V21 L12 22 L11 21 Z</StreamGeometry>
+			<StreamGeometry x:Key="IconCopy">F0 M8 2 H20 A2 2 0 0 1 22 4 V16 H20 V4 H8 Z M4 6 H16 A2 2 0 0 1 18 8 V20 A2 2 0 0 1 16 22 H4 A2 2 0 0 1 2 20 V8 A2 2 0 0 1 4 6 Z</StreamGeometry>
+			<StreamGeometry x:Key="IconCheck">M9.5 16.2 L5.3 12 L3.9 13.4 L9.5 19 L21.5 7 L20.1 5.6 Z</StreamGeometry>
+			<StreamGeometry x:Key="IconPlay">M8 5 V19 L19 12 Z</StreamGeometry>
+			<StreamGeometry x:Key="IconDash">M5 11 H19 V13 H5 Z</StreamGeometry>
+			<StreamGeometry x:Key="IconCircle">F0 M12 4 A8 8 0 1 0 12 20 A8 8 0 1 0 12 4 Z M12 6 A6 6 0 1 1 12 18 A6 6 0 1 1 12 6 Z</StreamGeometry>
+			<StreamGeometry x:Key="IconDot">M12 5 A7 7 0 1 0 12 19 A7 7 0 1 0 12 5 Z</StreamGeometry>
+			<StreamGeometry x:Key="IconWarn">F0 M12 2 L23 21 H1 Z M11 9 H13 V15 H11 Z M11 17 H13 V19 H11 Z</StreamGeometry>
+			<StreamGeometry x:Key="IconBulb">F0 M12 2 A7 7 0 0 0 8 14.7 V17 A2 2 0 0 0 10 19 H14 A2 2 0 0 0 16 17 V14.7 A7 7 0 0 0 12 2 Z M9 20 H15 V21 A1 1 0 0 1 14 22 H10 A1 1 0 0 1 9 21 Z</StreamGeometry>
+			<StreamGeometry x:Key="IconShield">F0 M12 2 L4 5 V11 C4 16 7.4 20.4 12 22 C16.6 20.4 20 16 20 11 V5 Z M12 4.2 L18 6.5 V11 C18 15.1 15.4 18.7 12 20.1 C8.6 18.7 6 15.1 6 11 V6.5 Z</StreamGeometry>
+			<StreamGeometry x:Key="IconCog">F0 M19.14 12.94 C19.18 12.64 19.2 12.33 19.2 12 S19.18 11.36 19.13 11.06 L21.16 9.48 C21.34 9.34 21.39 9.07 21.28 8.87 L19.36 5.55 C19.24 5.33 18.99 5.26 18.77 5.33 L16.38 6.29 C15.88 5.91 15.35 5.59 14.76 5.35 L14.4 2.81 C14.36 2.57 14.16 2.4 13.92 2.4 H10.08 C9.84 2.4 9.65 2.57 9.61 2.81 L9.25 5.35 C8.66 5.59 8.12 5.92 7.63 6.29 L5.24 5.33 C5.02 5.25 4.77 5.33 4.65 5.55 L2.73 8.87 C2.61 9.08 2.65 9.34 2.85 9.48 L4.88 11.06 C4.83 11.36 4.79 11.69 4.79 12 S4.81 12.64 4.86 12.94 L2.83 14.52 C2.65 14.66 2.6 14.93 2.71 15.13 L4.63 18.45 C4.75 18.67 5 18.74 5.22 18.67 L7.61 17.71 C8.11 18.09 8.64 18.41 9.23 18.65 L9.59 21.19 C9.64 21.43 9.83 21.6 10.07 21.6 H13.91 C14.15 21.6 14.35 21.43 14.38 21.19 L14.74 18.65 C15.33 18.41 15.87 18.09 16.36 17.71 L18.75 18.67 C18.97 18.75 19.22 18.67 19.34 18.45 L21.26 15.13 C21.38 14.91 21.33 14.66 21.14 14.52 Z M12 15.6 C10.02 15.6 8.4 13.98 8.4 12 S10.02 8.4 12 8.4 S15.6 10.02 15.6 12 13.98 15.6 12 15.6 Z</StreamGeometry>
+			<StreamGeometry x:Key="IconSpark">M12 2 L14.4 9.6 L22 12 L14.4 14.4 L12 22 L9.6 14.4 L2 12 L9.6 9.6 Z</StreamGeometry>
+			<StreamGeometry x:Key="IconFolder">M3 5 H9 L11 7 H21 V19 H3 Z</StreamGeometry>
+		</ResourceDictionary>
+	</Application.Resources>
+	<Application.Styles>
+		<suki:SukiTheme ThemeColor="Blue" />
+
+		<!--  every icon button renders as a square with a centered glyph  -->
+		<Style Selector="Button.icon">
+			<Setter Property="Width" Value="30" />
+			<Setter Property="Height" Value="30" />
+			<Setter Property="Padding" Value="0" />
+			<Setter Property="HorizontalContentAlignment" Value="Center" />
+			<Setter Property="VerticalContentAlignment" Value="Center" />
+		</Style>
+		<Style Selector="ToggleButton.icon">
+			<Setter Property="Width" Value="30" />
+			<Setter Property="Height" Value="30" />
+			<Setter Property="Padding" Value="0" />
+			<Setter Property="HorizontalContentAlignment" Value="Center" />
+			<Setter Property="VerticalContentAlignment" Value="Center" />
+		</Style>
+
+		<!--  working pulse — shared by the header, the running panel and every chat tile  -->
+		<Style Selector="Ellipse.pulse">
+			<Setter Property="Width" Value="5" />
+			<Setter Property="Height" Value="5" />
+			<Setter Property="Fill" Value="{DynamicResource AccentBrush}" />
+			<Setter Property="VerticalAlignment" Value="Center" />
+			<Style.Animations>
+				<Animation Duration="0:0:1.1" IterationCount="Infinite">
+					<KeyFrame Cue="0%"><Setter Property="Opacity" Value="0.2" /></KeyFrame>
+					<KeyFrame Cue="35%"><Setter Property="Opacity" Value="1" /></KeyFrame>
+					<KeyFrame Cue="70%"><Setter Property="Opacity" Value="0.2" /></KeyFrame>
+				</Animation>
+			</Style.Animations>
+		</Style>
+		<Style Selector="Ellipse.pulse.d2">
+			<Style.Animations>
+				<Animation Duration="0:0:1.1" Delay="0:0:0.18" IterationCount="Infinite">
+					<KeyFrame Cue="0%"><Setter Property="Opacity" Value="0.2" /></KeyFrame>
+					<KeyFrame Cue="35%"><Setter Property="Opacity" Value="1" /></KeyFrame>
+					<KeyFrame Cue="70%"><Setter Property="Opacity" Value="0.2" /></KeyFrame>
+				</Animation>
+			</Style.Animations>
+		</Style>
+		<Style Selector="Ellipse.pulse.d3">
+			<Style.Animations>
+				<Animation Duration="0:0:1.1" Delay="0:0:0.36" IterationCount="Infinite">
+					<KeyFrame Cue="0%"><Setter Property="Opacity" Value="0.2" /></KeyFrame>
+					<KeyFrame Cue="35%"><Setter Property="Opacity" Value="1" /></KeyFrame>
+					<KeyFrame Cue="70%"><Setter Property="Opacity" Value="0.2" /></KeyFrame>
+				</Animation>
+			</Style.Animations>
+		</Style>
+
+		<!--  chat disclosure — flat expander for thinking rows, tool details and diffs; full row is the click target  -->
+		<Style Selector="Expander.disclose">
+			<Setter Property="Template">
+				<ControlTemplate TargetType="Expander">
+					<StackPanel>
+						<ToggleButton
+							Focusable="False"
+							Background="Transparent"
+							Padding="0"
+							HorizontalAlignment="Stretch"
+							IsChecked="{Binding IsExpanded, RelativeSource={RelativeSource TemplatedParent}, Mode=TwoWay}"
+							Tag="{TemplateBinding Header}">
+							<ToggleButton.Template>
+								<ControlTemplate TargetType="ToggleButton">
+									<Border Background="{TemplateBinding Background}" Padding="0,5">
+										<Grid ColumnDefinitions="*,Auto" ColumnSpacing="6">
+											<ContentPresenter Content="{Binding Tag, RelativeSource={RelativeSource TemplatedParent}}" VerticalAlignment="Center" />
+											<PathIcon
+												Grid.Column="1"
+												Data="{StaticResource IconChevronRight}"
+												Width="11"
+												Height="11"
+												Opacity="0.55"
+												VerticalAlignment="Center"
+												IsVisible="{Binding !IsChecked, RelativeSource={RelativeSource TemplatedParent}}" />
+											<PathIcon
+												Grid.Column="1"
+												Data="{StaticResource IconChevronDown}"
+												Width="11"
+												Height="11"
+												Opacity="0.55"
+												VerticalAlignment="Center"
+												IsVisible="{Binding IsChecked, RelativeSource={RelativeSource TemplatedParent}}" />
+										</Grid>
+									</Border>
+								</ControlTemplate>
+							</ToggleButton.Template>
+						</ToggleButton>
+						<ContentPresenter
+							Margin="0,2,0,6"
+							IsVisible="{Binding IsExpanded, RelativeSource={RelativeSource TemplatedParent}}"
+							Content="{TemplateBinding Content}"
+							ContentTemplate="{TemplateBinding ContentTemplate}" />
+					</StackPanel>
+				</ControlTemplate>
+			</Setter>
+		</Style>
+		<Style Selector="Expander.disclose ToggleButton:pointerover">
+			<Setter Property="Background" Value="{DynamicResource HoverBrush}" />
+		</Style>
+	</Application.Styles>
+</Application>

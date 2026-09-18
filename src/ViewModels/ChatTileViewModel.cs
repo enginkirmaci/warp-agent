@@ -39,7 +39,22 @@ public partial class ChatTileViewModel : ObservableObject
         ChatItems.CollectionChanged += (_, _) => OnPropertyChanged(nameof(HasMessages));
         Attachments.CollectionChanged += (_, _) => OnPropertyChanged(nameof(HasAttachments));
         Variants.CollectionChanged += (_, _) => OnPropertyChanged(nameof(HasVariants));
-        Tasks.CollectionChanged += (_, _) => OnPropertyChanged(nameof(HasTasks));
+        Tasks.CollectionChanged += (_, _) =>
+        {
+            OnPropertyChanged(nameof(HasTasks));
+            OnPropertyChanged(nameof(TasksProgress));
+            OnPropertyChanged(nameof(HasTasksOrAgents));
+            OnPropertyChanged(nameof(HasTasksAndAgents));
+        };
+        // background agents are grid-wide; the tile re-evaluates when the owner's set changes
+        Owner.PropertyChanged += (_, e) =>
+        {
+            if (e.PropertyName is nameof(MainViewModel.HasBackgroundAgents))
+            {
+                OnPropertyChanged(nameof(HasTasksOrAgents));
+                OnPropertyChanged(nameof(HasTasksAndAgents));
+            }
+        };
     }
 
     public MainViewModel Owner => _owner;
@@ -53,6 +68,15 @@ public partial class ChatTileViewModel : ObservableObject
     public bool HasAttachments => Attachments.Count > 0;
     public bool HasVariants => Variants.Count > 1;
     public bool HasTasks => Tasks.Count > 0;
+
+    /// <summary>"3/5" completed counter for the flyout's Progress header.</summary>
+    public string TasksProgress => $"{Tasks.Count(t => t.Done)}/{Tasks.Count}";
+
+    /// <summary>Drives the header tasks button: this chat's tasks or any grid-wide background agents.</summary>
+    public bool HasTasksOrAgents => HasTasks || Owner.HasBackgroundAgents;
+
+    /// <summary>Both sections visible in the flyout — shows the divider between them.</summary>
+    public bool HasTasksAndAgents => HasTasks && Owner.HasBackgroundAgents;
 
     /// <summary>Null while the tile is an unsent draft; the session is created on first send.</summary>
     public string? SessionId { get; private set; }

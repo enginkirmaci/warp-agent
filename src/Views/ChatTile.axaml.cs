@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.IO;
+using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Input;
 using Avalonia.Input.Platform;
@@ -16,16 +17,21 @@ public partial class ChatTile : UserControl
 {
     private ScrollViewer? _chatScroll;
     private Button? _jumpLatest;
+    private Button? _tasksButton;
     private TextBox? _input;
     // follow-the-latest intent, not a position: recomputing it from the scroll position
     // while content grows is what killed autoscroll right after sending a prompt
     private bool _pinned = true;
+    // last on-screen spot of the tasks button; a change while its flyout is open means
+    // the grid reflowed and the popup would sit orphaned over some other tile
+    private Point _tasksButtonSpot;
 
     public ChatTile()
     {
         InitializeComponent();
         _chatScroll = this.FindControl<ScrollViewer>("ChatScroll");
         _jumpLatest = this.FindControl<Button>("JumpLatest");
+        _tasksButton = this.FindControl<Button>("TasksButton");
         _input = this.FindControl<TextBox>("InputBox");
         // an AcceptsReturn TextBox consumes Enter before bubbling; tunnel to send first
         _input?.AddHandler(InputElement.KeyDownEvent, OnInputKeyDown, RoutingStrategies.Tunnel);
@@ -34,6 +40,21 @@ public partial class ChatTile : UserControl
         this.FindControl<Button>("SendButton")?.Click += (_, _) => PinToLatest();
         if (_chatScroll is not null)
             _chatScroll.ScrollChanged += OnChatScrollChanged;
+        LayoutUpdated += OnLayoutUpdated;
+    }
+
+    private void OnLayoutUpdated(object? sender, EventArgs e)
+    {
+        if (_tasksButton is not { } btn || btn.Flyout is not Flyout { IsOpen: true } flyout)
+            return;
+        var root = TopLevel.GetTopLevel(btn);
+        if (root is null)
+            return;
+        var spot = btn.TranslatePoint(new Point(0, 0), root);
+        if (spot is { } p && _tasksButtonSpot != default && p != _tasksButtonSpot)
+            flyout.Hide();
+        if (spot is { } q)
+            _tasksButtonSpot = q;
     }
 
     private ChatTileViewModel? Vm => DataContext as ChatTileViewModel;
@@ -290,5 +311,12 @@ public partial class ChatTile : UserControl
             return;
         Vm?.LoadIntoInput(message.Text);
         this.FindControl<TextBox>("InputBox")?.Focus();
+    }
+
+    private void OnRunningClick(object? sender, RoutedEventArgs e)
+    {
+        if (Vm is not { } vm || (sender as Control)?.DataContext is not RunningAgentItem running)
+            return;
+        _ = vm.Owner.OpenRunningAsync(running);
     }
 }

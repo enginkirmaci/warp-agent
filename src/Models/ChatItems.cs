@@ -1,3 +1,4 @@
+using System.Collections.ObjectModel;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 
@@ -213,6 +214,150 @@ public partial class PermissionItem : ChatItem
 
     [RelayCommand]
     private Task Deny() => Respond(this, "reject", false);
+}
+
+/// <summary>One selectable choice inside a question; selection drives the card's submit state.</summary>
+public sealed class QuestionOptionItem(string label, string description) : ObservableObject
+{
+    public string Label { get; } = label;
+    public string Description { get; } = description;
+
+    private bool _isSelected;
+    public bool IsSelected
+    {
+        get => _isSelected;
+        set
+        {
+            if (SetProperty(ref _isSelected, value))
+                AnswerChanged?.Invoke();
+        }
+    }
+
+    internal event Action? AnswerChanged;
+}
+
+/// <summary>A single question of a question ask: header label, prompt text, options and an optional custom answer.</summary>
+public sealed partial class QuestionEntry : ObservableObject
+{
+    public QuestionEntry(string question, string header, bool multiple)
+    {
+        Question = question;
+        Header = header;
+        Multiple = multiple;
+        Options.CollectionChanged += (_, e) =>
+        {
+            if (e.NewItems is null)
+                return;
+            foreach (QuestionOptionItem option in e.NewItems)
+                option.AnswerChanged += () => OnPropertyChanged(nameof(HasAnswer));
+        };
+    }
+
+    public string Question { get; }
+    public string Header { get; }
+    public bool Multiple { get; }
+    public ObservableCollection<QuestionOptionItem> Options { get; } = [];
+
+    private string _customText = "";
+
+    public string CustomText
+    {
+        get => _customText;
+        set
+        {
+            if (SetProperty(ref _customText, value))
+            {
+                OnPropertyChanged(nameof(CustomFilled));
+                OnPropertyChanged(nameof(HasAnswer));
+            }
+        }
+    }
+
+    public bool CustomFilled => !string.IsNullOrWhiteSpace(CustomText);
+    public bool HasAnswer => CustomFilled || Options.Any(o => o.IsSelected);
+
+    /// <summary>Set once the ask is resolved; the card's rows become read-only history.</summary>
+    private bool _locked;
+    public bool Locked
+    {
+        get => _locked;
+        set => SetProperty(ref _locked, value);
+    }
+
+    /// <summary>A typed custom answer wins over the picked options; multi-select keeps every picked label.</summary>
+    public string[] Answer() =>
+        CustomFilled ? [CustomText.Trim()] : Options.Where(o => o.IsSelected).Select(o => o.Label).ToArray();
+
+    [RelayCommand]
+    private void ToggleOption(QuestionOptionItem? option)
+    {
+        if (option is null)
+            return;
+        if (Multiple)
+        {
+            option.IsSelected = !option.IsSelected;
+            return;
+        }
+        foreach (var existing in Options)
+            existing.IsSelected = existing == option;
+    }
+}
+
+/// <summary>An interactive `question` tool ask: pick options (or type a custom answer) per question,
+/// then submit — or dismiss to reject the whole ask.</summary>
+public sealed partial class QuestionItem : ChatItem
+{
+    private string? _resolution;
+
+    public required string Id { get; init; }
+    public required string SessionId { get; init; }
+
+    private IReadOnlyList<QuestionEntry> _questions = [];
+
+    public IReadOnlyList<QuestionEntry> Questions
+    {
+        get => _questions;
+        init
+        {
+            _questions = value;
+            foreach (var question in value)
+                question.PropertyChanged += (_, e) =>
+                {
+                    if (e.PropertyName == nameof(QuestionEntry.HasAnswer))
+                        OnPropertyChanged(nameof(CanSubmit));
+                };
+        }
+    }
+
+    public required Func<QuestionItem, string[][], Task> Respond { get; init; }
+    public required Func<QuestionItem, Task> Reject { get; init; }
+
+    public bool IsPending => _resolution is null;
+
+    public string? Resolution
+    {
+        get => _resolution;
+        private set
+        {
+            if (SetProperty(ref _resolution, value))
+                OnPropertyChanged(nameof(IsPending));
+        }
+    }
+
+    public bool CanSubmit => Questions.All(q => q.HasAnswer);
+
+    [RelayCommand]
+    private Task Submit() => Respond(this, Questions.Select(q => q.Answer()).ToArray());
+
+    [RelayCommand]
+    private Task Dismiss() => Reject(this);
+
+    public void SetResolution(string text)
+    {
+        Resolution = text;
+        foreach (var question in Questions)
+            question.Locked = true;
+    }
 }
 
 public static class TimeLabels

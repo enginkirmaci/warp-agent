@@ -26,9 +26,13 @@ public partial class MainViewModel : ObservableObject
     private readonly Dictionary<string, string> _workspaceBySession = new();
     private readonly Dictionary<string, string> _titleBySession = new();
     private readonly Dictionary<string, List<PermissionItem>> _pendingBySession = new();
+    private readonly Dictionary<string, List<QuestionItem>> _pendingQuestionsBySession = new();
     private readonly Dictionary<string, ChatTileViewModel> _tileBySession = new();
     // when the running turn's prompt was sent; drives the done-in note on completion
     private readonly Dictionary<string, DateTime> _turnStartBySession = new();
+
+    /// <summary>Sessions whose current turn the user aborted; the next idle drops a "stopped in" note instead of "done in".</summary>
+    private readonly HashSet<string> _userStoppedBySession = new();
     private readonly List<QueueEntry> _queue = [];
     private int _workspaceGeneration;
     private Task? _switchTask;
@@ -71,6 +75,16 @@ public partial class MainViewModel : ObservableObject
     public bool MultipleWorkspaces => Workspaces.Count > 1;
     public bool HasAgents => Agents.Count > 1;
     public bool HasBackgroundAgents => RunningAgents.Any(r => r.IsBackground);
+
+    /// <summary>"N running" summary for the flyout's Agents header (N counts background agents only).</summary>
+    public string AgentsSummary
+    {
+        get
+        {
+            var n = RunningAgents.Count(r => r.IsBackground);
+            return n == 1 ? "1 running" : $"{n} running";
+        }
+    }
     public bool HasSidePanel => HasBackgroundAgents || (FocusedTile?.HasTasks ?? false);
     public bool HasFocusedTasks => FocusedTile?.HasTasks ?? false;
     public bool HasTasksAndAgents => HasBackgroundAgents && HasFocusedTasks;
@@ -255,6 +269,7 @@ public partial class MainViewModel : ObservableObject
     private void OnSidePanelChanged()
     {
         OnPropertyChanged(nameof(HasBackgroundAgents));
+        OnPropertyChanged(nameof(AgentsSummary));
         OnPropertyChanged(nameof(HasSidePanel));
         OnPropertyChanged(nameof(HasTasksAndAgents));
         OnPropertyChanged(nameof(HasAttentionNeeded));
@@ -714,6 +729,8 @@ public partial class MainViewModel : ObservableObject
                 OpenTiles.Add(tile);
                 tile.Restore(messages);
                 FlushPendingPermissions(id);
+                FlushPendingQuestions(id);
+                _ = PullPendingQuestionsAsync(id, rt.Api);
                 ShowQueuedFor(tile);
                 added++;
             }
@@ -767,6 +784,8 @@ public partial class MainViewModel : ObservableObject
             OpenTiles.Add(tile);
             tile.Restore(messages);
             FlushPendingPermissions(sessionId);
+            FlushPendingQuestions(sessionId);
+            _ = PullPendingQuestionsAsync(sessionId, rt.Api);
             ShowQueuedFor(tile);
             ws.State.ActiveSession = sessionId;
             FocusTile(tile); // also persists the open-tile lists
@@ -958,6 +977,7 @@ public partial class MainViewModel : ObservableObject
         try
         {
             await api.AbortAsync(id, CancellationToken.None);
+            _userStoppedBySession.Add(id);
             SetRunning(id, false);
         }
         catch (Exception ex)
@@ -974,6 +994,7 @@ public partial class MainViewModel : ObservableObject
         try
         {
             await api.AbortAsync(sessionId, CancellationToken.None);
+            _userStoppedBySession.Add(sessionId);
             SetRunning(sessionId, false);
             SetSubagentRunning(sessionId, false);
         }
@@ -1121,6 +1142,7 @@ public partial class MainViewModel : ObservableObject
     {
         DetachTile(id);
         _turnStartBySession.Remove(id);
+        _userStoppedBySession.Remove(id);
         _workspaceBySession.Remove(id);
         foreach (var ws in _state.Workspaces)
             ws.Sessions.Remove(id);
@@ -1174,6 +1196,7 @@ public partial class MainViewModel : ObservableObject
                     Sessions.Add(new SessionItem(s.Id, s.Title, s.UpdatedAt)
                     {
                         IsPinned = _state.Pins.ContainsKey(s.Id),
+                        IsRunning = _runningBySession.Contains(s.Id),
                     });
                 foreach (var running in RunningAgents)
                     if (alive.Contains(running.SessionId))
@@ -1264,6 +1287,7 @@ public partial class MainViewModel : ObservableObject
                     ws.Chats.Add(new SessionItem(s.Id, s.Title, s.UpdatedAt)
                     {
                         IsPinned = _state.Pins.ContainsKey(s.Id),
+                        IsRunning = _runningBySession.Contains(s.Id),
                     });
             });
         }
@@ -1428,6 +1452,13 @@ public partial class MainViewModel : ObservableObject
             case "permission.v2.replied":
                 Dispatcher.UIThread.Post(() => OnPermissionReplied(data));
                 break;
+            case "question.asked":
+                Dispatcher.UIThread.Post(() => OnQuestionAsked(data));
+                break;
+            case "question.replied":
+            case "question.rejected":
+                Dispatcher.UIThread.Post(() => OnQuestionResolved(data));
+                break;
             case "session.status":
                 var status = ReadStatus(data);
                 var statusSession = ReadSessionId(data);
@@ -1482,14 +1513,16 @@ public partial class MainViewModel : ObservableObject
         }
     }
 
-    /// <summary>Turn finished: drop a muted note telling how long the prompt took, send to final answer.</summary>
+    /// <summary>Turn finished: drop a muted note telling how long the prompt took, send to final answer.
+    /// A user-aborted turn says "stopped in" instead — it didn't finish.</summary>
     private void NoteTurnDuration(string sessionId)
     {
+        var stopped = _userStoppedBySession.Remove(sessionId);
         if (!_turnStartBySession.Remove(sessionId, out var start))
             return;
         if (TileFor(sessionId) is not { } tile)
             return;
-        tile.AddNote($"done in {ChatParsing.FormatDuration(DateTime.Now - start)}");
+        tile.AddNote($"{(stopped ? "stopped" : "done")} in {ChatParsing.FormatDuration(DateTime.Now - start)}");
     }
 
     private void SetRunning(string? sessionId, bool running)
@@ -1515,7 +1548,16 @@ public partial class MainViewModel : ObservableObject
             RunningAgents.Remove(existing);
         }
         RefreshBackgroundFlags();
+        UpdateSidebarRunning();
         NotifyBusyChanged();
+    }
+
+    /// <summary>Mirrors the running-session set onto sidebar chat rows (drives their spinner).</summary>
+    private void UpdateSidebarRunning()
+    {
+        foreach (var ws in Workspaces)
+            foreach (var chat in ws.Chats)
+                chat.IsRunning = _runningBySession.Contains(chat.Id);
     }
 
     private void TrackSessionInfo(string? sessionId, string? parentId, string? agent)
@@ -1572,6 +1614,7 @@ public partial class MainViewModel : ObservableObject
         foreach (var item in RunningAgents)
             item.IsBackground = !tiled.Contains(item.SessionId);
         OnPropertyChanged(nameof(HasBackgroundAgents));
+        OnPropertyChanged(nameof(AgentsSummary));
         OnSidePanelChanged();
     }
 
@@ -1705,6 +1748,151 @@ public partial class MainViewModel : ObservableObject
         }
     }
 
+    // ---- question tool asks ----
+    // The agent's `question` tool parks the turn until the user answers; never auto-answered.
+
+    private void OnQuestionAsked(JsonElement data)
+    {
+        if (OpenCodeApiClient.ReadQuestionRequest(data) is not { } request || request.Questions.Count == 0)
+            return;
+        if (TileFor(request.SessionId) is { } tile)
+        {
+            if (!tile.ChatItems.OfType<QuestionItem>().Any(i => i.Id == request.Id))
+                tile.ChatItems.Add(BuildQuestionItem(request));
+            return;
+        }
+        // a subagent's ask belongs to the chat that spawned it
+        var owner = _subagentBySession.TryGetValue(request.SessionId, out var sub) ? sub.ParentSessionId : request.SessionId;
+        if (!IsAppSession(owner))
+            return;
+        if (!_pendingQuestionsBySession.TryGetValue(owner, out var pending))
+            _pendingQuestionsBySession[owner] = pending = [];
+        if (!pending.Any(i => i.Id == request.Id))
+            pending.Add(BuildQuestionItem(request));
+        MarkAttention(request.SessionId, true);
+    }
+
+    private void OnQuestionResolved(JsonElement data)
+    {
+        var requestId = data.TryGetProperty("requestID", out var r) ? r.GetString() : null;
+        if (requestId is null)
+            return;
+        var summary = "dismissed";
+        if (data.TryGetProperty("answers", out var a) && a.ValueKind == JsonValueKind.Array)
+        {
+            var answers = a.EnumerateArray()
+                .Select(x => string.Join(", ", x.EnumerateArray().Select(l => l.GetString() ?? "").Where(l => l.Length > 0)))
+                .Where(x => x.Length > 0)
+                .ToList();
+            if (answers.Count > 0)
+                summary = "answered: " + string.Join(" · ", answers);
+        }
+        ResolveQuestion(requestId, summary);
+    }
+
+    private void ResolveQuestion(string requestId, string summary)
+    {
+        foreach (var tile in OpenTiles)
+            foreach (var item in tile.ChatItems.OfType<QuestionItem>())
+                if (item.Id == requestId && item.IsPending)
+                    item.SetResolution(summary);
+        foreach (var list in _pendingQuestionsBySession.Values)
+            foreach (var item in list)
+                if (item.Id == requestId && item.IsPending)
+                    item.SetResolution(summary);
+    }
+
+    private QuestionItem BuildQuestionItem(QuestionRequestInfo request)
+    {
+        var entries = request.Questions
+            .Select(q => new QuestionEntry(q.Question, q.Header, q.Multiple))
+            .ToList();
+        foreach (var (entry, q) in entries.Zip(request.Questions))
+            foreach (var option in q.Options)
+                entry.Options.Add(new QuestionOptionItem(option.Label, option.Description));
+        return new QuestionItem
+        {
+            Id = request.Id,
+            SessionId = request.SessionId,
+            Questions = entries,
+            Respond = RespondToQuestion,
+            Reject = RejectQuestion,
+        };
+    }
+
+    private async Task RespondToQuestion(QuestionItem item, string[][] answers)
+    {
+        if (ApiFor(item.SessionId) is not { } api)
+        {
+            item.SetResolution("server unavailable");
+            return;
+        }
+        // close the buttons immediately so a slow reply cannot be clicked twice
+        var summary = string.Join(" · ", answers.Select(a => a.Length == 0 ? "(empty)" : string.Join(", ", a)));
+        item.SetResolution($"sending {summary}…");
+        try
+        {
+            await api.ReplyQuestionAsync(item.Id, answers, CancellationToken.None);
+            item.SetResolution(summary);
+        }
+        catch (Exception ex)
+        {
+            item.SetResolution($"reply failed: {ex.Message}");
+        }
+    }
+
+    private async Task RejectQuestion(QuestionItem item)
+    {
+        if (ApiFor(item.SessionId) is not { } api)
+        {
+            item.SetResolution("server unavailable");
+            return;
+        }
+        item.SetResolution("dismissing…");
+        try
+        {
+            await api.RejectQuestionAsync(item.Id, CancellationToken.None);
+            item.SetResolution("dismissed");
+        }
+        catch (Exception ex)
+        {
+            item.SetResolution($"dismiss failed: {ex.Message}");
+        }
+    }
+
+    private void FlushPendingQuestions(string sessionId)
+    {
+        if (!_pendingQuestionsBySession.Remove(sessionId, out var pending))
+            return;
+        if (TileFor(sessionId) is { } tile)
+            foreach (var item in pending.Where(i => i.IsPending))
+                if (!tile.ChatItems.OfType<QuestionItem>().Any(existing => existing.Id == item.Id))
+                    tile.ChatItems.Add(item);
+        MarkAttention(sessionId, false);
+    }
+
+    /// <summary>Picks up question asks the server still holds for this chat — asked while its tile
+    /// was closed or before the app attached. Best effort; live asks arrive on the event stream.</summary>
+    private async Task PullPendingQuestionsAsync(string sessionId, OpenCodeApiClient api)
+    {
+        try
+        {
+            var pending = await api.GetQuestionsAsync(CancellationToken.None);
+            Dispatcher.UIThread.Post(() =>
+            {
+                if (TileFor(sessionId) is not { } tile)
+                    return;
+                foreach (var request in pending.Where(q => q.SessionId == sessionId))
+                    if (!tile.ChatItems.OfType<QuestionItem>().Any(existing => existing.Id == request.Id))
+                        tile.ChatItems.Add(BuildQuestionItem(request));
+            });
+        }
+        catch
+        {
+            // the ask stays visible on the server side and re-arrives with its events
+        }
+    }
+
     private static string? ReadSessionId(JsonElement data) =>
         data.TryGetProperty("sessionID", out var sid) ? sid.GetString() : null;
 
@@ -1724,24 +1912,20 @@ public partial class MainViewModel : ObservableObject
         if (data.TryGetProperty("error", out var error) && error.ValueKind == JsonValueKind.Object)
         {
             var name = error.TryGetProperty("name", out var n) ? n.GetString() : null;
-            var message = error.TryGetProperty("message", out var m) ? m.GetString() : null;
             if (name is { } n2 && n2.Contains("Abort", StringComparison.OrdinalIgnoreCase))
                 return "Turn stopped.";
-            var head = $"Error: {name ?? "opencode"}{(message is { Length: > 0 } ? $" — {message}" : "")}";
-            var extras = new StringBuilder();
-            foreach (var prop in error.EnumerateObject())
-            {
-                if (prop.Name is "name" or "message")
-                    continue;
-                var raw = prop.Value.ValueKind == JsonValueKind.String ? prop.Value.GetString() : prop.Value.GetRawText();
-                if (string.IsNullOrEmpty(raw))
-                    continue;
-                extras.Append('\n').Append(prop.Name).Append(": ").Append(raw);
-            }
-            var detail = extras.ToString();
-            if (detail.Length > 2000)
-                detail = detail[..2000] + "\n… (truncated)";
-            return detail.Length > 0 ? head + detail : head;
+            // API errors carry the human message nested in data ("...does not include access to…");
+            // everything else on the payload (headers, stack, status codes) is transport noise
+            var message = "";
+            if (error.TryGetProperty("data", out var payload) && payload.ValueKind == JsonValueKind.Object &&
+                payload.TryGetProperty("message", out var dm) && dm.GetString() is { Length: > 0 } inner)
+                message = inner;
+            else if (error.TryGetProperty("message", out var m) && m.GetString() is { Length: > 0 } outer)
+                message = outer;
+            if (message.Length == 0)
+                message = name is { Length: > 0 } n3 ? n3 : "Session error.";
+            var text = message.StartsWith("Error:", StringComparison.Ordinal) ? message : $"Error: {message}";
+            return text.Length > 600 ? text[..600] + "…" : text;
         }
         return "Session error.";
     }

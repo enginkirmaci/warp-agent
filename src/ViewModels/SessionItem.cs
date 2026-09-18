@@ -10,6 +10,7 @@ public sealed class SessionItem : ObservableObject
     private bool _isPinned;
     private bool _isEditing;
     private bool _isSelected;
+    private bool _isRunning;
     private string _draftTitle = "";
 
     public SessionItem(string id, string title, DateTime updated)
@@ -33,11 +34,33 @@ public sealed class SessionItem : ObservableObject
         }
     }
 
-    public bool IsPinned { get => _isPinned; set => SetProperty(ref _isPinned, value); }
+    public bool IsPinned
+    {
+        get => _isPinned;
+        set
+        {
+            if (SetProperty(ref _isPinned, value))
+                OnPropertyChanged(nameof(PinVisible));
+        }
+    }
 
     public bool IsEditing { get => _isEditing; set => SetProperty(ref _isEditing, value); }
 
     public bool IsSelected { get => _isSelected; set => SetProperty(ref _isSelected, value); }
+
+    /// <summary>True while this chat's turn runs; drives the sidebar spinner.</summary>
+    public bool IsRunning
+    {
+        get => _isRunning;
+        set
+        {
+            if (SetProperty(ref _isRunning, value))
+                OnPropertyChanged(nameof(PinVisible));
+        }
+    }
+
+    /// <summary>Pin shows in the gutter only when the row isn't spinning (one glyph per gutter).</summary>
+    public bool PinVisible => IsPinned && !IsRunning;
 
     public string DraftTitle { get => _draftTitle; set => SetProperty(ref _draftTitle, value); }
 

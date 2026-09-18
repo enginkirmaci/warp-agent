@@ -8,7 +8,7 @@ namespace WarpAgent.Controls;
 
 /// <summary>
 /// Renders a unified diff GitHub-style: muted old/new line-number gutter,
-/// green/red per-line background tints, blue @@ hunk separators, muted metadata.
+/// green/red per-line background tints, gray @@ hunk separators, muted metadata.
 /// One SelectableTextBlock so selection still spans lines; Run.Background tints
 /// text extent rather than the full row.
 /// </summary>
@@ -17,15 +17,15 @@ public class DiffTextBlock : StackPanel
     private static readonly FontFamily CodeFont = FontFamily.Parse("DejaVu Sans Mono, Consolas, monospace");
     private static readonly Regex HunkRegex = new(@"^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@", RegexOptions.Compiled);
 
-    private readonly IBrush _addFg = ThemeRes.Brush("AddBrush", "#FF8FD694");
-    private readonly IBrush _addBg = new SolidColorBrush(Color.Parse("#264EC94E"));
-    private readonly IBrush _delFg = ThemeRes.Brush("DelBrush", "#FFEF8A80");
-    private readonly IBrush _delBg = new SolidColorBrush(Color.Parse("#26EF8A80"));
-    private readonly IBrush _hunkFg = ThemeRes.Brush("AccentBrush", "#FF6EC0FF");
-    private readonly IBrush _hunkBg = new SolidColorBrush(Color.Parse("#1F6EC0FF"));
-    private readonly IBrush _metaFg = ThemeRes.Brush("TextMutedBrush", "#FF8A93A6");
-    private readonly IBrush _gutterFg = new SolidColorBrush(Color.Parse("#558A93A6"));
-    private readonly IBrush _textFg = ThemeRes.Brush("CodeFgBrush", "#FFE8D9BC");
+    private readonly IBrush _addFg = ThemeRes.Brush("AddBrush", "#FF8FC496");
+    private readonly IBrush _addBg = new SolidColorBrush(Color.Parse("#268FC496"));
+    private readonly IBrush _delFg = ThemeRes.Brush("DelBrush", "#FFE28E85");
+    private readonly IBrush _delBg = new SolidColorBrush(Color.Parse("#26E28E85"));
+    private readonly IBrush _hunkFg = ThemeRes.Brush("AccentBrush", "#FFBBBBBB");
+    private readonly IBrush _hunkBg = new SolidColorBrush(Color.Parse("#1FBBBBBB"));
+    private readonly IBrush _metaFg = ThemeRes.Brush("TextMutedBrush", "#FF929292");
+    private readonly IBrush _gutterFg = new SolidColorBrush(Color.Parse("#55929292"));
+    private readonly IBrush _textFg = ThemeRes.Brush("CodeFgBrush", "#FFDADADA");
 
     public static readonly StyledProperty<string?> TextProperty =
         AvaloniaProperty.Register<DiffTextBlock, string?>(nameof(Text));

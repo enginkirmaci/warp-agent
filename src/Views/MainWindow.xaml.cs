@@ -34,8 +34,18 @@ public partial class MainWindow : SukiWindow
 
     private void OnWorkspaceClick(object? sender, TappedEventArgs e)
     {
-        if ((sender as Control)?.DataContext is WorkspaceItem ws)
-            _vm.SelectWorkspace(ws);
+        if ((sender as Control)?.DataContext is not WorkspaceItem ws)
+            return;
+        // a tap on the kebab/plus buttons is their own business, not a section toggle
+        if (e.Source is Button)
+            return;
+        _vm.SelectWorkspace(ws);
+        // the whole row is the toggle: anywhere-click expands or collapses the section
+        var expanding = !ws.IsExpanded;
+        ws.IsExpanded = expanding;
+        // opening the chat list is intent to work in that workspace
+        if (expanding)
+            _vm.ConnectExpandedWorkspace(ws);
     }
 
     private void OnWorkspaceCollapseClick(object? sender, RoutedEventArgs e)

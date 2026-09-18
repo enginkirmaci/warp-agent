@@ -30,14 +30,6 @@
 			<Setter Property="Margin" Value="0,3" />
 			<Setter Property="TextWrapping" Value="Wrap" />
 		</Style>
-		<Style Selector="TextBlock.note.error">
-			<Setter Property="Opacity" Value="1" />
-			<Setter Property="Foreground" Value="{DynamicResource DangerBrush}" />
-			<Setter Property="HorizontalAlignment" Value="Left" />
-			<Setter Property="FontFamily" Value="{StaticResource CodeFont}" />
-			<Setter Property="FontSize" Value="11.5" />
-			<Setter Property="Margin" Value="8,3" />
-		</Style>
 		<Style Selector="TextBlock.tool-error">
 			<Setter Property="Foreground" Value="{DynamicResource DangerBrush}" />
 			<Setter Property="FontSize" Value="11.5" />
@@ -53,6 +45,10 @@
 			<Setter Property="Opacity" Value="0.55" />
 			<Setter Property="HorizontalAlignment" Value="Right" />
 			<Setter Property="VerticalAlignment" Value="Center" />
+		</Style>
+		<!--  completed checklist rows read muted  -->
+		<Style Selector="TextBlock.task-done">
+			<Setter Property="Opacity" Value="0.5" />
 		</Style>
 
 		<!--  hover-revealed copy on message bubbles — bare glyph, no button chrome  -->
@@ -74,7 +70,10 @@
 		<Style Selector="Button.code-copy">
 			<Setter Property="Opacity" Value="0" />
 			<Setter Property="Background" Value="Transparent" />
+			<Setter Property="BorderThickness" Value="0" />
 			<Setter Property="Padding" Value="3" />
+			<Setter Property="MinHeight" Value="0" />
+			<Setter Property="MinWidth" Value="0" />
 		</Style>
 		<Style Selector="Border.code-block:pointerover Button.code-copy">
 			<Setter Property="Opacity" Value="1" />
@@ -163,7 +162,7 @@
 		</Style>
 		<Style Selector="Button.btn-allow">
 			<Setter Property="Background" Value="{DynamicResource AccentBrush}" />
-			<Setter Property="Foreground" Value="#FF0E1116" />
+			<Setter Property="Foreground" Value="{DynamicResource OnAccentBrush}" />
 			<Setter Property="CornerRadius" Value="7" />
 			<Setter Property="Padding" Value="11,4" />
 			<Setter Property="FontSize" Value="12" />
@@ -192,6 +191,25 @@
 			<Setter Property="FontSize" Value="12" />
 		</Style>
 
+		<!--  error notes surface as a red section — same card family as permission asks  -->
+		<Style Selector="Border.error-card">
+			<Setter Property="HorizontalAlignment" Value="Left" />
+			<Setter Property="MaxWidth" Value="640" />
+			<Setter Property="CornerRadius" Value="10" />
+			<Setter Property="Background" Value="{DynamicResource DangerDimBrush}" />
+			<Setter Property="Margin" Value="0,3" />
+		</Style>
+
+		<!--  tasks expander: hidden until the pointer is anywhere on the tile  -->
+		<Style Selector="Button.tasks-btn">
+			<Setter Property="Opacity" Value="0" />
+			<Setter Property="IsHitTestVisible" Value="False" />
+		</Style>
+		<Style Selector="Border.tile-root:pointerover Button.tasks-btn">
+			<Setter Property="Opacity" Value="1" />
+			<Setter Property="IsHitTestVisible" Value="True" />
+		</Style>
+
 		<!--  composer focus ring  -->
 		<Style Selector="Border.input-card">
 			<Setter Property="BorderBrush" Value="{DynamicResource HairlineBrush}" />
@@ -207,9 +225,43 @@
 			<Setter Property="Background" Value="Transparent" />
 			<Setter Property="Foreground" Value="{DynamicResource TextMutedBrush}" />
 		</Style>
+		<!--  selected auto-allow reads warm: yellow-orange glyph on the dim warm fill  -->
 		<Style Selector="ToggleButton.allow-toggle:on">
+			<Setter Property="Background" Value="{DynamicResource WarnBgBrush}" />
+			<Setter Property="Foreground" Value="{DynamicResource WarnBrush}" />
+		</Style>
+
+		<!--  question ask card: neutral bubble, options tint on hover and when picked  -->
+		<Style Selector="Border.q-card">
+			<Setter Property="HorizontalAlignment" Value="Left" />
+			<Setter Property="CornerRadius" Value="10" />
+			<Setter Property="Background" Value="{DynamicResource BubbleAssistantBrush}" />
+			<Setter Property="BorderBrush" Value="{DynamicResource HairlineBrush}" />
+			<Setter Property="BorderThickness" Value="1" />
+			<Setter Property="MaxWidth" Value="640" />
+			<Setter Property="Margin" Value="0,4,40,4" />
+		</Style>
+		<Style Selector="Button.q-opt">
+			<Setter Property="Background" Value="Transparent" />
+			<Setter Property="BorderBrush" Value="{DynamicResource HairlineBrush}" />
+			<Setter Property="BorderThickness" Value="1" />
+			<Setter Property="CornerRadius" Value="8" />
+			<Setter Property="Padding" Value="9,6" />
+			<Setter Property="HorizontalAlignment" Value="Stretch" />
+			<Setter Property="HorizontalContentAlignment" Value="Stretch" />
+		</Style>
+		<Style Selector="Button.q-opt:pointerover">
+			<Setter Property="Background" Value="{DynamicResource HoverBrush}" />
+		</Style>
+		<Style Selector="Button.q-opt.selected">
 			<Setter Property="Background" Value="{DynamicResource AccentDimBrush}" />
-			<Setter Property="Foreground" Value="{DynamicResource AccentBrush}" />
+		</Style>
+		<Style Selector="TextBox.q-custom">
+			<Setter Property="FontSize" Value="12" />
+			<Setter Property="Padding" Value="8,5" />
+			<Setter Property="CornerRadius" Value="8" />
+			<Setter Property="MinHeight" Value="0" />
+			<Setter Property="Background" Value="Transparent" />
 		</Style>
 	</UserControl.Styles>
 
@@ -219,15 +271,17 @@
 		Tapped="OnTileTapped">
 		<Grid RowDefinitions="Auto,*,Auto">
 
-			<!--  tile header  -->
-			<Grid Grid.Row="0" Margin="10,7,7,0" ColumnDefinitions="Auto,Auto,*,Auto">
+			<!--  tile header: close action left of the identity (pulse + title), meta at the right  -->
+			<Grid Grid.Row="0" Margin="10,7,7,0" ColumnDefinitions="Auto,Auto,Auto,*">
 				<Button
+					Grid.Column="0"
 					Classes="icon"
+					Margin="0,0,2,0"
 					Command="{Binding CloseCommand}"
 					ToolTip.Tip="Close this tile — the chat stays in the sidebar and keeps running">
 					<PathIcon Data="{StaticResource IconClose}" Width="11" Height="11" />
 				</Button>
-				<Ellipse Grid.Column="1" Classes="pulse" Margin="6,0,0,0" VerticalAlignment="Center" IsVisible="{Binding IsBusy}" />
+				<Ellipse Grid.Column="1" Classes="pulse" Margin="4,0,0,0" VerticalAlignment="Center" IsVisible="{Binding IsBusy}" />
 				<TextBlock
 					Grid.Column="2"
 					Text="{Binding Title}"
@@ -238,7 +292,7 @@
 					TextTrimming="CharacterEllipsis"
 					ToolTip.Tip="{Binding Title}" />
 				<!--  corner details: next model/variant plus the conversation's total context usage  -->
-				<StackPanel Grid.Column="3" Orientation="Horizontal" Spacing="6" VerticalAlignment="Center" Margin="10,0,0,0">
+				<StackPanel Grid.Column="3" Orientation="Horizontal" Spacing="6" VerticalAlignment="Center" HorizontalAlignment="Right" Margin="10,0,0,0">
 					<TextBlock
 						Text="{Binding SelectedModel}"
 						FontSize="10.5"
@@ -264,6 +318,160 @@
 						VerticalAlignment="Center"
 						IsVisible="{Binding HasContext}"
 						ToolTip.Tip="Total tokens used by this conversation vs the model's context limit" />
+					<!--  tasks expander: lives beside the context stats, hover-revealed  -->
+					<Button
+						x:Name="TasksButton"
+						Classes="icon tasks-btn"
+						Margin="2,0,0,0"
+						IsVisible="{Binding HasTasksOrAgents}"
+						ToolTip.Tip="Tasks and running agents">
+						<Button.Flyout>
+							<Flyout Placement="BottomEdgeAlignedRight">
+									<Border
+										MinWidth="300"
+										MaxWidth="440"
+										CornerRadius="12"
+										Background="{DynamicResource SurfaceBrush}"
+										BorderBrush="{DynamicResource HairlineBrush}"
+										BorderThickness="1"
+										Padding="12,10">
+										<ScrollViewer MaxHeight="460" HorizontalScrollBarVisibility="Disabled">
+											<StackPanel Spacing="8">
+												<Grid ColumnDefinitions="*,Auto" IsVisible="{Binding HasTasks}">
+													<TextBlock Text="Progress" FontWeight="SemiBold" FontSize="13" Margin="2,0,0,0" VerticalAlignment="Center" />
+													<TextBlock Grid.Column="1" Text="{Binding TasksProgress}" FontSize="11.5" Opacity="0.6" VerticalAlignment="Center" Margin="0,0,2,0" />
+												</Grid>
+												<ItemsControl ItemsSource="{Binding Tasks}" IsVisible="{Binding HasTasks}">
+													<ItemsControl.ItemTemplate>
+														<DataTemplate>
+															<Grid ColumnDefinitions="14,*" Margin="2,4">
+																<PathIcon
+																	Data="{StaticResource IconCircleCheck}"
+																	Width="13"
+																	Height="13"
+																	Foreground="{DynamicResource SuccessBrush}"
+																	VerticalAlignment="Top"
+																	Margin="0,2,0,0"
+																	IsVisible="{Binding Completed}" />
+																<PathIcon
+																	Data="{StaticResource IconPlay}"
+																	Width="11"
+																	Height="11"
+																	Foreground="{DynamicResource AccentBrush}"
+																	VerticalAlignment="Top"
+																	Margin="1,3,0,0"
+																	IsVisible="{Binding InProgress}" />
+																<PathIcon
+																	Data="{StaticResource IconCircle}"
+																	Width="13"
+																	Height="13"
+																	Foreground="{DynamicResource TextMutedBrush}"
+																	VerticalAlignment="Top"
+																	Margin="0,2,0,0"
+																	IsVisible="{Binding Pending}" />
+																<PathIcon
+																	Data="{StaticResource IconDash}"
+																	Width="13"
+																	Height="13"
+																	Foreground="{DynamicResource TextMutedBrush}"
+																	VerticalAlignment="Top"
+																	Margin="0,2,0,0"
+																	IsVisible="{Binding Cancelled}" />
+																<TextBlock
+																	Grid.Column="1"
+																	Text="{Binding Content}"
+																	TextWrapping="Wrap"
+																	FontSize="12.5"
+																	Margin="7,1,0,0"
+																	Classes.task-done="{Binding Done}" />
+															</Grid>
+														</DataTemplate>
+													</ItemsControl.ItemTemplate>
+												</ItemsControl>
+												<Border Height="1" Background="{DynamicResource HairlineBrush}" Margin="0,3" IsVisible="{Binding HasTasksAndAgents}" />
+												<Grid ColumnDefinitions="*,Auto" IsVisible="{Binding Owner.HasBackgroundAgents}">
+													<TextBlock Text="Agents" FontWeight="SemiBold" FontSize="13" Margin="2,0,0,0" VerticalAlignment="Center" />
+													<TextBlock Grid.Column="1" Text="{Binding Owner.AgentsSummary}" FontSize="11.5" Opacity="0.6" VerticalAlignment="Center" Margin="0,0,2,0" />
+												</Grid>
+												<ItemsControl ItemsSource="{Binding Owner.RunningAgents}" IsVisible="{Binding Owner.HasBackgroundAgents}">
+													<ItemsControl.ItemTemplate>
+														<DataTemplate>
+															<StackPanel
+																Orientation="Horizontal"
+																Spacing="7"
+																Margin="2,4"
+																IsVisible="{Binding IsBackground}">
+																<Ellipse
+																	Width="5"
+																	Height="5"
+																	Fill="{DynamicResource AccentBrush}"
+																	VerticalAlignment="Center" />
+																<PathIcon
+																	Data="{StaticResource IconPlay}"
+																	Width="9"
+																	Height="9"
+																	Foreground="{DynamicResource AccentBrush}"
+																	VerticalAlignment="Center"
+																	IsVisible="{Binding IsSubagent}"
+																	ToolTip.Tip="Subagent run — click to open the chat that spawned it" />
+																<PathIcon
+																	Data="{StaticResource IconWarn}"
+																	Width="13"
+																	Height="13"
+																	Foreground="{DynamicResource WarnBrush}"
+																	VerticalAlignment="Center"
+																	IsVisible="{Binding NeedsAttention}"
+																	ToolTip.Tip="Waiting for a permission answer" />
+																<StackPanel
+																	VerticalAlignment="Center"
+																	Background="Transparent"
+																	Cursor="Hand"
+																	Tapped="OnRunningClick"
+																	ToolTip.Tip="Open this chat">
+																	<TextBlock
+																		Text="{Binding Title}"
+																		TextTrimming="CharacterEllipsis"
+																		MaxWidth="220"
+																		FontSize="12.5" />
+																	<TextBlock
+																		Text="{Binding Workspace}"
+																		FontSize="10"
+																		Opacity="0.5"
+																		IsVisible="{Binding $parent[ItemsControl].DataContext.Owner.MultipleWorkspaces}" />
+																</StackPanel>
+																<Button
+																	Classes="icon"
+																	Command="{Binding $parent[ItemsControl].DataContext.Owner.StopRunningCommand}"
+																	CommandParameter="{Binding SessionId}"
+																	VerticalAlignment="Center"
+																	ToolTip.Tip="Stop this agent">
+																	<PathIcon Data="{StaticResource IconStop}" Width="11" Height="11" />
+																</Button>
+															</StackPanel>
+														</DataTemplate>
+													</ItemsControl.ItemTemplate>
+												</ItemsControl>
+											</StackPanel>
+										</ScrollViewer>
+									</Border>
+								</Flyout>
+						</Button.Flyout>
+						<StackPanel Orientation="Horizontal" Spacing="6">
+							<PathIcon
+								Data="{StaticResource IconWarn}"
+								Width="11"
+								Height="11"
+								Foreground="{DynamicResource WarnBrush}"
+								VerticalAlignment="Center"
+								IsVisible="{Binding Owner.HasAttentionNeeded}"
+								ToolTip.Tip="An agent is waiting for a permission answer" />
+							<PathIcon
+								Data="{StaticResource IconChevronRight}"
+								Width="11"
+								Height="11"
+								VerticalAlignment="Center" />
+						</StackPanel>
+					</Button>
 				</StackPanel>
 			</Grid>
 
@@ -383,7 +591,7 @@
 													Height="12"
 													Foreground="{DynamicResource TextMutedBrush}"
 													VerticalAlignment="Center" />
-												<TextBlock Text="thinking" FontStyle="Italic" Opacity="0.5" FontSize="11.5" />
+												<TextBlock Text="thinking" FontStyle="Italic" Opacity="0.75" FontSize="11.5" />
 											</StackPanel>
 										</Expander.Header>
 										<Border Classes="fold-body">
@@ -435,7 +643,7 @@
 										<Expander Classes="disclose chat-fold" IsVisible="{Binding HasDiff}">
 											<Expander.Header>
 												<StackPanel Orientation="Horizontal" Spacing="8">
-													<TextBlock Text="Changes" FontSize="11" Opacity="0.6" />
+													<TextBlock Text="Changes" FontSize="11" Opacity="0.75" />
 													<StackPanel Orientation="Horizontal" Spacing="2" IsVisible="{Binding HasNumstat}">
 														<TextBlock Text="{Binding Additions}" Foreground="{DynamicResource AddBrush}" FontSize="11" />
 														<TextBlock Text="{Binding Deletions}" Foreground="{DynamicResource DelBrush}" FontSize="11" />
@@ -450,7 +658,7 @@
 										</Expander>
 										<Expander Classes="disclose chat-fold" IsVisible="{Binding HasDetails}">
 											<Expander.Header>
-												<TextBlock Text="details" FontSize="11" Opacity="0.5" />
+												<TextBlock Text="details" FontSize="11" Opacity="0.75" />
 											</Expander.Header>
 											<Border Classes="fold-body">
 												<ScrollViewer Classes="fold-scroll">
@@ -561,17 +769,143 @@
 									</Border>
 								</DataTemplate>
 
-								<DataTemplate DataType="{x:Type m:SystemNoteItem}">
-									<TextBlock
-										Classes="note"
-										Classes.error="{Binding IsError}"
-										Text="{Binding Text}">
-										<TextBlock.ContextMenu>
+								<DataTemplate DataType="{x:Type m:QuestionItem}">
+									<Border Classes="q-card">
+										<Border.ContextMenu>
 											<ContextMenu>
 												<MenuItem Header="Copy" Click="OnCopyMessage" />
 											</ContextMenu>
-										</TextBlock.ContextMenu>
-									</TextBlock>
+										</Border.ContextMenu>
+										<Grid ColumnDefinitions="Auto,*">
+											<Border
+												Width="3"
+												Margin="6,8"
+												CornerRadius="2"
+												Background="{DynamicResource AccentBrush}" />
+											<StackPanel Grid.Column="1" Spacing="4" Margin="0,7,10,7">
+												<StackPanel Orientation="Horizontal" Spacing="7" IsVisible="{Binding IsPending}">
+													<Ellipse Classes="tool-dot running" VerticalAlignment="Center" />
+													<TextBlock Text="question" FontWeight="SemiBold" FontSize="12.5" VerticalAlignment="Center" />
+													<TextBlock Text="pick an answer for each question" FontSize="11" Opacity="0.5" VerticalAlignment="Center" />
+												</StackPanel>
+												<ItemsControl ItemsSource="{Binding Questions}" Margin="0,2,0,0">
+													<ItemsControl.ItemTemplate>
+														<DataTemplate DataType="{x:Type m:QuestionEntry}">
+															<StackPanel Spacing="5" Margin="0,0,0,4" IsEnabled="{Binding !Locked}">
+																<TextBlock
+																	Text="{Binding Header}"
+																	FontSize="11"
+																	FontWeight="SemiBold"
+																	Opacity="0.55" />
+																<TextBlock Text="{Binding Question}" FontSize="12.5" TextWrapping="Wrap" />
+																<ItemsControl ItemsSource="{Binding Options}">
+																	<ItemsControl.ItemTemplate>
+																		<DataTemplate DataType="{x:Type m:QuestionOptionItem}">
+																			<Button
+																				Classes="q-opt"
+																				Classes.selected="{Binding IsSelected}"
+																				Margin="0,0,0,3"
+																				Command="{Binding $parent[ItemsControl].DataContext.ToggleOptionCommand}"
+																				CommandParameter="{Binding}">
+																				<Grid ColumnDefinitions="Auto,*" ColumnSpacing="8">
+																					<StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+																						<PathIcon
+																							Data="{StaticResource IconCheck}"
+																							Width="12"
+																							Height="12"
+																							VerticalAlignment="Center"
+																							Foreground="{DynamicResource AccentBrush}"
+																							IsVisible="{Binding IsSelected}" />
+																						<Ellipse
+																							Width="12"
+																							Height="12"
+																							StrokeThickness="1"
+																							Stroke="{DynamicResource TextMutedBrush}"
+																							VerticalAlignment="Center"
+																							IsVisible="{Binding !IsSelected}" />
+																					</StackPanel>
+																					<StackPanel Grid.Column="1" Spacing="1">
+																						<TextBlock Text="{Binding Label}" FontSize="12.5" FontWeight="SemiBold" TextWrapping="Wrap" />
+																						<TextBlock Text="{Binding Description}" FontSize="11.5" Opacity="0.6" TextWrapping="Wrap" />
+																					</StackPanel>
+																				</Grid>
+																			</Button>
+																		</DataTemplate>
+																	</ItemsControl.ItemTemplate>
+																</ItemsControl>
+																<TextBox
+																	Classes="q-custom"
+																	Text="{Binding CustomText}"
+																	PlaceholderText="custom answer…"
+																	IsVisible="{Binding !Locked}"
+																	IsEnabled="{Binding !Locked}"
+																	ToolTip.Tip="Type your own answer — it wins over picked options" />
+															</StackPanel>
+														</DataTemplate>
+													</ItemsControl.ItemTemplate>
+												</ItemsControl>
+												<StackPanel Orientation="Horizontal" Spacing="6" Margin="0,4,0,0" IsVisible="{Binding IsPending}">
+													<Button
+														Classes="btn-soft-accent"
+														Content="Answer"
+														Command="{Binding SubmitCommand}"
+														IsEnabled="{Binding CanSubmit}"
+														ToolTip.Tip="Send the answers — the turn continues" />
+													<Button Classes="icon" Command="{Binding DismissCommand}" ToolTip.Tip="Dismiss — the agent sees the ask was rejected">
+														<PathIcon Data="{StaticResource IconClose}" Width="12" Height="12" />
+													</Button>
+												</StackPanel>
+												<TextBlock
+													Text="{Binding Resolution}"
+													IsVisible="{Binding !IsPending}"
+													FontStyle="Italic"
+													FontSize="12"
+													Opacity="0.75"
+													Margin="0,3,0,0"
+													TextWrapping="Wrap" />
+											</StackPanel>
+										</Grid>
+									</Border>
+								</DataTemplate>
+
+								<DataTemplate DataType="{x:Type m:SystemNoteItem}">
+									<Panel>
+										<!--  errors: red section card, same family as the permission card  -->
+										<Border Classes="error-card" IsVisible="{Binding IsError}">
+											<Border.ContextMenu>
+												<ContextMenu>
+													<MenuItem Header="Copy" Click="OnCopyMessage" />
+												</ContextMenu>
+											</Border.ContextMenu>
+											<Grid ColumnDefinitions="Auto,*">
+												<Border
+													Width="3"
+													Margin="6,8"
+													CornerRadius="2"
+													Background="{DynamicResource DangerBrush}" />
+												<StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="7" Margin="0,7,10,7" VerticalAlignment="Center">
+													<Ellipse Classes="tool-dot error" VerticalAlignment="Center" />
+													<TextBlock
+														Text="{Binding Text}"
+														Foreground="{DynamicResource DangerBrush}"
+														FontSize="12"
+														TextWrapping="Wrap"
+														VerticalAlignment="Center" />
+												</StackPanel>
+											</Grid>
+										</Border>
+										<!--  plain informational notes stay as centered muted lines  -->
+										<TextBlock
+											Classes="note"
+											IsVisible="{Binding !IsError}"
+											Text="{Binding Text}">
+											<TextBlock.ContextMenu>
+												<ContextMenu>
+													<MenuItem Header="Copy" Click="OnCopyMessage" />
+												</ContextMenu>
+											</TextBlock.ContextMenu>
+										</TextBlock>
+									</Panel>
 								</DataTemplate>
 
 								</ItemsControl.DataTemplates>
@@ -588,10 +922,7 @@
 					Margin="0,0,8,8"
 					Click="OnJumpLatestClicked"
 					ToolTip.Tip="Jump to the latest message">
-					<StackPanel Orientation="Horizontal" Spacing="6">
-						<PathIcon Data="{StaticResource IconArrowDown}" Width="12" Height="12" />
-						<TextBlock Text="Latest" VerticalAlignment="Center" />
-					</StackPanel>
+					<PathIcon Data="{StaticResource IconArrowDown}" Width="12" Height="12" />
 				</Button>
 			</Grid>
 
@@ -661,7 +992,7 @@
 								Click="OnAttachClick"
 								VerticalAlignment="Center"
 								ToolTip.Tip="Attach files">
-								<PathIcon Data="{StaticResource IconDoc}" Width="14" Height="14" />
+								<PathIcon Data="{StaticResource IconPlus}" Width="14" Height="14" />
 							</Button>
 							<ToggleButton
 								Grid.Column="1"
@@ -714,7 +1045,7 @@
 							Command="{Binding AbortCommand}"
 							IsVisible="{Binding IsBusy}"
 							IsEnabled="{Binding IsConnected}">
-							<PathIcon Data="{StaticResource IconClose}" Width="15" Height="15" />
+							<PathIcon Data="{StaticResource IconStop}" Width="14" Height="14" />
 						</Button>
 					</Grid>
 				</StackPanel>

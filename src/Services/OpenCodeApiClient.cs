@@ -14,6 +14,13 @@ public sealed record ModelInfo(string Key, IReadOnlyList<string> Variants, int C
 
 public sealed record AgentInfo(string Name, string Description, string Mode, bool Hidden);
 
+public sealed record QuestionOptionInfo(string Label, string Description);
+
+public sealed record QuestionPromptInfo(string Question, string Header, bool Multiple, IReadOnlyList<QuestionOptionInfo> Options);
+
+/// <summary>A pending `question` tool ask: id (que_…), owning session and the questions in order.</summary>
+public sealed record QuestionRequestInfo(string Id, string SessionId, IReadOnlyList<QuestionPromptInfo> Questions);
+
 /// <summary>
 /// REST + SSE calls against an opencode server (v1 surface verified live against
 /// 1.18.31). The chat is driven purely by the /event stream: the message POST is
@@ -113,6 +120,26 @@ public sealed class OpenCodeApiClient(string baseUrl)
 
     public Task ReplyV2Async(string requestId, string reply, CancellationToken ct) =>
         PostAsync($"/permission/{requestId}/reply", new { reply }, TimeSpan.FromSeconds(15), ct);
+
+    /// <summary>Pending question asks across every session of this server.</summary>
+    public async Task<List<QuestionRequestInfo>> GetQuestionsAsync(CancellationToken ct)
+    {
+        using var resp = await Http.GetAsync($"{BaseUrl}/question", ct);
+        resp.EnsureSuccessStatusCode();
+        using var doc = await JsonDocument.ParseAsync(await resp.Content.ReadAsStreamAsync(ct), cancellationToken: ct);
+        var requests = new List<QuestionRequestInfo>();
+        if (doc.RootElement.ValueKind == JsonValueKind.Array)
+            foreach (var r in doc.RootElement.EnumerateArray())
+                if (ReadQuestionRequest(r) is { } request)
+                    requests.Add(request);
+        return requests;
+    }
+
+    public Task ReplyQuestionAsync(string requestId, string[][] answers, CancellationToken ct) =>
+        PostAsync($"/question/{requestId}/reply", new { answers }, TimeSpan.FromSeconds(15), ct);
+
+    public Task RejectQuestionAsync(string requestId, CancellationToken ct) =>
+        PostAsync($"/question/{requestId}/reject", new { }, TimeSpan.FromSeconds(15), ct);
 
     /// <summary>Shares the session; returns the public URL, or null when already shared without a URL.</summary>
     public async Task<string?> ShareAsync(string sessionId, CancellationToken ct)
@@ -221,6 +248,34 @@ public sealed class OpenCodeApiClient(string baseUrl)
                       time.TryGetProperty("updated", out var u) &&
                       u.TryGetInt64(out var ms) ? FromMs(ms) : DateTime.MinValue;
         return new SessionInfo(id, title, directory, updated);
+    }
+
+    /// <summary>Shared by the /question listing and the question.asked event — same Request shape.</summary>
+    public static QuestionRequestInfo? ReadQuestionRequest(JsonElement r)
+    {
+        var id = r.TryGetProperty("id", out var i) ? i.GetString() : null;
+        var sessionId = r.TryGetProperty("sessionID", out var s) ? s.GetString() : null;
+        if (id is null || sessionId is null ||
+            !r.TryGetProperty("questions", out var qs) || qs.ValueKind != JsonValueKind.Array)
+            return null;
+        var questions = new List<QuestionPromptInfo>();
+        foreach (var q in qs.EnumerateArray())
+        {
+            var text = q.TryGetProperty("question", out var qq) ? qq.GetString() ?? "" : "";
+            var header = q.TryGetProperty("header", out var h) ? h.GetString() ?? "" : "";
+            var multiple = q.TryGetProperty("multiple", out var m) && m.ValueKind == JsonValueKind.True;
+            var options = new List<QuestionOptionInfo>();
+            if (q.TryGetProperty("options", out var os) && os.ValueKind == JsonValueKind.Array)
+                foreach (var o in os.EnumerateArray())
+                {
+                    var label = o.TryGetProperty("label", out var l) ? l.GetString() ?? "" : "";
+                    var description = o.TryGetProperty("description", out var dd) ? dd.GetString() ?? "" : "";
+                    if (label.Length > 0)
+                        options.Add(new QuestionOptionInfo(label, description));
+                }
+            questions.Add(new QuestionPromptInfo(text, header, multiple, options));
+        }
+        return new QuestionRequestInfo(id, sessionId, questions);
     }
 
     private static DateTime FromMs(long ms) => DateTimeOffset.FromUnixTimeMilliseconds(ms).ToLocalTime().DateTime;

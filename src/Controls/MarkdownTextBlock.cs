@@ -27,17 +27,17 @@ public class MarkdownTextBlock : StackPanel
     private static readonly StreamGeometry CopyGeometry =
         ThemeRes.Geometry("IconCopy", "F0 M8 2 H20 A2 2 0 0 1 22 4 V16 H20 V4 H8 Z M4 6 H16 A2 2 0 0 1 18 8 V20 A2 2 0 0 1 16 22 H4 A2 2 0 0 1 2 20 V8 A2 2 0 0 1 4 6 Z");
 
-    private readonly IBrush _inlineCodeBg = ThemeRes.Brush("ChipBrush", "#FF262B36");
-    private readonly IBrush _codeFg = ThemeRes.Brush("CodeFgBrush", "#FFE8D9BC");
-    private readonly IBrush _blockBg = ThemeRes.Brush("CodeBlockBrush", "#FF1B1F28");
-    private readonly IBrush _headerBg = ThemeRes.Brush("ChipBrush", "#FF262B36");
-    private readonly IBrush _linkFg = ThemeRes.Brush("AccentBrush", "#FF6EC0FF");
-    private readonly IBrush _kw = ThemeRes.Brush("SynKeywordBrush", "#FFC678DD");
-    private readonly IBrush _str = ThemeRes.Brush("SynStringBrush", "#FF98C379");
-    private readonly IBrush _com = ThemeRes.Brush("SynCommentBrush", "#FF6E7A8A");
-    private readonly IBrush _num = ThemeRes.Brush("SynNumberBrush", "#FFD19A66");
-    private readonly IBrush _muted = ThemeRes.Brush("TextMutedBrush", "#FF8A93A6");
-    private readonly IBrush _hairline = ThemeRes.Brush("HairlineBrush", "#FF2E333F");
+    private readonly IBrush _inlineCodeBg = ThemeRes.Brush("ChipBrush", "#FF272727");
+    private readonly IBrush _codeFg = ThemeRes.Brush("CodeFgBrush", "#FFDADADA");
+    private readonly IBrush _blockBg = ThemeRes.Brush("CodeBlockBrush", "#FF1C1C1C");
+    private readonly IBrush _headerBg = ThemeRes.Brush("ChipBrush", "#FF272727");
+    private readonly IBrush _linkFg = ThemeRes.Brush("AccentBrush", "#FFBBBBBB");
+    private readonly IBrush _kw = ThemeRes.Brush("SynKeywordBrush", "#FFA9A9A9");
+    private readonly IBrush _str = ThemeRes.Brush("SynStringBrush", "#FF93B585");
+    private readonly IBrush _com = ThemeRes.Brush("SynCommentBrush", "#FF6F6F6F");
+    private readonly IBrush _num = ThemeRes.Brush("SynNumberBrush", "#FFC9986E");
+    private readonly IBrush _muted = ThemeRes.Brush("TextMutedBrush", "#FF929292");
+    private readonly IBrush _hairline = ThemeRes.Brush("HairlineBrush", "#FF2E2E2E");
 
     public static readonly StyledProperty<string> TextProperty =
         AvaloniaProperty.Register<MarkdownTextBlock, string>(nameof(Text), "");
@@ -316,7 +316,7 @@ public class MarkdownTextBlock : StackPanel
         {
             Text = label,
             Cursor = new Cursor(StandardCursorType.Hand),
-            Foreground = ThemeRes.Brush("AccentBrush", "#FF6EC0FF"),
+            Foreground = ThemeRes.Brush("AccentBrush", "#FFBBBBBB"),
             TextDecorations = TextDecorationCollection.Parse("Underline"),
             FontWeight = bold ? FontWeight.Bold : FontWeight.Normal,
         };
@@ -349,12 +349,12 @@ public class MarkdownTextBlock : StackPanel
         {
             run.FontFamily = CodeFont;
             run.FontSize = 12.5;
-            run.Background = ThemeRes.Brush("ChipBrush", "#FF262B36");
+            run.Background = ThemeRes.Brush("ChipBrush", "#FF272727");
             run.Foreground = ThemeRes.Brush("CodeFgBrush", "#FFE8D9BC");
         }
         else if (link)
         {
-            run.Foreground = ThemeRes.Brush("AccentBrush", "#FF6EC0FF");
+            run.Foreground = ThemeRes.Brush("AccentBrush", "#FFBBBBBB");
             run.TextDecorations = TextDecorationCollection.Parse("Underline");
         }
         if (bold)

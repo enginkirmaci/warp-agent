@@ -16,31 +16,20 @@
 	MinWidth="860"
 	MinHeight="580"
 	BackgroundStyle="Flat"
+	BackgroundAnimationEnabled="False"
 	WindowStartupLocation="CenterScreen"
 	x:DataType="vm:MainViewModel"
 	mc:Ignorable="d">
 
 	<suki:SukiWindow.LogoContent>
-		<PathIcon Data="{StaticResource IconSpark}" Width="15" Height="15" Foreground="{DynamicResource AccentBrush}" />
+		<PathIcon Data="{StaticResource IconSpark}" Width="15" Height="15" Foreground="{DynamicResource TextMutedBrush}" />
 	</suki:SukiWindow.LogoContent>
 
-	<!--  laid out right-to-left: the divider ends up between the cog and the caption buttons  -->
-	<suki:SukiWindow.RightWindowTitleBarControls>
-		<Border
-			Width="1"
-			Height="14"
-			Margin="2,0"
-			VerticalAlignment="Center"
-			Background="{DynamicResource HairlineBrush}" />
-		<Button
-			Classes="icon"
-			Command="{Binding OpenSettingsCommand}"
-			ToolTip.Tip="Settings">
-			<PathIcon Data="{StaticResource IconCog}" Width="14" Height="14" />
-		</Button>
-	</suki:SukiWindow.RightWindowTitleBarControls>
-
 	<suki:SukiWindow.Styles>
+		<!--  flatten the titlebar too: the SukiUI shader (waves/gradient) must never show  -->
+		<Style Selector="suki|SukiWindow /template/ Border#PART_TitleBarBackground">
+			<Setter Property="Background" Value="{DynamicResource WindowChromeBrush}" />
+		</Style>
 		<Style Selector="Border.pill">
 			<Setter Property="CornerRadius" Value="20" />
 			<Setter Property="Padding" Value="11,4" />
@@ -74,17 +63,6 @@
 			<Setter Property="Background" Value="{DynamicResource HoverBrush}" />
 		</Style>
 
-		<!--  workspace selection indicator: keeps its column so unselected names stay aligned  -->
-		<Style Selector="Border.ws-marker">
-			<Setter Property="Width" Value="3" />
-			<Setter Property="Margin" Value="0,4,7,4" />
-			<Setter Property="CornerRadius" Value="2" />
-			<Setter Property="Background" Value="Transparent" />
-		</Style>
-		<Style Selector="Border.ws-marker.selected">
-			<Setter Property="Background" Value="{DynamicResource AccentBrush}" />
-		</Style>
-
 		<!--  workspace row actions appear on hover only  -->
 		<Style Selector="Button.ws-action">
 			<Setter Property="Opacity" Value="0" />
@@ -97,7 +75,7 @@
 			<Setter Property="IsHitTestVisible" Value="True" />
 		</Style>
 
-		<!--  the Projects header's + behaves the same: hidden until the header is hovered  -->
+		<!--  the Workspaces header's + behaves the same: hidden until the header is hovered  -->
 		<Style Selector="Grid.projects-header Button.ws-action">
 			<Setter Property="Opacity" Value="0" />
 			<Setter Property="IsHitTestVisible" Value="False" />
@@ -137,6 +115,11 @@
 			<Setter Property="Padding" Value="10,5" />
 			<Setter Property="CornerRadius" Value="8" />
 			<Setter Property="MinHeight" Value="30" />
+			<Setter Property="Background" Value="{DynamicResource ChipBrush}" />
+			<Setter Property="BorderThickness" Value="0" />
+		</Style>
+		<Style Selector="Button.btn-soft:pointerover">
+			<Setter Property="Background" Value="{DynamicResource HoverBrush}" />
 		</Style>
 
 		<!--  sidebar resize handle: invisible until hovered  -->
@@ -148,7 +131,10 @@
 		</Style>
 	</suki:SukiWindow.Styles>
 
-	<Grid x:Name="LayoutRoot">
+	<!--  painted root: solid flat canvas over the SukiUI shader — no gradient, no waves.
+	      the sidebar column shows WindowChromeBrush (same solid as the titlebar); the
+	      tile grid paints the darker SurfaceBrush on top of it  -->
+	<Grid x:Name="LayoutRoot" Background="{DynamicResource WindowChromeBrush}">
 		<Grid.ColumnDefinitions>
 			<ColumnDefinition Width="250" />
 			<ColumnDefinition Width="4" />
@@ -161,15 +147,15 @@
 			MinWidth="180"
 			MaxWidth="480"
 			Margin="10,10,0,10"
-			CornerRadius="12"
-			Background="{DynamicResource SurfaceBrush}"
 			Padding="10">
-				<Grid RowDefinitions="*">
-					<ScrollViewer HorizontalScrollBarVisibility="Disabled">
-						<StackPanel Spacing="10">
+				<Grid RowDefinitions="*,Auto">
+					<ScrollViewer Grid.Row="0" HorizontalScrollBarVisibility="Disabled">
+						<!--  explicit viewport width: the ScrollViewer's own horizontal measure goes
+						      stale across splitter drags, leaving the rows shifted/overflowing  -->
+						<StackPanel Width="{Binding $parent[ScrollViewer].Viewport.Width}" Spacing="10">
 							<Grid ColumnDefinitions="*,Auto" ColumnSpacing="4" Classes="projects-header">
 								<TextBlock
-									Text="Projects"
+									Text="Workspaces"
 									FontSize="12"
 									FontWeight="SemiBold"
 									Opacity="0.7"
@@ -184,19 +170,12 @@
 							</Grid>
 							<ItemsControl ItemsSource="{Binding Workspaces}">
 								<ItemsControl.ItemTemplate>
-									<DataTemplate>
-										<StackPanel Margin="0,1">
-											<Grid ColumnDefinitions="Auto,*">
-												<!--  selection indicator: accent bar on the selected workspace only  -->
-												<Border
-													Classes="ws-marker"
-													Classes.selected="{Binding IsSelected}" />
-												<Border
-													Grid.Column="1"
-													Classes="row-card"
-													Classes.selected="{Binding IsSelected}"
-													ToolTip.Tip="{Binding FolderPath}"
-													Tapped="OnWorkspaceClick">
+										<DataTemplate>
+											<StackPanel Margin="0,1">
+											<Border
+												Classes="row-card"
+												ToolTip.Tip="{Binding FolderPath}"
+												Tapped="OnWorkspaceClick">
 													<Border.ContextMenu>
 														<ContextMenu>
 															<MenuItem Header="Start server" Click="OnWorkspaceStartClick" IsVisible="{Binding !IsRunning}" />
@@ -224,7 +203,7 @@
 														</Button>
 														<StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="7" Margin="4,0,0,0">
 															<PathIcon
-																Data="{StaticResource IconFolder}"
+																Data="{StaticResource IconFolderOutline}"
 																Width="13"
 																Height="13"
 																Foreground="{DynamicResource TextMutedBrush}"
@@ -258,7 +237,6 @@
 														</StackPanel>
 													</Grid>
 												</Border>
-											</Grid>
 											<StackPanel IsVisible="{Binding IsExpanded}">
 												<TextBlock
 													Classes="sidebar-hint"
@@ -287,14 +265,24 @@
 																	<MenuItem Header="Delete" Click="OnDeleteClick" />
 																</ContextMenu>
 															</Border.ContextMenu>
-															<Grid ColumnDefinitions="Auto,*,Auto" ColumnSpacing="5">
-																<PathIcon
-																	Data="{StaticResource IconPin}"
-																	Width="11"
-																	Height="11"
-																	Foreground="{DynamicResource AccentBrush}"
-																	VerticalAlignment="Center"
-																	IsVisible="{Binding IsPinned}" />
+															<Grid ColumnDefinitions="13,*,Auto" ColumnSpacing="5">
+																<!--  gutter: spinner while the turn runs, pin otherwise —
+																      titles stay aligned across all chat rows  -->
+																<Panel VerticalAlignment="Center">
+																	<PathIcon
+																		Classes="spin"
+																		Data="{StaticResource IconSpinner}"
+																		Width="12"
+																		Height="12"
+																		IsVisible="{Binding IsRunning}" />
+																	<PathIcon
+																		Data="{StaticResource IconPin}"
+																		Width="11"
+																		Height="11"
+																		Foreground="{DynamicResource TextMutedBrush}"
+																		VerticalAlignment="Center"
+																		IsVisible="{Binding PinVisible}" />
+																</Panel>
 																<TextBlock
 																	Grid.Column="1"
 																	Text="{Binding Title}"
@@ -331,6 +319,14 @@
 								Text="Add a workspace folder to begin." />
 						</StackPanel>
 					</ScrollViewer>
+					<Button
+						Grid.Row="1"
+						Classes="icon"
+						HorizontalAlignment="Left"
+						Command="{Binding OpenSettingsCommand}"
+						ToolTip.Tip="Settings">
+						<PathIcon Data="{StaticResource IconCog}" Width="14" Height="14" />
+					</Button>
 				</Grid>
 			</Border>
 
@@ -343,7 +339,7 @@
 			HorizontalAlignment="Stretch"
 			VerticalAlignment="Stretch" />
 
-		<Grid Grid.Column="2" Margin="10,10,10,10">
+		<Grid Grid.Column="2" Margin="10,10,10,10" Background="{DynamicResource SurfaceBrush}">
 				<Grid RowDefinitions="*">
 
 					<!--  Tile grid: every open chat is one tile  -->
@@ -377,158 +373,6 @@
 								IsVisible="{Binding HasRunningWorkspace}"
 								Text="Open a chat from the sidebar, or start a new one with the + next to a workspace." />
 						</StackPanel>
-
-						<!--  Tasks + agents flyout, pinned to the grid's top-right corner  -->
-						<Button
-							HorizontalAlignment="Right"
-							VerticalAlignment="Top"
-							Margin="0,2,2,0"
-							Classes="btn-soft"
-							IsVisible="{Binding HasSidePanel}"
-							ToolTip.Tip="Tasks and running agents of this grid">
-							<Button.Flyout>
-								<Flyout Placement="BottomEdgeAlignedRight">
-									<StackPanel MinWidth="300" MaxWidth="440" Spacing="10">
-										<Border
-											CornerRadius="12"
-											Background="{DynamicResource SurfaceBrush}"
-											BorderBrush="{DynamicResource HairlineBrush}"
-											BorderThickness="1"
-											Padding="10"
-											IsVisible="{Binding HasFocusedTasks}">
-											<ScrollViewer MaxHeight="380" HorizontalScrollBarVisibility="Disabled">
-												<StackPanel Spacing="2">
-													<TextBlock Text="Tasks" FontWeight="SemiBold" FontSize="13" Margin="2,0,0,4" />
-													<ItemsControl ItemsSource="{Binding FocusedTile.Tasks}">
-														<ItemsControl.ItemTemplate>
-															<DataTemplate>
-																<StackPanel Orientation="Horizontal" Spacing="8" Margin="2,3">
-																	<PathIcon
-																		Data="{StaticResource IconCircle}"
-																		Width="12"
-																		Height="12"
-																		Foreground="{DynamicResource TextMutedBrush}"
-																		VerticalAlignment="Top"
-																		Margin="0,3,0,0"
-																		IsVisible="{Binding Pending}" />
-																	<PathIcon
-																		Data="{StaticResource IconPlay}"
-																		Width="11"
-																		Height="11"
-																		Foreground="{DynamicResource AccentBrush}"
-																		VerticalAlignment="Top"
-																		Margin="0,3,0,0"
-																		IsVisible="{Binding InProgress}" />
-																	<PathIcon
-																		Data="{StaticResource IconCheck}"
-																		Width="12"
-																		Height="12"
-																		Foreground="{DynamicResource SuccessBrush}"
-																		VerticalAlignment="Top"
-																		Margin="0,3,0,0"
-																		IsVisible="{Binding Completed}" />
-																	<PathIcon
-																		Data="{StaticResource IconDash}"
-																		Width="12"
-																		Height="12"
-																		Foreground="{DynamicResource TextMutedBrush}"
-																		VerticalAlignment="Top"
-																		Margin="0,3,0,0"
-																		IsVisible="{Binding Cancelled}" />
-																	<TextBlock Text="{Binding Content}" TextWrapping="Wrap" FontSize="12.5" Classes.task-done="{Binding Done}" />
-																</StackPanel>
-															</DataTemplate>
-														</ItemsControl.ItemTemplate>
-													</ItemsControl>
-												</StackPanel>
-											</ScrollViewer>
-										</Border>
-										<Border
-											CornerRadius="12"
-											Background="{DynamicResource SurfaceBrush}"
-											BorderBrush="{DynamicResource HairlineBrush}"
-											BorderThickness="1"
-											Padding="10"
-											IsVisible="{Binding HasBackgroundAgents}">
-											<StackPanel Spacing="2">
-												<TextBlock Text="Background agents" FontWeight="SemiBold" FontSize="13" Margin="2,0,0,4" />
-												<ItemsControl ItemsSource="{Binding RunningAgents}">
-													<ItemsControl.ItemTemplate>
-														<DataTemplate>
-															<StackPanel
-																Orientation="Horizontal"
-																Spacing="7"
-																Margin="2,3"
-																IsVisible="{Binding IsBackground}">
-																<Ellipse
-																	Width="5"
-																	Height="5"
-																	Fill="{DynamicResource AccentBrush}"
-																	VerticalAlignment="Center" />
-																<PathIcon
-																	Data="{StaticResource IconPlay}"
-																	Width="9"
-																	Height="9"
-																	Foreground="{DynamicResource AccentBrush}"
-																	VerticalAlignment="Center"
-																	IsVisible="{Binding IsSubagent}"
-																	ToolTip.Tip="Subagent run — click to open the chat that spawned it" />
-																<PathIcon
-																	Data="{StaticResource IconWarn}"
-																	Width="13"
-																	Height="13"
-																	Foreground="{DynamicResource WarnBrush}"
-																	VerticalAlignment="Center"
-																	IsVisible="{Binding NeedsAttention}"
-																	ToolTip.Tip="Waiting for a permission answer" />
-																<StackPanel
-																	VerticalAlignment="Center"
-																	Background="Transparent"
-																	Cursor="Hand"
-																	Tapped="OnRunningClick"
-																	ToolTip.Tip="Open this chat">
-																	<TextBlock
-																		Text="{Binding Title}"
-																		TextTrimming="CharacterEllipsis"
-																		MaxWidth="220"
-																		FontSize="12.5" />
-																	<TextBlock
-																		Text="{Binding Workspace}"
-																		FontSize="10"
-																		Opacity="0.5"
-																		IsVisible="{Binding $parent[ItemsControl].DataContext.MultipleWorkspaces}" />
-																</StackPanel>
-																<Button
-																	Classes="icon"
-																	Command="{Binding $parent[ItemsControl].DataContext.StopRunningCommand}"
-																	CommandParameter="{Binding SessionId}"
-																	VerticalAlignment="Center"
-																	ToolTip.Tip="Stop this agent">
-																	<PathIcon Data="{StaticResource IconStop}" Width="11" Height="11" />
-																</Button>
-															</StackPanel>
-														</DataTemplate>
-													</ItemsControl.ItemTemplate>
-												</ItemsControl>
-											</StackPanel>
-										</Border>
-									</StackPanel>
-								</Flyout>
-							</Button.Flyout>
-							<StackPanel Orientation="Horizontal" Spacing="7">
-								<PathIcon
-									Data="{StaticResource IconWarn}"
-									Width="11"
-									Height="11"
-									Foreground="{DynamicResource WarnBrush}"
-									VerticalAlignment="Center"
-									IsVisible="{Binding HasAttentionNeeded}"
-									ToolTip.Tip="An agent is waiting for a permission answer" />
-								<TextBlock Text="Tasks" VerticalAlignment="Center" IsVisible="{Binding HasFocusedTasks}" />
-								<TextBlock Text="·" VerticalAlignment="Center" IsVisible="{Binding HasTasksAndAgents}" />
-								<TextBlock Text="Agents" VerticalAlignment="Center" IsVisible="{Binding HasBackgroundAgents}" />
-							</StackPanel>
-						</Button>
 
 						<!--  Settings page: covers the tile grid while open  -->
 						<Border

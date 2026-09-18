@@ -109,7 +109,7 @@
 			<Setter Property="Width" Value="34" />
 			<Setter Property="Height" Value="34" />
 			<Setter Property="Padding" Value="0" />
-			<Setter Property="CornerRadius" Value="17" />
+			<Setter Property="CornerRadius" Value="8" />
 			<Setter Property="Background" Value="{DynamicResource AccentBrush}" />
 			<Setter Property="Foreground" Value="#FF0E1116" />
 		</Style>
@@ -117,7 +117,7 @@
 			<Setter Property="Width" Value="34" />
 			<Setter Property="Height" Value="34" />
 			<Setter Property="Padding" Value="0" />
-			<Setter Property="CornerRadius" Value="17" />
+			<Setter Property="CornerRadius" Value="8" />
 			<Setter Property="Background" Value="{DynamicResource DangerDimBrush}" />
 			<Setter Property="Foreground" Value="{DynamicResource DangerBrush}" />
 		</Style>
@@ -334,7 +334,7 @@
 								</DataTemplate>
 
 								<DataTemplate DataType="{x:Type m:ReasoningItem}">
-									<Expander Classes="disclose" IsExpanded="False" HorizontalAlignment="Stretch" MaxWidth="640" Margin="0,2">
+									<Expander Classes="disclose" IsExpanded="False" HorizontalAlignment="Left" MaxWidth="640" Margin="0,2">
 										<Expander.Header>
 											<StackPanel Orientation="Horizontal" Spacing="6">
 												<PathIcon
@@ -402,7 +402,7 @@
 												<c:DiffTextBlock Text="{Binding FileDiff}" />
 											</Border>
 										</Expander>
-										<Expander Classes="disclose" IsVisible="{Binding HasDetails}" IsExpanded="False" HorizontalAlignment="Stretch" MaxWidth="640">
+										<Expander Classes="disclose" IsVisible="{Binding HasDetails}" IsExpanded="False" HorizontalAlignment="Left" MaxWidth="640">
 											<Expander.Header>
 												<TextBlock Text="details" FontSize="11" Opacity="0.5" />
 											</Expander.Header>
@@ -670,8 +670,7 @@
 							VerticalAlignment="Center"
 							Command="{Binding SendCommand}"
 							IsVisible="{Binding !IsBusy}"
-							IsEnabled="{Binding Owner.IsServerRunning}"
-							ToolTip.Tip="Send — while a turn runs, the message is queued until it finishes">
+							IsEnabled="{Binding Owner.IsServerRunning}">
 							<PathIcon Data="{StaticResource IconArrowUp}" Width="17" Height="17" />
 						</Button>
 						<Button
@@ -680,8 +679,7 @@
 							VerticalAlignment="Center"
 							Command="{Binding AbortCommand}"
 							IsVisible="{Binding IsBusy}"
-							IsEnabled="{Binding Owner.IsServerRunning}"
-							ToolTip.Tip="Stop this chat's running turn">
+							IsEnabled="{Binding Owner.IsServerRunning}">
 							<PathIcon Data="{StaticResource IconClose}" Width="15" Height="15" />
 						</Button>
 					</Grid>

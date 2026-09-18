@@ -64,14 +64,13 @@
 			<Setter Property="CornerRadius" Value="8" />
 			<Setter Property="Padding" Value="8,6" />
 			<Setter Property="Background" Value="Transparent" />
-			<Setter Property="BorderThickness" Value="1" />
-			<Setter Property="BorderBrush" Value="Transparent" />
+			<Setter Property="BorderThickness" Value="0" />
 		</Style>
 		<Style Selector="Border.row-card:pointerover">
 			<Setter Property="Background" Value="{DynamicResource HoverBrush}" />
 		</Style>
 		<Style Selector="Border.row-card.selected">
-			<Setter Property="BorderBrush" Value="{DynamicResource AccentBrush}" />
+			<Setter Property="Background" Value="{DynamicResource HoverBrush}" />
 		</Style>
 
 		<!--  workspace row actions appear on hover only  -->
@@ -127,6 +126,21 @@
 				<Grid RowDefinitions="*">
 					<ScrollViewer HorizontalScrollBarVisibility="Disabled">
 						<StackPanel Spacing="10">
+							<Grid ColumnDefinitions="*,Auto" ColumnSpacing="4">
+								<TextBlock
+									Text="Projects"
+									FontSize="12"
+									FontWeight="SemiBold"
+									Opacity="0.7"
+									VerticalAlignment="Center" />
+								<Button
+									Grid.Column="1"
+									Classes="icon"
+									Click="OnAddWorkspaceClicked"
+									ToolTip.Tip="Add workspace folder">
+									<PathIcon Data="{StaticResource IconPlus}" Width="13" Height="13" />
+								</Button>
+							</Grid>
 							<ItemsControl ItemsSource="{Binding Workspaces}">
 								<ItemsControl.ItemTemplate>
 									<DataTemplate>
@@ -303,13 +317,6 @@
 									Foreground="{DynamicResource AccentBrush}"
 									VerticalAlignment="Center" />
 							</StackPanel>
-							<Button
-								Grid.Column="1"
-								Classes="icon"
-								Command="{Binding NewChatCommand}"
-								ToolTip.Tip="New chat">
-								<PathIcon Data="{StaticResource IconPlus}" Width="15" Height="15" />
-							</Button>
 						</Grid>
 						<Grid ColumnDefinitions="*,Auto,Auto" ColumnSpacing="8">
 							<Border

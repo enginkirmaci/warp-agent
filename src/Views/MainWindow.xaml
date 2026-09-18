@@ -69,14 +69,14 @@
 		<Style Selector="Border.row-card:pointerover">
 			<Setter Property="Background" Value="{DynamicResource HoverBrush}" />
 		</Style>
-		<Style Selector="Border.row-card.selected">
-			<Setter Property="Background" Value="{DynamicResource HoverBrush}" />
-		</Style>
+		<Style Selector="Border.row-card.selected" />
 
 		<!--  workspace row actions appear on hover only  -->
 		<Style Selector="Button.ws-action">
 			<Setter Property="Opacity" Value="0" />
 			<Setter Property="IsHitTestVisible" Value="False" />
+			<Setter Property="Background" Value="Transparent" />
+			<Setter Property="BorderThickness" Value="0" />
 		</Style>
 		<Style Selector="Border.row-card:pointerover Button.ws-action">
 			<Setter Property="Opacity" Value="1" />

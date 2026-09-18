@@ -122,12 +122,48 @@
 			<Setter Property="Background" Value="{DynamicResource HoverBrush}" />
 		</Style>
 
+		<!--  relaunch banner: flat hairline chip floating at the top of the tile grid  -->
+		<Style Selector="Border.restore-bar">
+			<Setter Property="Background" Value="{DynamicResource CardBrush}" />
+			<Setter Property="BorderBrush" Value="{DynamicResource HairlineBrush}" />
+			<Setter Property="BorderThickness" Value="1" />
+			<Setter Property="CornerRadius" Value="9" />
+			<Setter Property="Padding" Value="14,7" />
+		</Style>
+		<Style Selector="Border.restore-bar Button.btn-soft">
+			<Setter Property="MinHeight" Value="26" />
+			<Setter Property="Padding" Value="12,3" />
+		</Style>
+
 		<!--  sidebar resize handle: invisible until hovered  -->
 		<Style Selector="GridSplitter">
 			<Setter Property="Background" Value="Transparent" />
 		</Style>
 		<Style Selector="GridSplitter:pointerover">
 			<Setter Property="Background" Value="{DynamicResource HoverBrush}" />
+		</Style>
+		<!--  error overlay: the crash-guard dialog shown over everything  -->
+		<Style Selector="Border.error-dialog">
+			<Setter Property="Background" Value="{DynamicResource CardBrush}" />
+			<Setter Property="BorderBrush" Value="{DynamicResource HairlineBrush}" />
+			<Setter Property="BorderThickness" Value="1" />
+			<Setter Property="CornerRadius" Value="12" />
+			<Setter Property="Padding" Value="18" />
+		</Style>
+		<Style Selector="Border.error-detail">
+			<Setter Property="Background" Value="{DynamicResource SurfaceBrush}" />
+			<Setter Property="CornerRadius" Value="8" />
+			<Setter Property="Padding" Value="10" />
+		</Style>
+		<Style Selector="TextBlock.error-sub">
+			<Setter Property="FontSize" Value="11" />
+			<Setter Property="Foreground" Value="{DynamicResource TextMutedBrush}" />
+		</Style>
+		<Style Selector="TextBlock.error-mono">
+			<Setter Property="FontFamily" Value="{StaticResource CodeFont}" />
+			<Setter Property="FontSize" Value="11.5" />
+			<Setter Property="TextWrapping" Value="Wrap" />
+			<Setter Property="Opacity" Value="0.75" />
 		</Style>
 	</suki:SukiWindow.Styles>
 
@@ -368,11 +404,35 @@
 								Classes="sidebar-hint"
 								IsVisible="{Binding HasIdleWorkspace}"
 								Text="Start the server to load your chats." />
-							<TextBlock
-								Classes="sidebar-hint"
-								IsVisible="{Binding HasRunningWorkspace}"
-								Text="Open a chat from the sidebar, or start a new one with the + next to a workspace." />
+						<TextBlock
+							Classes="sidebar-hint"
+							IsVisible="{Binding HasRunningWorkspace}"
+							Text="Open a chat from the sidebar, or start a new one with the + next to a workspace." />
 						</StackPanel>
+
+						<!--  relaunch offer: the last session left chats tiled  -->
+						<Border
+							Classes="restore-bar"
+							HorizontalAlignment="Center"
+							VerticalAlignment="Top"
+							Margin="0,12,0,0"
+							IsVisible="{Binding ShowRestorePrompt}">
+							<StackPanel Orientation="Horizontal" Spacing="12">
+								<PathIcon
+									Data="{StaticResource IconClock}"
+									Width="14"
+									Height="14"
+									Foreground="{DynamicResource TextMutedBrush}"
+									VerticalAlignment="Center" />
+								<TextBlock Text="{Binding RestorePromptText}" FontSize="12.5" VerticalAlignment="Center" />
+								<Button Classes="btn-soft" Command="{Binding RestorePreviousSessionCommand}" ToolTip.Tip="Reopen the chats from the last session">
+									<TextBlock Text="Restore" FontSize="12.5" VerticalAlignment="Center" />
+								</Button>
+								<Button Classes="btn-soft" Command="{Binding DismissRestorePromptCommand}" ToolTip.Tip="Discard the saved tile list">
+									<TextBlock Text="Ignore" FontSize="12.5" VerticalAlignment="Center" />
+								</Button>
+							</StackPanel>
+						</Border>
 
 						<!--  Settings page: covers the tile grid while open  -->
 						<Border
@@ -446,5 +506,77 @@
 					</Grid>
 				</Grid>
 			</Grid>
+			<!--  error overlay: CrashGuard's last-ditch dialog. An error never takes the app
+			      down — this explains what failed and hands the full report to the clipboard  -->
+			<Border
+				Grid.Column="0"
+				Grid.ColumnSpan="3"
+				Background="#A6000000"
+				IsVisible="{Binding Error.IsVisible}">
+				<Border
+					Classes="error-dialog"
+					MaxWidth="560"
+					Margin="24"
+					HorizontalAlignment="Center"
+					VerticalAlignment="Center">
+					<StackPanel Spacing="12">
+						<Grid ColumnDefinitions="Auto,*,Auto">
+							<PathIcon
+								Data="{StaticResource IconWarn}"
+								Width="15"
+								Height="15"
+								Foreground="{DynamicResource DangerBrush}"
+								VerticalAlignment="Top" />
+							<StackPanel Grid.Column="1" Margin="10,0,0,0" Spacing="2">
+								<TextBlock Text="Something went wrong" FontSize="13" FontWeight="SemiBold" />
+								<TextBlock Classes="error-sub" Text="{Binding Error.Source}" />
+							</StackPanel>
+							<Button
+								Grid.Column="2"
+								Classes="icon"
+								Click="OnCloseErrorClick"
+								ToolTip.Tip="Dismiss">
+								<PathIcon Data="{StaticResource IconClose}" Width="12" Height="12" />
+							</Button>
+						</Grid>
+						<TextBlock
+							Classes="error-sub"
+							Foreground="{DynamicResource DangerBrush}"
+							TextWrapping="Wrap"
+							IsVisible="{Binding Error.IsFatal}"
+							Text="This error is fatal — the app closes when you continue." />
+						<TextBlock
+							FontSize="12.5"
+							TextWrapping="Wrap"
+							Text="{Binding Error.ErrorMessage}" />
+						<Border Classes="error-detail">
+							<ScrollViewer MaxHeight="220" VerticalScrollBarVisibility="Auto">
+								<TextBlock Classes="error-mono" Text="{Binding Error.ErrorDetails}" />
+							</ScrollViewer>
+						</Border>
+						<Grid ColumnDefinitions="Auto,*">
+							<TextBlock
+								Classes="error-sub"
+								VerticalAlignment="Center"
+								IsVisible="{Binding Error.HasMore}"
+								Text="{Binding Error.MoreCount, StringFormat='+{0} more waiting'}" />
+							<StackPanel Grid.Column="1" Orientation="Horizontal" HorizontalAlignment="Right" Spacing="8">
+								<Button Classes="btn-soft" Click="OnCopyErrorClick" ToolTip.Tip="Copy the full report">
+									<StackPanel Orientation="Horizontal" Spacing="6">
+										<PathIcon Data="{StaticResource IconCopy}" Width="11" Height="11" />
+										<TextBlock Text="Copy details" VerticalAlignment="Center" />
+									</StackPanel>
+								</Button>
+								<Button Classes="btn-soft" Click="OnCloseErrorClick" ToolTip.Tip="Keep going">
+									<StackPanel Orientation="Horizontal" Spacing="6">
+										<PathIcon Data="{StaticResource IconCheck}" Width="11" Height="11" />
+										<TextBlock Text="Continue" VerticalAlignment="Center" />
+									</StackPanel>
+								</Button>
+							</StackPanel>
+						</Grid>
+					</StackPanel>
+				</Border>
+			</Border>
 		</Grid>
 	</suki:SukiWindow>

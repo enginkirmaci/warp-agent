@@ -1,12 +1,13 @@
 using System.IO;
 using System.Text.Json;
+using Serilog;
 
 namespace WarpAgent.Services;
 
 /// <summary>
 /// Client-side UI state (workspaces, pins, last selection) — the opencode server keeps
 /// sessions but knows nothing about workspaces, pins or which chat was open. One small
-/// JSON file under the user's application-data folder.
+/// JSON file under ~/.warp-agent.
 /// </summary>
 public sealed class UiState
 {
@@ -28,35 +29,38 @@ public sealed class UiState
     /// <summary>Last dragged sidebar width in DIPs; null keeps the 250 default.</summary>
     public double? SidebarWidth { get; set; }
 
-    private static string FilePath => Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
-        "opencode-agent",
-        "ui.json");
+    private static string FilePath => AppPaths.UiStateFile;
 
     public static UiState Load()
     {
+        AppPaths.MigrateLegacyFile("ui.json");
         try
         {
             if (File.Exists(FilePath))
                 return JsonSerializer.Deserialize<UiState>(File.ReadAllText(FilePath)) ?? new UiState();
         }
-        catch
+        catch (Exception ex)
         {
             // corrupt or unreadable state must never block the app from starting
+            Log.Warning(ex, "ui.json unreadable; starting with empty state");
         }
         return new UiState();
     }
+
+    // Save() runs per state change (focus, send, idle); don't rebuild options each time
+    private static readonly JsonSerializerOptions PrettyJson = new() { WriteIndented = true };
 
     public void Save()
     {
         try
         {
-            Directory.CreateDirectory(Path.GetDirectoryName(FilePath)!);
-            File.WriteAllText(FilePath, JsonSerializer.Serialize(this, new JsonSerializerOptions { WriteIndented = true }));
+            Directory.CreateDirectory(AppPaths.ConfigDir);
+            File.WriteAllText(FilePath, JsonSerializer.Serialize(this, PrettyJson));
         }
-        catch
+        catch (Exception ex)
         {
             // a failed state write is not worth interrupting the chat
+            Log.Warning(ex, "ui.json write failed");
         }
     }
 }

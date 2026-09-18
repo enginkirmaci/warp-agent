@@ -5,6 +5,7 @@ using Avalonia.Interactivity;
 using Avalonia.Markup.Xaml;
 using Avalonia.Platform.Storage;
 using Avalonia.VisualTree;
+using WarpAgent.Services;
 using WarpAgent.ViewModels;
 using SukiUI.Controls;
 
@@ -24,6 +25,8 @@ public partial class MainWindow : SukiWindow
         InitializeComponent();
         _layoutRoot = this.FindControl<Grid>("LayoutRoot");
         DataContext = _vm;
+        // the overlay exists from now on: CrashGuard errors land here instead of a queue
+        CrashGuard.AttachOverlay(_vm.Error);
         if (SidebarColumn is { } column && _vm.SidebarWidth is { } width)
             column.Width = new GridLength(Math.Clamp(width, SidebarMinWidth, SidebarMaxWidth));
     }
@@ -182,6 +185,19 @@ public partial class MainWindow : SukiWindow
         if ((sender as Control)?.DataContext is RunningAgentItem running)
             _ = _vm.OpenRunningAsync(running);
     }
+
+    // ---- error overlay ----
+
+    private async void OnCopyErrorClick(object? sender, RoutedEventArgs e)
+    {
+        var text = _vm.Error.BuildCopyText();
+        if (text.Length == 0 || TopLevel.GetTopLevel(this)?.Clipboard is not { } clipboard)
+            return;
+        await clipboard.SetTextAsync(text);
+    }
+
+    private void OnCloseErrorClick(object? sender, RoutedEventArgs e) =>
+        _vm.Error.CloseReportCommand.Execute(null);
 
     protected override void OnClosing(WindowClosingEventArgs e)
     {

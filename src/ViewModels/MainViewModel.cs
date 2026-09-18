@@ -1,12 +1,12 @@
 using System.Collections.ObjectModel;
 using System.Collections.Specialized;
-using System.Diagnostics;
 using System.IO;
 using System.Text;
 using System.Text.Json;
 using Avalonia.Threading;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
+using Serilog;
 using WarpAgent.Models;
 using WarpAgent.Services;
 
@@ -109,6 +109,8 @@ public partial class MainViewModel : ObservableObject
             return;
         _promptHistory.Remove(text);
         _promptHistory.Add(text);
+        if (_promptHistory.Count > 100)
+            _promptHistory.RemoveRange(0, _promptHistory.Count - 100);
     }
 
     internal string SeedModel => _state.Model ?? _settings.DefaultModel ?? DefaultModelEntry;
@@ -185,7 +187,17 @@ public partial class MainViewModel : ObservableObject
     [ObservableProperty] private bool _autoAllow;
     [ObservableProperty] private bool _isSettingsOpen;
 
+    /// <summary>True from launch while the last session left tiled chats and the grid is
+    /// still empty; the banner over the grid offers to restore or ignore them.</summary>
+    [ObservableProperty] private bool _showRestorePrompt;
+
+    /// <summary>Fixed at launch from the saved open-tile lists.</summary>
+    public string RestorePromptText { get; private set; } = "";
+
     public SettingsPageViewModel SettingsPage { get; }
+
+    /// <summary>Safety-net error overlay; CrashGuard pushes every caught exception here.</summary>
+    public ErrorOverlayViewModel Error { get; } = new();
 
     [RelayCommand]
     private void OpenSettings() => IsSettingsOpen = true;
@@ -289,11 +301,16 @@ public partial class MainViewModel : ObservableObject
         foreach (var ws in _state.Workspaces)
         {
             ws.Collapsed = true;
+            // saved open-tile ids of chats that no longer exist could never restore
+            ws.OpenSessions.RemoveAll(id => !ws.Sessions.Contains(id));
             var item = new WorkspaceItem(ws) { StateChanged = SaveState };
             Workspaces.Add(item);
             foreach (var sid in ws.Sessions)
                 _workspaceBySession[sid] = ws.Path;
         }
+        var pendingTiles = Workspaces.Sum(w => w.State.OpenSessions.Count);
+        RestorePromptText = pendingTiles == 1 ? "1 chat was open last time" : $"{pendingTiles} chats were open last time";
+        ShowRestorePrompt = pendingTiles > 0;
         _autoAllow = _state.AutoAllowAlways ?? true;
         Sessions.CollectionChanged += (_, _) => SyncWorkspaceChats();
         Workspaces.CollectionChanged += (_, _) =>
@@ -312,6 +329,10 @@ public partial class MainViewModel : ObservableObject
             OnPropertyChanged(nameof(TileColumns));
             OnPropertyChanged(nameof(HasTiles));
             RefreshBackgroundFlags();
+            // a tile reaching the grid on its own (manual open, expand-restore, new chat)
+            // ends the relaunch offer without touching the saved lists
+            if (OpenTiles.Count > 0)
+                ShowRestorePrompt = false;
         };
         // restore the last workspace selection but never auto-start a server
         var selected = Workspaces.FirstOrDefault(w => w.FolderPath == _state.ActiveWorkspace) ?? Workspaces.FirstOrDefault();
@@ -387,7 +408,11 @@ public partial class MainViewModel : ObservableObject
         foreach (var childId in _runningSubagents
                      .Where(id => EffectiveWorkspacePath(id) == folderPath)
                      .ToList())
+        {
             SetSubagentRunning(childId, false);
+            // the mapping only describes live runs; keep it from growing forever
+            _subagentBySession.Remove(childId);
+        }
     }
 
     internal bool HasRuntime(string sessionId) => ApiFor(sessionId) is not null;
@@ -453,12 +478,28 @@ public partial class MainViewModel : ObservableObject
 
     private void DetachTile(ChatTileViewModel tile)
     {
+        tile.DetachFromOwner();
         OpenTiles.Remove(tile);
         if (tile.SessionId is { } id)
+        {
             _tileBySession.Remove(id);
+            ForgetSavedTile(id);
+        }
         if (!ReferenceEquals(FocusedTile, tile))
             return;
         FocusTile(OpenTiles.LastOrDefault());
+    }
+
+    /// <summary>A closed chat leaves the saved open list too, even while its workspace server
+    /// is stopped — PersistTiles would keep the stale id and offer it again next launch.</summary>
+    private void ForgetSavedTile(string sessionId)
+    {
+        if (!_workspaceBySession.TryGetValue(sessionId, out var path) ||
+            Workspaces.FirstOrDefault(w => w.FolderPath == path) is not { } ws)
+            return;
+        ws.State.OpenSessions.Remove(sessionId);
+        if (ws.State.ActiveSession == sessionId)
+            ws.State.ActiveSession = null;
     }
 
     private void DetachTile(string sessionId)
@@ -470,7 +511,10 @@ public partial class MainViewModel : ObservableObject
     private void ClearTiles()
     {
         foreach (var tile in OpenTiles)
+        {
             tile.IsFocused = false;
+            tile.DetachFromOwner();
+        }
         OpenTiles.Clear();
         _tileBySession.Clear();
         FocusedTile = null;
@@ -485,6 +529,7 @@ public partial class MainViewModel : ObservableObject
         {
             if (OpenTiles.Count == 1)
                 break;
+            tile.DetachFromOwner();
             OpenTiles.Remove(tile);
             if (ReferenceEquals(FocusedTile, tile))
                 FocusedTile = null;
@@ -585,6 +630,8 @@ public partial class MainViewModel : ObservableObject
         {
             _workspaceBySession.Remove(sid);
             _titleBySession.Remove(sid);
+            _turnStartBySession.Remove(sid);
+            _userStoppedBySession.Remove(sid);
         }
         // only this workspace's tiles leave the grid; other workspaces' stay
         foreach (var tile in OpenTiles
@@ -613,11 +660,12 @@ public partial class MainViewModel : ObservableObject
         if (ws is null || (_runtimes.TryGetValue(ws.FolderPath, out var existing) && existing.Server.IsRunning))
             return;
         StatusText = $"Starting opencode serve — {ws.Name}…";
+        var serverLog = Log.ForContext("SourceContext", $"opencode/{ws.Name}");
         try
         {
             var port = OpenCodeServer.FindFreePort();
             var server = new OpenCodeServer();
-            await server.StartAsync(_settings.OpenCodeExecutable, ws.FolderPath, port, s => Debug.WriteLine($"[opencode] {s}"), CancellationToken.None);
+            await server.StartAsync(_settings.OpenCodeExecutable, ws.FolderPath, port, line => serverLog.Information("{Line}", line), CancellationToken.None);
             var rt = new WorkspaceRuntime { Server = server, Api = new OpenCodeApiClient(server.BaseUrl) };
             _runtimes[ws.FolderPath] = rt;
             ws.IsRunning = true;
@@ -643,6 +691,7 @@ public partial class MainViewModel : ObservableObject
         }
         catch (Exception ex)
         {
+            Log.Error(ex, "server start failed for {Workspace}", ws.Name);
             StatusText = "Start failed";
             AddNote($"Failed to start: {ex.Message}", error: true);
         }
@@ -738,6 +787,7 @@ public partial class MainViewModel : ObservableObject
             {
                 if (gen != _workspaceGeneration || !ReferenceEquals(SelectedWorkspace, ws))
                     return;
+                Log.Warning(ex, "could not load chat {Session}", id);
                 AddNote($"Could not load chat: {ex.Message}", error: true);
             }
         }
@@ -750,6 +800,84 @@ public partial class MainViewModel : ObservableObject
             ? activeTile
             : OpenTiles.Last();
         FocusTile(focus);
+    }
+
+    /// <summary>Reopens every chat the last session left tiled, starting each involved
+    /// workspace's server; RestoreTilesForWorkspaceAsync skips already-tiled chats, so
+    /// the selected workspace's own start-path restore never doubles anything.</summary>
+    [RelayCommand]
+    private async Task RestorePreviousSessionAsync()
+    {
+        ShowRestorePrompt = false;
+        foreach (var ws in Workspaces.Where(w => w.State.OpenSessions.Count > 0).ToList())
+        {
+            var wanted = ws.State.OpenSessions.ToList();
+            if (!IsServerUp(ws))
+                await StartWorkspaceCommand.ExecuteAsync(ws);
+            if (!_runtimes.TryGetValue(ws.FolderPath, out var rt) || !rt.Server.IsRunning)
+                continue; // start failed; its note is already on screen
+            await RestoreTilesForWorkspaceAsync(ws, rt, wanted);
+        }
+        if (FocusedTile is null && OpenTiles.LastOrDefault() is { } last)
+            FocusTile(last);
+    }
+
+    /// <summary>Ignore means ignored: the saved open lists are dropped, so the offer
+    /// only comes back once new tiles are opened and closed.</summary>
+    [RelayCommand]
+    private void DismissRestorePrompt()
+    {
+        ShowRestorePrompt = false;
+        foreach (var ws in Workspaces)
+            ws.State.OpenSessions.Clear();
+        SaveState();
+    }
+
+    /// <summary>Restores saved tiles for a workspace started without switching selection;
+    /// same intake as RestoreOpenTilesAsync but keyed to this workspace's own chat list.</summary>
+    private async Task RestoreTilesForWorkspaceAsync(WorkspaceItem ws, WorkspaceRuntime rt, List<string> wanted)
+    {
+        // titles would otherwise flash fallback names until the background chat load lands
+        try
+        {
+            var known = ws.State.Sessions.ToHashSet();
+            foreach (var s in await rt.Api.ListSessionsAsync(CancellationToken.None))
+                if (known.Contains(s.Id))
+                    _titleBySession[s.Id] = s.Title;
+        }
+        catch (Exception ex)
+        {
+            Log.Debug(ex, "title prime failed for {Workspace}", ws.Name);
+        }
+        foreach (var id in wanted)
+        {
+            if (!ws.State.Sessions.Contains(id) || _tileBySession.ContainsKey(id))
+                continue;
+            try
+            {
+                var messages = await rt.Api.GetMessagesAsync(id, CancellationToken.None);
+                if (!_runtimes.TryGetValue(ws.FolderPath, out var live) || !ReferenceEquals(live, rt))
+                    return; // the workspace was stopped or removed mid-restore
+                if (_tileBySession.ContainsKey(id))
+                    continue;
+                var tile = new ChatTileViewModel(this);
+                tile.SetSession(id, TitleFor(id));
+                _tileBySession[id] = tile;
+                OpenTiles.Add(tile);
+                tile.Restore(messages);
+                FlushPendingPermissions(id);
+                FlushPendingQuestions(id);
+                _ = PullPendingQuestionsAsync(id, rt.Api);
+                ShowQueuedFor(tile);
+            }
+            catch (Exception ex)
+            {
+                if (!_runtimes.TryGetValue(ws.FolderPath, out var live) || !ReferenceEquals(live, rt))
+                    return;
+                Log.Warning(ex, "could not load chat {Session}", id);
+                AddNote($"Could not load chat: {ex.Message}", error: true);
+            }
+        }
     }
 
     // ---- chats ----
@@ -792,6 +920,7 @@ public partial class MainViewModel : ObservableObject
         }
         catch (Exception ex)
         {
+            Log.Warning(ex, "could not load chat {Session}", sessionId);
             AddNote($"Could not load chat: {ex.Message}", error: true);
             SnapSelection();
         }
@@ -886,6 +1015,7 @@ public partial class MainViewModel : ObservableObject
             }
             catch (Exception ex)
             {
+                Log.Error(ex, "message send failed for {Session}", sessionId);
                 PostNote(sessionId, $"Message failed: {ex.Message}", error: true);
             }
         });
@@ -953,8 +1083,12 @@ public partial class MainViewModel : ObservableObject
     private void DropPending(IReadOnlyCollection<string> sessionIds)
     {
         foreach (var sid in sessionIds)
+        {
             if (_pendingBySession.Remove(sid, out _))
                 MarkAttention(sid, false);
+            // parked question cards would otherwise accumulate for closed chats
+            _pendingQuestionsBySession.Remove(sid, out _);
+        }
     }
 
     /// <summary>Sends the oldest queued message after that chat finishes its turn; called on session.idle.</summary>
@@ -982,6 +1116,7 @@ public partial class MainViewModel : ObservableObject
         }
         catch (Exception ex)
         {
+            Log.Warning(ex, "abort failed for {Session}", id);
             tile.AddNote($"Abort failed: {ex.Message}", error: true);
         }
     }
@@ -1000,6 +1135,7 @@ public partial class MainViewModel : ObservableObject
         }
         catch (Exception ex)
         {
+            Log.Warning(ex, "abort failed for {Session}", sessionId);
             PostNote(_subagentBySession.TryGetValue(sessionId, out var sub) ? sub.ParentSessionId : sessionId,
                 $"Abort failed: {ex.Message}", error: true);
         }
@@ -1038,8 +1174,9 @@ public partial class MainViewModel : ObservableObject
             {
                 info = await api.RenameSessionAsync(sessionId, title, CancellationToken.None);
             }
-            catch
+            catch (Exception ex)
             {
+                Log.Debug(ex, "auto title failed for {Session}", sessionId);
                 return;
             }
             await Dispatcher.UIThread.InvokeAsync(() =>
@@ -1096,6 +1233,7 @@ public partial class MainViewModel : ObservableObject
         }
         catch (Exception ex)
         {
+            Log.Warning(ex, "rename failed for {Session}", session.Id);
             AddNote($"Rename failed: {ex.Message}", error: true);
         }
     }
@@ -1118,6 +1256,7 @@ public partial class MainViewModel : ObservableObject
         }
         catch (Exception ex)
         {
+            Log.Warning(ex, "delete failed for {Session}", session.Id);
             AddNote($"Delete failed: {ex.Message}", error: true);
             return;
         }
@@ -1186,6 +1325,22 @@ public partial class MainViewModel : ObservableObject
                     DropQueue(gone);
                     DropPending(gone);
                 }
+                // an idle fires at the end of every turn; when nothing visible changed,
+                // skip the full rebuild + disk save (the common case while chatting)
+                var unchanged = Sessions.Count == mine.Count;
+                for (var i = 0; unchanged && i < mine.Count; i++)
+                {
+                    var cur = Sessions[i];
+                    var s = mine[i];
+                    unchanged = cur.Id == s.Id && cur.Title == s.Title && cur.Updated == s.UpdatedAt &&
+                                cur.IsPinned == _state.Pins.ContainsKey(s.Id) &&
+                                cur.IsRunning == _runningBySession.Contains(s.Id);
+                }
+                if (unchanged)
+                {
+                    SnapSelection();
+                    return;
+                }
                 foreach (var s in mine)
                 {
                     _titleBySession[s.Id] = s.Title;
@@ -1205,9 +1360,10 @@ public partial class MainViewModel : ObservableObject
                 SaveState();
             });
         }
-        catch
+        catch (Exception ex)
         {
             // the sidebar is optional; chat still works without it
+            Log.Debug(ex, "session list refresh failed");
         }
     }
 
@@ -1226,8 +1382,9 @@ public partial class MainViewModel : ObservableObject
                         running.Title = title;
             });
         }
-        catch
+        catch (Exception ex)
         {
+            Log.Debug(ex, "title prime failed for {Workspace}", ws.Name);
         }
     }
 
@@ -1291,9 +1448,10 @@ public partial class MainViewModel : ObservableObject
                     });
             });
         }
-        catch
+        catch (Exception ex)
         {
             // the sidebar is optional; chat still works without it
+            Log.Debug(ex, "workspace chat list refresh failed for {Workspace}", ws.Name);
         }
     }
 
@@ -1303,8 +1461,9 @@ public partial class MainViewModel : ObservableObject
         {
             return Path.GetFullPath(path.Trim()).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
         }
-        catch
+        catch (Exception ex)
         {
+            Log.Debug(ex, "could not normalize path {Path}", path);
             return path.Trim();
         }
     }
@@ -1336,9 +1495,10 @@ public partial class MainViewModel : ObservableObject
                 }
             });
         }
-        catch
+        catch (Exception ex)
         {
             // the model list is optional; the server default still works
+            Log.Debug(ex, "model list refresh failed");
         }
     }
 
@@ -1361,9 +1521,10 @@ public partial class MainViewModel : ObservableObject
                         : DefaultAgentEntry;
             });
         }
-        catch
+        catch (Exception ex)
         {
             // the agent list is optional; the server default (build) still works
+            Log.Debug(ex, "agent list refresh failed");
         }
     }
 
@@ -1378,6 +1539,7 @@ public partial class MainViewModel : ObservableObject
         }
         catch (Exception ex)
         {
+            Log.Warning(ex, "share failed for {Session}", session.Id);
             AddNote($"Share failed: {ex.Message}", error: true);
             return null;
         }
@@ -1394,6 +1556,7 @@ public partial class MainViewModel : ObservableObject
         }
         catch (Exception ex)
         {
+            Log.Warning(ex, "unshare failed for {Session}", session.Id);
             AddNote($"Unshare failed: {ex.Message}", error: true);
         }
     }
@@ -1412,6 +1575,7 @@ public partial class MainViewModel : ObservableObject
         }
         catch (Exception ex)
         {
+            Log.Warning(ex, "event stream ended for {Workspace}", ws.Name);
             PostNote($"[{ws.Name}] event stream ended: {ex.Message}", error: true);
         }
     }
@@ -1744,6 +1908,7 @@ public partial class MainViewModel : ObservableObject
         }
         catch (Exception ex)
         {
+            Log.Warning(ex, "permission reply failed for {Request}", item.Id);
             item.SetAnswer($"reply failed: {ex.Message}", isAuto);
         }
     }
@@ -1837,6 +2002,7 @@ public partial class MainViewModel : ObservableObject
         }
         catch (Exception ex)
         {
+            Log.Warning(ex, "question reply failed for {Request}", item.Id);
             item.SetResolution($"reply failed: {ex.Message}");
         }
     }
@@ -1856,6 +2022,7 @@ public partial class MainViewModel : ObservableObject
         }
         catch (Exception ex)
         {
+            Log.Warning(ex, "question dismiss failed for {Request}", item.Id);
             item.SetResolution($"dismiss failed: {ex.Message}");
         }
     }
@@ -1887,9 +2054,10 @@ public partial class MainViewModel : ObservableObject
                         tile.ChatItems.Add(BuildQuestionItem(request));
             });
         }
-        catch
+        catch (Exception ex)
         {
             // the ask stays visible on the server side and re-arrives with its events
+            Log.Debug(ex, "pending questions pull failed for {Session}", sessionId);
         }
     }
 

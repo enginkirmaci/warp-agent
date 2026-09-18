@@ -8,6 +8,7 @@ using Avalonia.Input;
 using Avalonia.Input.Platform;
 using Avalonia.Layout;
 using Avalonia.Media;
+using Avalonia.Threading;
 
 namespace WarpAgent.Controls;
 
@@ -27,17 +28,17 @@ public class MarkdownTextBlock : StackPanel
     private static readonly StreamGeometry CopyGeometry =
         ThemeRes.Geometry("IconCopy", "F0 M8 2 H20 A2 2 0 0 1 22 4 V16 H20 V4 H8 Z M4 6 H16 A2 2 0 0 1 18 8 V20 A2 2 0 0 1 16 22 H4 A2 2 0 0 1 2 20 V8 A2 2 0 0 1 4 6 Z");
 
-    private readonly IBrush _inlineCodeBg = ThemeRes.Brush("ChipBrush", "#FF272727");
+    private readonly IBrush _inlineCodeBg = ThemeRes.Brush("ChipBrush", "#FF2E2E2E");
     private readonly IBrush _codeFg = ThemeRes.Brush("CodeFgBrush", "#FFDADADA");
-    private readonly IBrush _blockBg = ThemeRes.Brush("CodeBlockBrush", "#FF1C1C1C");
-    private readonly IBrush _headerBg = ThemeRes.Brush("ChipBrush", "#FF272727");
+    private readonly IBrush _blockBg = ThemeRes.Brush("CodeBlockBrush", "#FF161616");
+    private readonly IBrush _headerBg = ThemeRes.Brush("ChipBrush", "#FF2E2E2E");
     private readonly IBrush _linkFg = ThemeRes.Brush("AccentBrush", "#FFBBBBBB");
     private readonly IBrush _kw = ThemeRes.Brush("SynKeywordBrush", "#FFA9A9A9");
     private readonly IBrush _str = ThemeRes.Brush("SynStringBrush", "#FF93B585");
     private readonly IBrush _com = ThemeRes.Brush("SynCommentBrush", "#FF6F6F6F");
     private readonly IBrush _num = ThemeRes.Brush("SynNumberBrush", "#FFC9986E");
     private readonly IBrush _muted = ThemeRes.Brush("TextMutedBrush", "#FF929292");
-    private readonly IBrush _hairline = ThemeRes.Brush("HairlineBrush", "#FF2E2E2E");
+    private readonly IBrush _hairline = ThemeRes.Brush("HairlineBrush", "#FF3A3A3A");
 
     public static readonly StyledProperty<string> TextProperty =
         AvaloniaProperty.Register<MarkdownTextBlock, string>(nameof(Text), "");
@@ -51,21 +52,58 @@ public class MarkdownTextBlock : StackPanel
     public MarkdownTextBlock()
     {
         Spacing = 6;
-        TextProperty.Changed.AddClassHandler<MarkdownTextBlock>((c, _) => c.Rebuild());
+    }
+
+    // per-instance override, not TextProperty.Changed.AddClassHandler in the constructor:
+    // that adds one never-disposed static subscription per instance (leak + O(N) dispatch)
+    protected override void OnPropertyChanged(AvaloniaPropertyChangedEventArgs e)
+    {
+        base.OnPropertyChanged(e);
+        if (e.Property == TextProperty)
+            QueueRebuild();
     }
 
     protected override void OnAttachedToVisualTree(VisualTreeAttachmentEventArgs e)
     {
         base.OnAttachedToVisualTree(e);
+        if (_builtFor is null)
+            FlushRebuild(); // first show builds immediately so the tile doesn't flash empty
+        else if (_builtFor != Text)
+            QueueRebuild(); // stale; the streaming throttle covers it
+    }
+
+    // Streaming rewrites Text many times per second with the full text-so-far; a full
+    // parse + visual rebuild per delta is O(n²) on long answers. Coalescing to one
+    // rebuild per ~32 ms keeps up visually while cutting the work ~10-30x.
+    private DispatcherTimer? _rebuildTimer;
+    private bool _rebuildPending;
+
+    private void QueueRebuild()
+    {
+        if (_rebuildPending)
+            return;
+        _rebuildPending = true;
+        _rebuildTimer ??= new DispatcherTimer(TimeSpan.FromMilliseconds(32), DispatcherPriority.Background,
+            (_, _) => FlushRebuild());
+        _rebuildTimer.Start();
+    }
+
+    private void FlushRebuild()
+    {
+        _rebuildTimer?.Stop();
+        _rebuildPending = false;
         Rebuild();
     }
 
     private void Rebuild()
     {
+        _builtFor = Text;
         Children.Clear();
         foreach (var block in Parse(Text))
             Children.Add(Build(block));
     }
+
+    private string? _builtFor;
 
     private Control Build(Block block) => block switch
     {
@@ -310,14 +348,20 @@ public class MarkdownTextBlock : StackPanel
         foreach (var inline in Flush()) yield return inline;
     }
 
+    // per-run values: resolved once, never per inline (resource walks + parses add up on long answers)
+    private static readonly IBrush InlineChipBg = ThemeRes.Brush("ChipBrush", "#FF2E2E2E");
+    private static readonly IBrush InlineCodeFg = ThemeRes.Brush("CodeFgBrush", "#FFE8D9BC");
+    private static readonly IBrush AccentFg = ThemeRes.Brush("AccentBrush", "#FFBBBBBB");
+    private static readonly TextDecorationCollection Underline = TextDecorationCollection.Parse("Underline");
+
     private static Inline MakeLink(string url, string label, bool bold)
     {
         var tb = new TextBlock
         {
             Text = label,
             Cursor = new Cursor(StandardCursorType.Hand),
-            Foreground = ThemeRes.Brush("AccentBrush", "#FFBBBBBB"),
-            TextDecorations = TextDecorationCollection.Parse("Underline"),
+            Foreground = AccentFg,
+            TextDecorations = Underline,
             FontWeight = bold ? FontWeight.Bold : FontWeight.Normal,
         };
         tb.PointerReleased += (_, e) =>
@@ -349,13 +393,13 @@ public class MarkdownTextBlock : StackPanel
         {
             run.FontFamily = CodeFont;
             run.FontSize = 12.5;
-            run.Background = ThemeRes.Brush("ChipBrush", "#FF272727");
-            run.Foreground = ThemeRes.Brush("CodeFgBrush", "#FFE8D9BC");
+            run.Background = InlineChipBg;
+            run.Foreground = InlineCodeFg;
         }
         else if (link)
         {
-            run.Foreground = ThemeRes.Brush("AccentBrush", "#FFBBBBBB");
-            run.TextDecorations = TextDecorationCollection.Parse("Underline");
+            run.Foreground = AccentFg;
+            run.TextDecorations = Underline;
         }
         if (bold)
             run.FontWeight = FontWeight.Bold;

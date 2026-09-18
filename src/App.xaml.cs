@@ -4,6 +4,7 @@ using Avalonia.Markup.Xaml;
 using Avalonia.Media;
 using SukiUI;
 using SukiUI.Models;
+using WarpAgent.Services;
 using WarpAgent.Views;
 
 namespace WarpAgent;
@@ -14,6 +15,9 @@ public partial class App : Application
 
     public override void OnFrameworkInitializationCompleted()
     {
+        // first thing: no managed exception may crash the app — a crash stops every session
+        CrashGuard.Install();
+
         //  the stock Blue primary tints the window shader (titlebar glass) and every
         //  default SukiUI control accent; a neutral theme keeps color ownership in our brushes
         var gray = new SukiColorTheme("Gray", Color.Parse("#929292"), Color.Parse("#929292"));

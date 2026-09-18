@@ -2,6 +2,7 @@ using System.Net.Http;
 using System.Runtime.CompilerServices;
 using System.Text;
 using System.Text.Json;
+using Serilog;
 using WarpAgent.Models;
 
 namespace WarpAgent.Services;
@@ -31,6 +32,7 @@ public sealed class OpenCodeApiClient(string baseUrl)
 {
     private static readonly HttpClient Http = new() { Timeout = Timeout.InfiniteTimeSpan };
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
+    private static readonly ILogger Log = Serilog.Log.ForContext<OpenCodeApiClient>();
 
     public string BaseUrl { get; } = baseUrl.TrimEnd('/');
 
@@ -305,6 +307,8 @@ public sealed class OpenCodeApiClient(string baseUrl)
         if (!resp.IsSuccessStatusCode)
         {
             var detail = Truncate(await resp.Content.ReadAsStringAsync(ct), 1000);
+            Log.Warning("{Method} {Path} failed: {Status}{Detail}", method, path,
+                $"{(int)resp.StatusCode} {resp.ReasonPhrase}", detail.Length > 0 ? $" — {detail}" : "");
             throw new HttpRequestException($"{(int)resp.StatusCode} {resp.ReasonPhrase}{(detail.Length > 0 ? $" — {detail}" : "")}");
         }
         return resp;

@@ -3,6 +3,7 @@ using System.Net;
 using System.Net.Http;
 using System.Net.Sockets;
 using System.Runtime.InteropServices;
+using Serilog;
 
 namespace WarpAgent.Services;
 
@@ -20,7 +21,13 @@ public sealed class OpenCodeServer
 
     private Process? _process;
     private readonly List<PosixSignalRegistration> _signalRegistrations = [];
+    // kept referenced so Stop can unsubscribe: ProcessExit is a static event that would
+    // otherwise root every stopped server instance for the rest of the app's life
+    private readonly EventHandler _processExit;
     private readonly HttpClient _http = new() { Timeout = TimeSpan.FromSeconds(2) };
+    private static readonly ILogger Log = Serilog.Log.ForContext<OpenCodeServer>();
+
+    public OpenCodeServer() => _processExit = (_, _) => Stop();
 
     public string BaseUrl { get; private set; } = "";
     public bool Spawned { get; private set; }
@@ -33,6 +40,7 @@ public sealed class OpenCodeServer
         {
             Spawned = false;
             IsRunning = true;
+            Log.Information("attached to a healthy opencode server at {Url}", BaseUrl);
             log($"attaching to a healthy opencode server at {BaseUrl}");
             return;
         }
@@ -60,6 +68,7 @@ public sealed class OpenCodeServer
         psi.Environment.Remove("ELECTRON_RUN_AS_NODE");
 
         _process = Process.Start(psi) ?? throw new InvalidOperationException($"'{executable}' failed to start.");
+        Log.Information("spawned {Executable} serve (pid {Pid}) in {Folder}", executable, _process.Id, psi.WorkingDirectory);
         // WM close binds send SIGTERM without a Wayland close event: OnClosing and
         // ProcessExit never run, so the signal must be handled here or the serve
         // child orphans (reproduced; ProcessExit is NOT raised on POSIX SIGTERM).
@@ -70,7 +79,7 @@ public sealed class OpenCodeServer
             _signalRegistrations.Add(PosixSignalRegistration.Create(PosixSignal.SIGTERM, OnPosixSignal));
             _signalRegistrations.Add(PosixSignalRegistration.Create(PosixSignal.SIGINT, OnPosixSignal));
         }
-        AppDomain.CurrentDomain.ProcessExit += (_, _) => Stop();
+        AppDomain.CurrentDomain.ProcessExit += _processExit;
         _process.OutputDataReceived += (_, e) => { if (e.Data is not null) log(e.Data); };
         _process.ErrorDataReceived += (_, e) => { if (e.Data is not null) log(e.Data); };
         _process.BeginOutputReadLine();
@@ -83,7 +92,10 @@ public sealed class OpenCodeServer
         {
             ct.ThrowIfCancellationRequested();
             if (_process.HasExited)
+            {
+                Log.Warning("serve exited early with code {ExitCode}", _process.ExitCode);
                 throw new InvalidOperationException($"opencode serve exited with code {_process.ExitCode}.");
+            }
             if (await IsHealthyAsync(ct))
             {
                 IsRunning = true;
@@ -93,6 +105,7 @@ public sealed class OpenCodeServer
         }
 
         Stop();
+        Log.Warning("serve did not become healthy within 25 s");
         throw new TimeoutException("opencode serve did not become healthy within 25 s.");
     }
 
@@ -133,6 +146,10 @@ public sealed class OpenCodeServer
 
     public void Stop()
     {
+        AppDomain.CurrentDomain.ProcessExit -= _processExit;
+        foreach (var registration in _signalRegistrations)
+            registration.Dispose();
+        _signalRegistrations.Clear();
         if (Spawned && _process is { HasExited: false } p)
         {
             try
@@ -141,7 +158,7 @@ public sealed class OpenCodeServer
             }
             catch (Exception ex)
             {
-                Console.Error.WriteLine($"[server] kill failed: {ex.Message}");
+                Log.Error(ex, "failed to kill the serve process tree");
             }
         }
         _process = null;

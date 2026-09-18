@@ -39,7 +39,15 @@ public class DiffTextBlock : StackPanel
     public DiffTextBlock()
     {
         Spacing = 1;
-        TextProperty.Changed.AddClassHandler<DiffTextBlock>((c, _) => c.Rebuild());
+    }
+
+    // per-instance override, not TextProperty.Changed.AddClassHandler in the constructor:
+    // that adds one never-disposed static subscription per instance (leak + O(N) dispatch)
+    protected override void OnPropertyChanged(AvaloniaPropertyChangedEventArgs e)
+    {
+        base.OnPropertyChanged(e);
+        if (e.Property == TextProperty)
+            Rebuild();
     }
 
     protected override void OnAttachedToVisualTree(VisualTreeAttachmentEventArgs e)

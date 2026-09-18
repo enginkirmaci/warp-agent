@@ -1,12 +1,31 @@
 using Avalonia;
+using Serilog;
+using WarpAgent.Services;
 
 namespace WarpAgent;
 
 internal static class Program
 {
     [STAThread]
-    public static void Main(string[] args) =>
-        BuildAvaloniaApp().StartWithClassicDesktopLifetime(args);
+    public static int Main(string[] args)
+    {
+        AppLogging.Initialize();
+        try
+        {
+            return BuildAvaloniaApp().StartWithClassicDesktopLifetime(args);
+        }
+        catch (Exception ex)
+        {
+            // the window never came up, so there is no UI to show the error on
+            Log.Fatal(ex, "startup failure");
+            Console.Error.WriteLine(ex);
+            return 1;
+        }
+        finally
+        {
+            AppLogging.Shutdown();
+        }
+    }
 
     public static AppBuilder BuildAvaloniaApp()
     {

@@ -47,15 +47,21 @@ public partial class ChatTileViewModel : ObservableObject
             OnPropertyChanged(nameof(HasTasksAndAgents));
         };
         // background agents are grid-wide; the tile re-evaluates when the owner's set changes
-        Owner.PropertyChanged += (_, e) =>
-        {
-            if (e.PropertyName is nameof(MainViewModel.HasBackgroundAgents))
-            {
-                OnPropertyChanged(nameof(HasTasksOrAgents));
-                OnPropertyChanged(nameof(HasTasksAndAgents));
-            }
-        };
+        _owner.PropertyChanged += OnOwnerPropertyChanged;
     }
+
+    private void OnOwnerPropertyChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e)
+    {
+        if (e.PropertyName is nameof(MainViewModel.HasBackgroundAgents))
+        {
+            OnPropertyChanged(nameof(HasTasksOrAgents));
+            OnPropertyChanged(nameof(HasTasksAndAgents));
+        }
+    }
+
+    /// <summary>Cuts the subscription to the app-lifetime owner when the tile leaves the grid;
+    /// without it every closed tile (with its whole transcript) stays rooted forever.</summary>
+    internal void DetachFromOwner() => _owner.PropertyChanged -= OnOwnerPropertyChanged;
 
     public MainViewModel Owner => _owner;
 
@@ -583,13 +589,16 @@ internal static class ChatParsing
         return parts.Count > 0 ? string.Join(" · ", parts) : null;
     }
 
+    // building these options is expensive (serializer metadata cache); never do it per call
+    private static readonly JsonSerializerOptions IndentedJson = new() { WriteIndented = true };
+
     public static string DescribePart(JsonElement state, string name)
     {
         if (!state.TryGetProperty(name, out var value) || value.ValueKind is JsonValueKind.Null or JsonValueKind.Undefined)
             return "";
         var text = value.ValueKind == JsonValueKind.String
             ? value.GetString() ?? ""
-            : JsonSerializer.Serialize(value, new JsonSerializerOptions { WriteIndented = true });
+            : JsonSerializer.Serialize(value, IndentedJson);
         if (text.Length == 0)
             return "";
         return text.Length <= 4000 ? text : text[..4000] + "\n… (truncated)";

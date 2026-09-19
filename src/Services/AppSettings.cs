@@ -21,6 +21,9 @@ public sealed class AppSettings
     /// <summary>Null = never chosen; auto-allow defaults to on until explicitly unticked.</summary>
     public bool? AutoAllowAlways { get; set; }
 
+    /// <summary>Text-size variant: "compact" / "normal" / "large"; null = normal.</summary>
+    public string? FontScale { get; set; }
+
     private static string FilePath => AppPaths.SettingsFile;
 
     public static AppSettings Load()

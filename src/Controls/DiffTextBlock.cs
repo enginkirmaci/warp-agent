@@ -3,6 +3,7 @@ using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Controls.Documents;
 using Avalonia.Media;
+using WarpAgent.Services;
 
 namespace WarpAgent.Controls;
 
@@ -17,15 +18,15 @@ public class DiffTextBlock : StackPanel
     private static readonly FontFamily CodeFont = FontFamily.Parse("DejaVu Sans Mono, Consolas, monospace");
     private static readonly Regex HunkRegex = new(@"^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@", RegexOptions.Compiled);
 
-    private readonly IBrush _addFg = ThemeRes.Brush("AddBrush", "#FF8FC496");
-    private readonly IBrush _addBg = new SolidColorBrush(Color.Parse("#268FC496"));
-    private readonly IBrush _delFg = ThemeRes.Brush("DelBrush", "#FFE28E85");
-    private readonly IBrush _delBg = new SolidColorBrush(Color.Parse("#26E28E85"));
-    private readonly IBrush _hunkFg = ThemeRes.Brush("AccentBrush", "#FFBBBBBB");
-    private readonly IBrush _hunkBg = new SolidColorBrush(Color.Parse("#1FBBBBBB"));
-    private readonly IBrush _metaFg = ThemeRes.Brush("TextMutedBrush", "#FF929292");
-    private readonly IBrush _gutterFg = new SolidColorBrush(Color.Parse("#55929292"));
-    private readonly IBrush _textFg = ThemeRes.Brush("CodeFgBrush", "#FFDADADA");
+    private readonly IBrush _addFg = ThemeRes.Brush("AddBrush", "#FF56C272");
+    private readonly IBrush _addBg = new SolidColorBrush(Color.Parse("#2656C272"));
+    private readonly IBrush _delFg = ThemeRes.Brush("DelBrush", "#FFF47067");
+    private readonly IBrush _delBg = new SolidColorBrush(Color.Parse("#26F47067"));
+    private readonly IBrush _hunkFg = ThemeRes.Brush("TextMutedBrush", "#FF9A9A9A");
+    private readonly IBrush _hunkBg = new SolidColorBrush(Color.Parse("#1F9A9A9A"));
+    private readonly IBrush _metaFg = ThemeRes.Brush("TextMutedBrush", "#FF9A9A9A");
+    private readonly IBrush _gutterFg = new SolidColorBrush(Color.Parse("#559A9A9A"));
+    private readonly IBrush _textFg = ThemeRes.Brush("CodeFgBrush", "#FFE4E4E4");
 
     public static readonly StyledProperty<string?> TextProperty =
         AvaloniaProperty.Register<DiffTextBlock, string?>(nameof(Text));
@@ -53,8 +54,18 @@ public class DiffTextBlock : StackPanel
     protected override void OnAttachedToVisualTree(VisualTreeAttachmentEventArgs e)
     {
         base.OnAttachedToVisualTree(e);
+        // attached-only subscription: detached instances must not linger on the static event
+        FontScale.Changed += OnFontScaleChanged;
         Rebuild();
     }
+
+    protected override void OnDetachedFromVisualTree(VisualTreeAttachmentEventArgs e)
+    {
+        base.OnDetachedFromVisualTree(e);
+        FontScale.Changed -= OnFontScaleChanged;
+    }
+
+    private void OnFontScaleChanged(object? sender, EventArgs e) => Rebuild();
 
     private void Rebuild()
     {
@@ -64,7 +75,7 @@ public class DiffTextBlock : StackPanel
         var tb = new SelectableTextBlock
         {
             FontFamily = CodeFont,
-            FontSize = 11.5,
+            FontSize = ThemeRes.Double("FontDetail", 11.5),
             TextWrapping = TextWrapping.Wrap,
         };
         tb.Inlines ??= new InlineCollection();

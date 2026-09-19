@@ -40,7 +40,7 @@
 		</Style>
 		<Style Selector="TextBlock.sidebar-hint">
 			<Setter Property="Opacity" Value="0.5" />
-			<Setter Property="FontSize" Value="12" />
+			<Setter Property="FontSize" Value="{DynamicResource FontSmall}" />
 			<Setter Property="FontStyle" Value="Italic" />
 			<Setter Property="TextWrapping" Value="Wrap" />
 			<Setter Property="TextAlignment" Value="Center" />
@@ -156,12 +156,12 @@
 			<Setter Property="Padding" Value="10" />
 		</Style>
 		<Style Selector="TextBlock.error-sub">
-			<Setter Property="FontSize" Value="11" />
+			<Setter Property="FontSize" Value="{DynamicResource FontXSmall}" />
 			<Setter Property="Foreground" Value="{DynamicResource TextMutedBrush}" />
 		</Style>
 		<Style Selector="TextBlock.error-mono">
 			<Setter Property="FontFamily" Value="{StaticResource CodeFont}" />
-			<Setter Property="FontSize" Value="11.5" />
+			<Setter Property="FontSize" Value="{DynamicResource FontDetail}" />
 			<Setter Property="TextWrapping" Value="Wrap" />
 			<Setter Property="Opacity" Value="0.75" />
 		</Style>
@@ -192,7 +192,7 @@
 							<Grid ColumnDefinitions="*,Auto" ColumnSpacing="4" Classes="projects-header">
 								<TextBlock
 									Text="Workspaces"
-									FontSize="12"
+									FontSize="{DynamicResource FontSmall}"
 									FontWeight="SemiBold"
 									Opacity="0.7"
 									VerticalAlignment="Center" />
@@ -247,7 +247,7 @@
 															<TextBlock
 																Text="{Binding Name}"
 																TextTrimming="CharacterEllipsis"
-																FontSize="12.5"
+																FontSize="{DynamicResource FontBody}"
 																VerticalAlignment="Center" />
 															<Ellipse
 																Width="6"
@@ -323,7 +323,7 @@
 																	Grid.Column="1"
 																	Text="{Binding Title}"
 																	TextTrimming="CharacterEllipsis"
-																	FontSize="12.5"
+																	FontSize="{DynamicResource FontBody}"
 																	VerticalAlignment="Center"
 																	IsVisible="{Binding !IsEditing}" />
 																<TextBox
@@ -335,7 +335,7 @@
 																<TextBlock
 																	Grid.Column="2"
 																	Text="{Binding UpdatedLabel}"
-																	FontSize="10.5"
+																	FontSize="{DynamicResource FontMicro}"
 																	Opacity="0.45"
 																	VerticalAlignment="Center"
 																	IsVisible="{Binding !IsEditing}" />
@@ -424,12 +424,12 @@
 									Height="14"
 									Foreground="{DynamicResource TextMutedBrush}"
 									VerticalAlignment="Center" />
-								<TextBlock Text="{Binding RestorePromptText}" FontSize="12.5" VerticalAlignment="Center" />
+								<TextBlock Text="{Binding RestorePromptText}" FontSize="{DynamicResource FontBody}" VerticalAlignment="Center" />
 								<Button Classes="btn-soft" Command="{Binding RestorePreviousSessionCommand}" ToolTip.Tip="Reopen the chats from the last session">
-									<TextBlock Text="Restore" FontSize="12.5" VerticalAlignment="Center" />
+									<TextBlock Text="Restore" FontSize="{DynamicResource FontBody}" VerticalAlignment="Center" />
 								</Button>
 								<Button Classes="btn-soft" Command="{Binding DismissRestorePromptCommand}" ToolTip.Tip="Discard the saved tile list">
-									<TextBlock Text="Ignore" FontSize="12.5" VerticalAlignment="Center" />
+									<TextBlock Text="Ignore" FontSize="{DynamicResource FontBody}" VerticalAlignment="Center" />
 								</Button>
 							</StackPanel>
 						</Border>
@@ -452,7 +452,7 @@
 									<Grid ColumnDefinitions="*,Auto">
 										<TextBlock
 											Text="Settings"
-											FontSize="19"
+											FontSize="{DynamicResource FontTitle}"
 											FontWeight="SemiBold"
 											VerticalAlignment="Center" />
 										<Button
@@ -468,7 +468,7 @@
 									</Grid>
 
 									<StackPanel Spacing="4">
-										<TextBlock Text="OpenCode executable" FontSize="12.5" FontWeight="SemiBold" />
+										<TextBlock Text="OpenCode executable" FontSize="{DynamicResource FontBody}" FontWeight="SemiBold" />
 										<TextBox
 											Text="{Binding OpenCodeExecutable}"
 											PlaceholderText="opencode"
@@ -480,16 +480,29 @@
 									</StackPanel>
 
 									<StackPanel Spacing="4">
-										<TextBlock Text="Default model" FontSize="12.5" FontWeight="SemiBold" />
+										<TextBlock Text="Default model" FontSize="{DynamicResource FontBody}" FontWeight="SemiBold" />
 										<TextBox Text="{Binding DefaultModel}" PlaceholderText="provider/model-id — empty = server default" />
 									</StackPanel>
 									<StackPanel Spacing="4">
-										<TextBlock Text="Default variant" FontSize="12.5" FontWeight="SemiBold" />
+										<TextBlock Text="Default variant" FontSize="{DynamicResource FontBody}" FontWeight="SemiBold" />
 										<TextBox Text="{Binding DefaultVariant}" PlaceholderText="empty = model default" />
 									</StackPanel>
 									<StackPanel Spacing="4">
-										<TextBlock Text="Default agent" FontSize="12.5" FontWeight="SemiBold" />
+										<TextBlock Text="Default agent" FontSize="{DynamicResource FontBody}" FontWeight="SemiBold" />
 										<TextBox Text="{Binding DefaultAgent}" PlaceholderText="empty = default build" />
+									</StackPanel>
+
+									<StackPanel Spacing="4">
+										<TextBlock Text="Text size" FontSize="{DynamicResource FontBody}" FontWeight="SemiBold" />
+										<StackPanel Orientation="Horizontal" Spacing="14" Margin="0,2,0,0">
+											<RadioButton GroupName="TextSize" Content="Small" IsChecked="{Binding IsTextCompact}" />
+											<RadioButton GroupName="TextSize" Content="Normal" IsChecked="{Binding IsTextNormal}" />
+											<RadioButton GroupName="TextSize" Content="Large" IsChecked="{Binding IsTextLarge}" />
+										</StackPanel>
+										<TextBlock
+											Classes="sidebar-hint"
+											HorizontalAlignment="Left"
+											Text="Applied across the app as soon as it's saved." />
 									</StackPanel>
 
 									<CheckBox IsChecked="{Binding AutoAllow}" Content="Always allow tool permissions (edit, bash, webfetch)" />
@@ -528,7 +541,7 @@
 								Foreground="{DynamicResource DangerBrush}"
 								VerticalAlignment="Top" />
 							<StackPanel Grid.Column="1" Margin="10,0,0,0" Spacing="2">
-								<TextBlock Text="Something went wrong" FontSize="13" FontWeight="SemiBold" />
+								<TextBlock Text="Something went wrong" FontSize="{DynamicResource FontBodyLarge}" FontWeight="SemiBold" />
 								<TextBlock Classes="error-sub" Text="{Binding Error.Source}" />
 							</StackPanel>
 							<Button
@@ -546,7 +559,7 @@
 							IsVisible="{Binding Error.IsFatal}"
 							Text="This error is fatal — the app closes when you continue." />
 						<TextBlock
-							FontSize="12.5"
+							FontSize="{DynamicResource FontBody}"
 							TextWrapping="Wrap"
 							Text="{Binding Error.ErrorMessage}" />
 						<Border Classes="error-detail">

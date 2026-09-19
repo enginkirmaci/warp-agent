@@ -9,6 +9,7 @@ using Avalonia.Input.Platform;
 using Avalonia.Layout;
 using Avalonia.Media;
 using Avalonia.Threading;
+using WarpAgent.Services;
 
 namespace WarpAgent.Controls;
 
@@ -28,17 +29,17 @@ public class MarkdownTextBlock : StackPanel
     private static readonly StreamGeometry CopyGeometry =
         ThemeRes.Geometry("IconCopy", "F0 M8 2 H20 A2 2 0 0 1 22 4 V16 H20 V4 H8 Z M4 6 H16 A2 2 0 0 1 18 8 V20 A2 2 0 0 1 16 22 H4 A2 2 0 0 1 2 20 V8 A2 2 0 0 1 4 6 Z");
 
-    private readonly IBrush _inlineCodeBg = ThemeRes.Brush("ChipBrush", "#FF2E2E2E");
-    private readonly IBrush _codeFg = ThemeRes.Brush("CodeFgBrush", "#FFDADADA");
-    private readonly IBrush _blockBg = ThemeRes.Brush("CodeBlockBrush", "#FF161616");
-    private readonly IBrush _headerBg = ThemeRes.Brush("ChipBrush", "#FF2E2E2E");
-    private readonly IBrush _linkFg = ThemeRes.Brush("AccentBrush", "#FFBBBBBB");
+    private readonly IBrush _inlineCodeBg = ThemeRes.Brush("ChipBrush", "#FF343434");
+    private readonly IBrush _codeFg = ThemeRes.Brush("CodeFgBrush", "#FFE4E4E4");
+    private readonly IBrush _blockBg = ThemeRes.Brush("CodeBlockBrush", "#FF171717");
+    private readonly IBrush _headerBg = ThemeRes.Brush("ChipBrush", "#FF343434");
+    private readonly IBrush _linkFg = ThemeRes.Brush("AccentBrush", "#FF4AC265");
     private readonly IBrush _kw = ThemeRes.Brush("SynKeywordBrush", "#FFA9A9A9");
     private readonly IBrush _str = ThemeRes.Brush("SynStringBrush", "#FF93B585");
     private readonly IBrush _com = ThemeRes.Brush("SynCommentBrush", "#FF6F6F6F");
     private readonly IBrush _num = ThemeRes.Brush("SynNumberBrush", "#FFC9986E");
-    private readonly IBrush _muted = ThemeRes.Brush("TextMutedBrush", "#FF929292");
-    private readonly IBrush _hairline = ThemeRes.Brush("HairlineBrush", "#FF3A3A3A");
+    private readonly IBrush _muted = ThemeRes.Brush("TextMutedBrush", "#FF9A9A9A");
+    private readonly IBrush _hairline = ThemeRes.Brush("HairlineBrush", "#FF3E3E3E");
 
     public static readonly StyledProperty<string> TextProperty =
         AvaloniaProperty.Register<MarkdownTextBlock, string>(nameof(Text), "");
@@ -66,11 +67,21 @@ public class MarkdownTextBlock : StackPanel
     protected override void OnAttachedToVisualTree(VisualTreeAttachmentEventArgs e)
     {
         base.OnAttachedToVisualTree(e);
+        // attached-only subscription: detached instances must not linger on the static event
+        FontScale.Changed += OnFontScaleChanged;
         if (_builtFor is null)
             FlushRebuild(); // first show builds immediately so the tile doesn't flash empty
         else if (_builtFor != Text)
             QueueRebuild(); // stale; the streaming throttle covers it
     }
+
+    protected override void OnDetachedFromVisualTree(VisualTreeAttachmentEventArgs e)
+    {
+        base.OnDetachedFromVisualTree(e);
+        FontScale.Changed -= OnFontScaleChanged;
+    }
+
+    private void OnFontScaleChanged(object? sender, EventArgs e) => QueueRebuild();
 
     // Streaming rewrites Text many times per second with the full text-so-far; a full
     // parse + visual rebuild per delta is O(n²) on long answers. Coalescing to one
@@ -120,7 +131,12 @@ public class MarkdownTextBlock : StackPanel
     {
         var tb = NewTextBlock();
         tb.FontWeight = FontWeight.Bold;
-        tb.FontSize = h.Level switch { 1 => 18, 2 => 16, _ => 14.5 };
+        tb.FontSize = h.Level switch
+        {
+            1 => ThemeRes.Double("FontH1", 18),
+            2 => ThemeRes.Double("FontH2", 16),
+            _ => ThemeRes.Double("FontH3", 14.5),
+        };
         tb.Margin = new Thickness(0, 4, 0, 0);
         AddInline(tb, h.Text, bold: true);
         return tb;
@@ -131,7 +147,7 @@ public class MarkdownTextBlock : StackPanel
         var text = new SelectableTextBlock
         {
             FontFamily = CodeFont,
-            FontSize = 12.5,
+            FontSize = ThemeRes.Double("FontBody", 12.5),
             TextWrapping = TextWrapping.Wrap,
         };
         text.Inlines ??= new InlineCollection();
@@ -167,7 +183,7 @@ public class MarkdownTextBlock : StackPanel
         header.Children.Add(new TextBlock
         {
             Text = code.Lang.Length > 0 ? code.Lang : "code",
-            FontSize = 10.5,
+            FontSize = ThemeRes.Double("FontMicro", 10.5),
             FontFamily = CodeFont,
             Foreground = _muted,
             VerticalAlignment = VerticalAlignment.Center,
@@ -349,9 +365,9 @@ public class MarkdownTextBlock : StackPanel
     }
 
     // per-run values: resolved once, never per inline (resource walks + parses add up on long answers)
-    private static readonly IBrush InlineChipBg = ThemeRes.Brush("ChipBrush", "#FF2E2E2E");
-    private static readonly IBrush InlineCodeFg = ThemeRes.Brush("CodeFgBrush", "#FFE8D9BC");
-    private static readonly IBrush AccentFg = ThemeRes.Brush("AccentBrush", "#FFBBBBBB");
+    private static readonly IBrush InlineChipBg = ThemeRes.Brush("ChipBrush", "#FF343434");
+    private static readonly IBrush InlineCodeFg = ThemeRes.Brush("CodeFgBrush", "#FFE4E4E4");
+    private static readonly IBrush AccentFg = ThemeRes.Brush("AccentBrush", "#FF4AC265");
     private static readonly TextDecorationCollection Underline = TextDecorationCollection.Parse("Underline");
 
     private static Inline MakeLink(string url, string label, bool bold)
@@ -392,7 +408,7 @@ public class MarkdownTextBlock : StackPanel
         if (mono)
         {
             run.FontFamily = CodeFont;
-            run.FontSize = 12.5;
+            run.FontSize = ThemeRes.Double("FontBody", 12.5);
             run.Background = InlineChipBg;
             run.Foreground = InlineCodeFg;
         }

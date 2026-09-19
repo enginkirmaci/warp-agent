@@ -16,6 +16,11 @@ public partial class SettingsPageViewModel : ObservableObject
     [ObservableProperty] private string? _defaultAgent;
     [ObservableProperty] private bool _autoAllow;
 
+    // text-size radio group: exactly one of the three is checked
+    [ObservableProperty] private bool _isTextCompact;
+    [ObservableProperty] private bool _isTextNormal;
+    [ObservableProperty] private bool _isTextLarge;
+
     /// <summary>Raised after a successful save; the window closes the page.</summary>
     public event EventHandler? Saved;
 
@@ -28,6 +33,18 @@ public partial class SettingsPageViewModel : ObservableObject
         _defaultVariant = s.DefaultVariant;
         _defaultAgent = s.DefaultAgent;
         _autoAllow = s.AutoAllowAlways ?? true;
+        switch (FontScale.Normalize(s.FontScale))
+        {
+            case FontScale.Compact:
+                _isTextCompact = true;
+                break;
+            case FontScale.Large:
+                _isTextLarge = true;
+                break;
+            default:
+                _isTextNormal = true;
+                break;
+        }
     }
 
     [RelayCommand]
@@ -41,6 +58,7 @@ public partial class SettingsPageViewModel : ObservableObject
         s.DefaultVariant = NullIfBlank(DefaultVariant);
         s.DefaultAgent = NullIfBlank(DefaultAgent);
         s.AutoAllowAlways = AutoAllow;
+        s.FontScale = IsTextCompact ? FontScale.Compact : IsTextLarge ? FontScale.Large : FontScale.Normal;
         s.Save();
         _owner.ApplySavedSettings();
         Saved?.Invoke(this, EventArgs.Empty);

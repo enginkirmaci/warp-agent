@@ -13,6 +13,11 @@ internal static class ThemeRes
             ? brush
             : new SolidColorBrush(Color.Parse(fallback));
 
+    internal static double Double(string key, double fallback) =>
+        Application.Current?.TryGetResource(key, null, out var value) == true && value is double d
+            ? d
+            : fallback;
+
     internal static StreamGeometry Geometry(string key, string fallback) =>
         Application.Current?.TryGetResource(key, null, out var value) == true && value is StreamGeometry g
             ? g

@@ -19,11 +19,11 @@ public partial class App : Application
         CrashGuard.Install();
 
         //  the stock Blue primary tints the window shader (titlebar glass) and every
-        //  default SukiUI control accent; a neutral theme keeps color ownership in our brushes
-        var gray = new SukiColorTheme("Gray", Color.Parse("#929292"), Color.Parse("#929292"));
+        //  default SukiUI control accent; the green theme keeps color ownership in our brushes
+        var green = new SukiColorTheme("Green", Color.Parse("#3FB950"), Color.Parse("#2EA043"));
         var sukiTheme = SukiTheme.GetInstance();
-        sukiTheme.AddColorTheme(gray);
-        sukiTheme.ChangeColorTheme(gray);
+        sukiTheme.AddColorTheme(green);
+        sukiTheme.ChangeColorTheme(green);
 
         if (ApplicationLifetime is IClassicDesktopStyleApplicationLifetime desktop)
         {

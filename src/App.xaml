@@ -4,44 +4,58 @@
 	xmlns="https://github.com/avaloniaui"
 	xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
 	xmlns:suki="https://github.com/kikipoulet/SukiUI"
+	xmlns:sys="using:System"
 	RequestedThemeVariant="Dark">
 	<Application.Resources>
 		<ResourceDictionary>
 			<FontFamily x:Key="CodeFont">DejaVu Sans Mono, Consolas, monospace</FontFamily>
 
+			<!--  typography tokens — every FontSize binds these via DynamicResource so the
+			      settings-page text-size variant can swap the values at runtime  -->
+			<sys:Double x:Key="FontMicro">10.5</sys:Double>
+			<sys:Double x:Key="FontXSmall">11</sys:Double>
+			<sys:Double x:Key="FontDetail">11.5</sys:Double>
+			<sys:Double x:Key="FontSmall">12</sys:Double>
+			<sys:Double x:Key="FontBody">12.5</sys:Double>
+			<sys:Double x:Key="FontBodyLarge">13</sys:Double>
+			<sys:Double x:Key="FontH1">18</sys:Double>
+			<sys:Double x:Key="FontH2">16</sys:Double>
+			<sys:Double x:Key="FontH3">14.5</sys:Double>
+			<sys:Double x:Key="FontTitle">19</sys:Double>
+
 			<!--  surfaces — neutral grays (R=G=B) with a wide luminance ladder:
-			      dark canvas, elevated cards, inset code/diff, visible hairlines  -->
-			<SolidColorBrush x:Key="SurfaceBrush" Color="#FF0F0F0F" />
-			<SolidColorBrush x:Key="CardBrush" Color="#FF1C1C1C" />
-			<SolidColorBrush x:Key="InputBrush" Color="#FF262626" />
-			<SolidColorBrush x:Key="HairlineBrush" Color="#FF3A3A3A" />
-			<SolidColorBrush x:Key="ChipBrush" Color="#FF2E2E2E" />
-			<SolidColorBrush x:Key="DiffBgBrush" Color="#FF161616" />
+      dark canvas, elevated cards, inset code/diff, visible hairlines  -->
+			<SolidColorBrush x:Key="SurfaceBrush" Color="#FF121212" />
+			<SolidColorBrush x:Key="CardBrush" Color="#FF1E1E1E" />
+			<SolidColorBrush x:Key="InputBrush" Color="#FF2A2A2A" />
+			<SolidColorBrush x:Key="HairlineBrush" Color="#FF3E3E3E" />
+			<SolidColorBrush x:Key="ChipBrush" Color="#FF343434" />
+			<SolidColorBrush x:Key="DiffBgBrush" Color="#FF171717" />
 			<SolidColorBrush x:Key="HoverBrush" Color="#14FFFFFF" />
 
 			<!--  chat surfaces  -->
-			<SolidColorBrush x:Key="BubbleUserBrush" Color="#FF333333" />
-			<SolidColorBrush x:Key="BubbleAssistantBrush" Color="#FF262626" />
-			<SolidColorBrush x:Key="BubbleQueuedBrush" Color="#FF252525" />
-			<SolidColorBrush x:Key="QueuedBorderBrush" Color="#FF4A4A4A" />
+			<SolidColorBrush x:Key="BubbleUserBrush" Color="#FF343434" />
+			<SolidColorBrush x:Key="BubbleAssistantBrush" Color="#FF282828" />
+			<SolidColorBrush x:Key="BubbleQueuedBrush" Color="#FF272727" />
+			<SolidColorBrush x:Key="QueuedBorderBrush" Color="#FF4E4E4E" />
 
-			<!--  accents  -->
-			<SolidColorBrush x:Key="AccentBrush" Color="#FFBBBBBB" />
-			<SolidColorBrush x:Key="AccentDimBrush" Color="#FF333333" />
-			<SolidColorBrush x:Key="OnAccentBrush" Color="#FF101010" />
-			<SolidColorBrush x:Key="SuccessBrush" Color="#FF6FBF73" />
-			<SolidColorBrush x:Key="SuccessDimBrush" Color="#FF1F3324" />
-			<SolidColorBrush x:Key="DangerBrush" Color="#FFE07070" />
-			<SolidColorBrush x:Key="DangerDimBrush" Color="#FF3A2428" />
-			<SolidColorBrush x:Key="WarnBrush" Color="#FFD09A50" />
-			<SolidColorBrush x:Key="WarnBgBrush" Color="#FF332B1E" />
-			<SolidColorBrush x:Key="AddBrush" Color="#FF8FC496" />
-			<SolidColorBrush x:Key="DelBrush" Color="#FFE28E85" />
-			<SolidColorBrush x:Key="TextMutedBrush" Color="#FF929292" />
+			<!--  accents — green primary, salmon red, amber; deliberately no blue  -->
+			<SolidColorBrush x:Key="AccentBrush" Color="#FF4AC265" />
+			<SolidColorBrush x:Key="AccentDimBrush" Color="#FF223322" />
+			<SolidColorBrush x:Key="OnAccentBrush" Color="#FF0C140C" />
+			<SolidColorBrush x:Key="SuccessBrush" Color="#FF4AC265" />
+			<SolidColorBrush x:Key="SuccessDimBrush" Color="#FF1D3122" />
+			<SolidColorBrush x:Key="DangerBrush" Color="#FFF47067" />
+			<SolidColorBrush x:Key="DangerDimBrush" Color="#FF3B2523" />
+			<SolidColorBrush x:Key="WarnBrush" Color="#FFE8A348" />
+			<SolidColorBrush x:Key="WarnBgBrush" Color="#FF3A2D1A" />
+			<SolidColorBrush x:Key="AddBrush" Color="#FF56C272" />
+			<SolidColorBrush x:Key="DelBrush" Color="#FFF47067" />
+			<SolidColorBrush x:Key="TextMutedBrush" Color="#FF9A9A9A" />
 
 			<!--  code  -->
-			<SolidColorBrush x:Key="CodeBlockBrush" Color="#FF161616" />
-			<SolidColorBrush x:Key="CodeFgBrush" Color="#FFDADADA" />
+			<SolidColorBrush x:Key="CodeBlockBrush" Color="#FF171717" />
+			<SolidColorBrush x:Key="CodeFgBrush" Color="#FFE4E4E4" />
 			<SolidColorBrush x:Key="SynKeywordBrush" Color="#FFA9A9A9" />
 			<SolidColorBrush x:Key="SynStringBrush" Color="#FF93B585" />
 			<SolidColorBrush x:Key="SynCommentBrush" Color="#FF6F6F6F" />
@@ -49,22 +63,22 @@
 
 			<!--  SukiUI surface overrides — its dark theme stays blue-cast otherwise
 			      (window shader excluded: MainWindow's root paints over it)  -->
-			<SolidColorBrush x:Key="WindowChromeBrush" Color="#FF1A1A1A" />
-			<SolidColorBrush x:Key="SukiStrongBackground" Color="#FF0F0F0F" />
-			<SolidColorBrush x:Key="SukiCardBackground" Color="#FF1C1C1C" />
+			<SolidColorBrush x:Key="WindowChromeBrush" Color="#FF181818" />
+			<SolidColorBrush x:Key="SukiStrongBackground" Color="#FF121212" />
+			<SolidColorBrush x:Key="SukiCardBackground" Color="#FF1E1E1E" />
 			<!--  opaque on purpose: the translucent default lets the background
 			      shader bleed through the window titlebar glass  -->
-			<SolidColorBrush x:Key="SukiGlassCardBackground" Color="#FF0F0F0F" />
-			<SolidColorBrush x:Key="SukiPopupBackground" Color="#FF262626" />
-			<SolidColorBrush x:Key="SukiGlassCardOpaqueBackground" Color="#FF2E2E2E" />
-			<SolidColorBrush x:Key="SukiDialogBackground" Color="#FF0F0F0F" />
-			<SolidColorBrush x:Key="SukiControlTouchBackground" Color="#FF333333" />
-			<SolidColorBrush x:Key="SukiBorderBrush" Color="#FF3A3A3A" />
-			<SolidColorBrush x:Key="SukiControlBorderBrush" Color="#FF4A4A4A" />
-			<SolidColorBrush x:Key="SukiMediumBorderBrush" Color="#FF444444" />
-			<SolidColorBrush x:Key="SukiLightBorderBrush" Color="#FF3A3A3A" />
-			<SolidColorBrush x:Key="SukiMenuBorderBrush" Color="#FF3A3A3A" />
-			<SolidColorBrush x:Key="SukiMuteText" Color="#FF929292" />
+			<SolidColorBrush x:Key="SukiGlassCardBackground" Color="#FF121212" />
+			<SolidColorBrush x:Key="SukiPopupBackground" Color="#FF2A2A2A" />
+			<SolidColorBrush x:Key="SukiGlassCardOpaqueBackground" Color="#FF343434" />
+			<SolidColorBrush x:Key="SukiDialogBackground" Color="#FF121212" />
+			<SolidColorBrush x:Key="SukiControlTouchBackground" Color="#FF3A3A3A" />
+			<SolidColorBrush x:Key="SukiBorderBrush" Color="#FF3E3E3E" />
+			<SolidColorBrush x:Key="SukiControlBorderBrush" Color="#FF4E4E4E" />
+			<SolidColorBrush x:Key="SukiMediumBorderBrush" Color="#FF484848" />
+			<SolidColorBrush x:Key="SukiLightBorderBrush" Color="#FF3E3E3E" />
+			<SolidColorBrush x:Key="SukiMenuBorderBrush" Color="#FF3E3E3E" />
+			<SolidColorBrush x:Key="SukiMuteText" Color="#FF9A9A9A" />
 
 			<!--  SukiUI's fixed blue sources that don't derive from the theme color
 			      (info sematics, legacy accent family, picker flyouts, glass border).
@@ -73,15 +87,15 @@
 			<Color x:Key="SukiInformationColor">#CC929292</Color>
 			<Color x:Key="SukiInformationMediumColor">#CC7A7A7A</Color>
 			<Color x:Key="SukiInformationDarkColor">#CC7A7A7A</Color>
-			<Color x:Key="ThemeAccentColor">#FF929292</Color>
-			<Color x:Key="ThemeAccentColor2">#FF929292</Color>
-			<Color x:Key="ThemeAccentColor3">#FF929292</Color>
-			<Color x:Key="ThemeAccentColor4">#FF5A5A5A</Color>
-			<Color x:Key="ThemeAccentBadgeColor">#30929292</Color>
+			<Color x:Key="ThemeAccentColor">#FF3FB950</Color>
+			<Color x:Key="ThemeAccentColor2">#FF2EA043</Color>
+			<Color x:Key="ThemeAccentColor3">#FF4AC265</Color>
+			<Color x:Key="ThemeAccentColor4">#FF1F6F38</Color>
+			<Color x:Key="ThemeAccentBadgeColor">#303FB950</Color>
 			<Color x:Key="ThemeControlLowColor">#FF8B8B8B</Color>
 			<Color x:Key="ThemeControlMidHighColor">#FFC3C3C3</Color>
-			<Color x:Key="GlassBorderBrush">#FF2E2E2E</Color>
-			<Color x:Key="ThemeBackgroundColor">#FF1C1C1C</Color>
+			<Color x:Key="GlassBorderBrush">#FF343434</Color>
+			<Color x:Key="ThemeBackgroundColor">#FF1E1E1E</Color>
 			<SolidColorBrush x:Key="NotificationCardInformationBackgroundBrush" Color="#FF3F3F3F" Opacity="0.75" />
 
 			<!--  icons (24×24 filled)  -->

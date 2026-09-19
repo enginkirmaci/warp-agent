@@ -218,6 +218,7 @@ public partial class MainViewModel : ObservableObject
     {
         if (_settings.AutoAllowAlways is { } allowed && allowed != AutoAllow)
             AutoAllow = allowed;
+        FontScale.Apply(_settings.FontScale);
     }
 
     partial void OnIsServerRunningChanged(bool value)
@@ -293,6 +294,7 @@ public partial class MainViewModel : ObservableObject
         _settings = AppSettings.Load();
         // one-time migration: the pre-settings auto-allow choice moves into settings.json
         _settings.AutoAllowAlways ??= _state.AutoAllowAlways;
+        FontScale.Apply(_settings.FontScale);
         SettingsPage = new SettingsPageViewModel(this);
         SettingsPage.Saved += (_, _) => IsSettingsOpen = false;
         if (_state.Workspaces.Count == 0 && !string.IsNullOrWhiteSpace(_state.Folder))

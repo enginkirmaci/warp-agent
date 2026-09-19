@@ -101,7 +101,8 @@
 			<Setter Property="Fill" Value="{DynamicResource AccentBrush}" />
 		</Style>
 		<Style Selector="Ellipse.tool-dot.completed">
-			<Setter Property="Fill" Value="{DynamicResource SuccessBrush}" />
+			<!--  muted on purpose: running owns the green dot, error owns red  -->
+			<Setter Property="Fill" Value="{DynamicResource TextMutedBrush}" />
 		</Style>
 		<Style Selector="Ellipse.tool-dot.error">
 			<Setter Property="Fill" Value="{DynamicResource DangerBrush}" />
@@ -223,11 +224,14 @@
 			<Setter Property="Padding" Value="7" />
 			<Setter Property="CornerRadius" Value="8" />
 			<Setter Property="Background" Value="Transparent" />
+			<Setter Property="BorderBrush" Value="Transparent" />
 			<Setter Property="Foreground" Value="{DynamicResource TextMutedBrush}" />
 		</Style>
-		<!--  selected auto-allow reads warm: yellow-orange glyph on the dim warm fill  -->
-		<Style Selector="ToggleButton.allow-toggle:on">
+		<!--  checked auto-allow reads warm: amber glyph on the dim warm fill.
+		      :checked, not :on — Avalonia's ToggleButton has no :on pseudo-class  -->
+		<Style Selector="ToggleButton.allow-toggle:checked">
 			<Setter Property="Background" Value="{DynamicResource WarnBgBrush}" />
+			<Setter Property="BorderBrush" Value="{DynamicResource WarnBrush}" />
 			<Setter Property="Foreground" Value="{DynamicResource WarnBrush}" />
 		</Style>
 
@@ -286,7 +290,7 @@
 					Grid.Column="2"
 					Text="{Binding Title}"
 					Margin="7,0,0,0"
-					FontSize="12.5"
+					FontSize="{DynamicResource FontBody}"
 					FontWeight="SemiBold"
 					VerticalAlignment="Center"
 					TextTrimming="CharacterEllipsis"
@@ -295,25 +299,25 @@
 				<StackPanel Grid.Column="3" Orientation="Horizontal" Spacing="6" VerticalAlignment="Center" HorizontalAlignment="Right" Margin="10,0,0,0">
 					<TextBlock
 						Text="{Binding SelectedModel}"
-						FontSize="10.5"
+						FontSize="{DynamicResource FontMicro}"
 						Opacity="0.5"
 						MaxWidth="220"
 						TextTrimming="CharacterEllipsis"
 						VerticalAlignment="Center"
 						ToolTip.Tip="{Binding SelectedModel}" />
-					<TextBlock Text="·" FontSize="10.5" Opacity="0.3" VerticalAlignment="Center" />
+					<TextBlock Text="·" FontSize="{DynamicResource FontMicro}" Opacity="0.3" VerticalAlignment="Center" />
 					<TextBlock
 						Text="{Binding SelectedVariant}"
-						FontSize="10.5"
+						FontSize="{DynamicResource FontMicro}"
 						Opacity="0.5"
 						MaxWidth="120"
 						TextTrimming="CharacterEllipsis"
 						VerticalAlignment="Center"
 						ToolTip.Tip="{Binding SelectedVariant}" />
-					<TextBlock Text="·" FontSize="10.5" Opacity="0.3" VerticalAlignment="Center" IsVisible="{Binding HasContext}" />
+					<TextBlock Text="·" FontSize="{DynamicResource FontMicro}" Opacity="0.3" VerticalAlignment="Center" IsVisible="{Binding HasContext}" />
 					<TextBlock
 						Text="{Binding ContextText}"
-						FontSize="10.5"
+						FontSize="{DynamicResource FontMicro}"
 						Opacity="0.5"
 						VerticalAlignment="Center"
 						IsVisible="{Binding HasContext}"
@@ -338,8 +342,8 @@
 										<ScrollViewer MaxHeight="460" HorizontalScrollBarVisibility="Disabled">
 											<StackPanel Spacing="8">
 												<Grid ColumnDefinitions="*,Auto" IsVisible="{Binding HasTasks}">
-													<TextBlock Text="Progress" FontWeight="SemiBold" FontSize="13" Margin="2,0,0,0" VerticalAlignment="Center" />
-													<TextBlock Grid.Column="1" Text="{Binding TasksProgress}" FontSize="11.5" Opacity="0.6" VerticalAlignment="Center" Margin="0,0,2,0" />
+													<TextBlock Text="Progress" FontWeight="SemiBold" FontSize="{DynamicResource FontBodyLarge}" Margin="2,0,0,0" VerticalAlignment="Center" />
+													<TextBlock Grid.Column="1" Text="{Binding TasksProgress}" FontSize="{DynamicResource FontDetail}" Opacity="0.6" VerticalAlignment="Center" Margin="0,0,2,0" />
 												</Grid>
 												<ItemsControl ItemsSource="{Binding Tasks}" IsVisible="{Binding HasTasks}">
 													<ItemsControl.ItemTemplate>
@@ -381,7 +385,7 @@
 																	Grid.Column="1"
 																	Text="{Binding Content}"
 																	TextWrapping="Wrap"
-																	FontSize="12.5"
+																	FontSize="{DynamicResource FontBody}"
 																	Margin="7,1,0,0"
 																	Classes.task-done="{Binding Done}" />
 															</Grid>
@@ -390,8 +394,8 @@
 												</ItemsControl>
 												<Border Height="1" Background="{DynamicResource HairlineBrush}" Margin="0,3" IsVisible="{Binding HasTasksAndAgents}" />
 												<Grid ColumnDefinitions="*,Auto" IsVisible="{Binding Owner.HasBackgroundAgents}">
-													<TextBlock Text="Agents" FontWeight="SemiBold" FontSize="13" Margin="2,0,0,0" VerticalAlignment="Center" />
-													<TextBlock Grid.Column="1" Text="{Binding Owner.AgentsSummary}" FontSize="11.5" Opacity="0.6" VerticalAlignment="Center" Margin="0,0,2,0" />
+													<TextBlock Text="Agents" FontWeight="SemiBold" FontSize="{DynamicResource FontBodyLarge}" Margin="2,0,0,0" VerticalAlignment="Center" />
+													<TextBlock Grid.Column="1" Text="{Binding Owner.AgentsSummary}" FontSize="{DynamicResource FontDetail}" Opacity="0.6" VerticalAlignment="Center" Margin="0,0,2,0" />
 												</Grid>
 												<ItemsControl ItemsSource="{Binding Owner.RunningAgents}" IsVisible="{Binding Owner.HasBackgroundAgents}">
 													<ItemsControl.ItemTemplate>
@@ -432,10 +436,10 @@
 																		Text="{Binding Title}"
 																		TextTrimming="CharacterEllipsis"
 																		MaxWidth="220"
-																		FontSize="12.5" />
+																		FontSize="{DynamicResource FontBody}" />
 																	<TextBlock
 																		Text="{Binding Workspace}"
-																		FontSize="10"
+																		FontSize="{DynamicResource FontMicro}"
 																		Opacity="0.5"
 																		IsVisible="{Binding $parent[ItemsControl].DataContext.Owner.MultipleWorkspaces}" />
 																</StackPanel>
@@ -498,7 +502,7 @@
 											</ContextMenu>
 										</Border.ContextMenu>
 										<StackPanel Spacing="2">
-											<TextBlock Text="{Binding Text}" TextWrapping="Wrap" FontSize="13" LineHeight="19" />
+											<TextBlock Text="{Binding Text}" TextWrapping="Wrap" FontSize="{DynamicResource FontBodyLarge}" LineHeight="19" />
 											<StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Spacing="2">
 												<Button
 													Classes="msg-copy"
@@ -525,10 +529,10 @@
 										ToolTip.Tip="Queued — sent when the current turn finishes">
 										<Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
 											<StackPanel Grid.Column="0" Spacing="1" VerticalAlignment="Center">
-												<TextBlock Text="{Binding Text}" TextWrapping="Wrap" FontSize="13" />
+												<TextBlock Text="{Binding Text}" TextWrapping="Wrap" FontSize="{DynamicResource FontBodyLarge}" />
 												<TextBlock
 													Text="{Binding ImageCount, StringFormat='{}{0} attachment(s)'}"
-													FontSize="11"
+													FontSize="{DynamicResource FontXSmall}"
 													Opacity="0.6"
 													IsVisible="{Binding HasImages}" />
 											</StackPanel>
@@ -536,7 +540,7 @@
 												<Button Classes="queue-steer" Command="{Binding SteerSelfCommand}" ToolTip.Tip="Send next — interrupt the running turn">
 													<StackPanel Orientation="Horizontal" Spacing="4">
 														<PathIcon Data="{StaticResource IconArrowUp}" Width="10" Height="10" />
-														<TextBlock Text="Steer" FontSize="11" />
+														<TextBlock Text="Steer" FontSize="{DynamicResource FontXSmall}" />
 													</StackPanel>
 												</Button>
 												<Button Classes="icon" Command="{Binding EditSelfCommand}" ToolTip.Tip="Edit — pull back into the composer">
@@ -591,7 +595,7 @@
 													Height="12"
 													Foreground="{DynamicResource TextMutedBrush}"
 													VerticalAlignment="Center" />
-												<TextBlock Text="thinking" FontStyle="Italic" Opacity="0.75" FontSize="11.5" />
+												<TextBlock Text="thinking" FontStyle="Italic" Opacity="0.75" FontSize="{DynamicResource FontDetail}" />
 											</StackPanel>
 										</Expander.Header>
 										<Border Classes="fold-body">
@@ -616,19 +620,19 @@
 												Classes.completed="{Binding IsCompleted}"
 												Classes.error="{Binding IsError}" />
 											<Border CornerRadius="6" Padding="6,2" Background="{DynamicResource ChipBrush}">
-												<TextBlock Text="{Binding Tool}" FontSize="11" FontFamily="{StaticResource CodeFont}" />
+												<TextBlock Text="{Binding Tool}" FontSize="{DynamicResource FontXSmall}" FontFamily="{StaticResource CodeFont}" />
 											</Border>
 											<TextBlock
 												Text="{Binding Title}"
 												Opacity="0.8"
 												TextTrimming="CharacterEllipsis"
 												MaxWidth="440"
-												FontSize="12.5"
+												FontSize="{DynamicResource FontBody}"
 												VerticalAlignment="Center" />
 											<TextBlock
 												Text="{Binding Status}"
 												Opacity="0.5"
-												FontSize="11"
+												FontSize="{DynamicResource FontXSmall}"
 												VerticalAlignment="Center" />
 										</StackPanel>
 										<TextBlock
@@ -643,10 +647,10 @@
 										<Expander Classes="disclose chat-fold" IsVisible="{Binding HasDiff}">
 											<Expander.Header>
 												<StackPanel Orientation="Horizontal" Spacing="8">
-													<TextBlock Text="Changes" FontSize="11" Opacity="0.75" />
+													<TextBlock Text="Changes" FontSize="{DynamicResource FontXSmall}" Opacity="0.75" />
 													<StackPanel Orientation="Horizontal" Spacing="2" IsVisible="{Binding HasNumstat}">
-														<TextBlock Text="{Binding Additions}" Foreground="{DynamicResource AddBrush}" FontSize="11" />
-														<TextBlock Text="{Binding Deletions}" Foreground="{DynamicResource DelBrush}" FontSize="11" />
+														<TextBlock Text="{Binding Additions}" Foreground="{DynamicResource AddBrush}" FontSize="{DynamicResource FontXSmall}" />
+														<TextBlock Text="{Binding Deletions}" Foreground="{DynamicResource DelBrush}" FontSize="{DynamicResource FontXSmall}" />
 													</StackPanel>
 												</StackPanel>
 											</Expander.Header>
@@ -658,7 +662,7 @@
 										</Expander>
 										<Expander Classes="disclose chat-fold" IsVisible="{Binding HasDetails}">
 											<Expander.Header>
-												<TextBlock Text="details" FontSize="11" Opacity="0.75" />
+												<TextBlock Text="details" FontSize="{DynamicResource FontXSmall}" Opacity="0.75" />
 											</Expander.Header>
 											<Border Classes="fold-body">
 												<ScrollViewer Classes="fold-scroll">
@@ -691,7 +695,7 @@
 												Stretch="Uniform"
 												HorizontalAlignment="Left" />
 											<StackPanel Orientation="Horizontal" Spacing="6">
-												<TextBlock Text="{Binding FileName}" FontSize="11" Opacity="0.7" VerticalAlignment="Center" />
+												<TextBlock Text="{Binding FileName}" FontSize="{DynamicResource FontXSmall}" Opacity="0.7" VerticalAlignment="Center" />
 												<TextBlock Classes="msg-time" Text="{Binding TimeLabel}" VerticalAlignment="Center" />
 											</StackPanel>
 										</StackPanel>
@@ -732,7 +736,7 @@
 													<TextBlock
 														Text="{Binding DetailPreview}"
 														FontFamily="{StaticResource CodeFont}"
-														FontSize="11.5"
+														FontSize="{DynamicResource FontDetail}"
 														MaxWidth="330"
 														TextTrimming="CharacterEllipsis"
 														VerticalAlignment="Center"
@@ -756,7 +760,7 @@
 												</StackPanel>
 												<Expander Classes="disclose chat-fold" IsVisible="{Binding HasDiff}">
 													<Expander.Header>
-														<TextBlock Text="View diff" FontSize="11" Opacity="0.7" />
+														<TextBlock Text="View diff" FontSize="{DynamicResource FontXSmall}" Opacity="0.7" />
 													</Expander.Header>
 													<Border Classes="fold-body">
 														<ScrollViewer Classes="fold-scroll">
@@ -785,8 +789,8 @@
 											<StackPanel Grid.Column="1" Spacing="4" Margin="0,7,10,7">
 												<StackPanel Orientation="Horizontal" Spacing="7" IsVisible="{Binding IsPending}">
 													<Ellipse Classes="tool-dot running" VerticalAlignment="Center" />
-													<TextBlock Text="question" FontWeight="SemiBold" FontSize="12.5" VerticalAlignment="Center" />
-													<TextBlock Text="pick an answer for each question" FontSize="11" Opacity="0.5" VerticalAlignment="Center" />
+													<TextBlock Text="question" FontWeight="SemiBold" FontSize="{DynamicResource FontBody}" VerticalAlignment="Center" />
+													<TextBlock Text="pick an answer for each question" FontSize="{DynamicResource FontXSmall}" Opacity="0.5" VerticalAlignment="Center" />
 												</StackPanel>
 												<ItemsControl ItemsSource="{Binding Questions}" Margin="0,2,0,0">
 													<ItemsControl.ItemTemplate>
@@ -794,10 +798,10 @@
 															<StackPanel Spacing="5" Margin="0,0,0,4" IsEnabled="{Binding !Locked}">
 																<TextBlock
 																	Text="{Binding Header}"
-																	FontSize="11"
+																	FontSize="{DynamicResource FontXSmall}"
 																	FontWeight="SemiBold"
 																	Opacity="0.55" />
-																<TextBlock Text="{Binding Question}" FontSize="12.5" TextWrapping="Wrap" />
+																<TextBlock Text="{Binding Question}" FontSize="{DynamicResource FontBody}" TextWrapping="Wrap" />
 																<ItemsControl ItemsSource="{Binding Options}">
 																	<ItemsControl.ItemTemplate>
 																		<DataTemplate DataType="{x:Type m:QuestionOptionItem}">
@@ -825,8 +829,8 @@
 																							IsVisible="{Binding !IsSelected}" />
 																					</StackPanel>
 																					<StackPanel Grid.Column="1" Spacing="1">
-																						<TextBlock Text="{Binding Label}" FontSize="12.5" FontWeight="SemiBold" TextWrapping="Wrap" />
-																						<TextBlock Text="{Binding Description}" FontSize="11.5" Opacity="0.6" TextWrapping="Wrap" />
+																						<TextBlock Text="{Binding Label}" FontSize="{DynamicResource FontBody}" FontWeight="SemiBold" TextWrapping="Wrap" />
+																						<TextBlock Text="{Binding Description}" FontSize="{DynamicResource FontDetail}" Opacity="0.6" TextWrapping="Wrap" />
 																					</StackPanel>
 																				</Grid>
 																			</Button>
@@ -859,7 +863,7 @@
 													Text="{Binding Resolution}"
 													IsVisible="{Binding !IsPending}"
 													FontStyle="Italic"
-													FontSize="12"
+													FontSize="{DynamicResource FontSmall}"
 													Opacity="0.75"
 													Margin="0,3,0,0"
 													TextWrapping="Wrap" />
@@ -888,7 +892,7 @@
 													<TextBlock
 														Text="{Binding Text}"
 														Foreground="{DynamicResource DangerBrush}"
-														FontSize="12"
+														FontSize="{DynamicResource FontSmall}"
 														TextWrapping="Wrap"
 														VerticalAlignment="Center" />
 												</StackPanel>
@@ -1005,13 +1009,13 @@
 						</ToggleButton>
 						<Button Grid.Column="2" Classes="composer-pill" Click="OnAgentPillClick" IsVisible="{Binding Owner.HasAgents}" VerticalAlignment="Center">
 							<StackPanel Orientation="Horizontal" Spacing="5">
-								<TextBlock Text="{Binding SelectedAgent}" FontSize="12" VerticalAlignment="Center" />
+								<TextBlock Text="{Binding SelectedAgent}" FontSize="{DynamicResource FontSmall}" VerticalAlignment="Center" />
 								<PathIcon Data="{StaticResource IconChevronDown}" Width="10" Height="10" Opacity="0.6" VerticalAlignment="Center" />
 							</StackPanel>
 						</Button>
 						<Button Grid.Column="3" Classes="composer-pill" Click="OnModelPillClick" VerticalAlignment="Center" ToolTip.Tip="Model for the next message">
 							<StackPanel Orientation="Horizontal" Spacing="5">
-								<TextBlock Text="{Binding SelectedModel}" FontSize="12" VerticalAlignment="Center" />
+								<TextBlock Text="{Binding SelectedModel}" FontSize="{DynamicResource FontSmall}" VerticalAlignment="Center" />
 								<PathIcon Data="{StaticResource IconChevronDown}" Width="10" Height="10" Opacity="0.6" VerticalAlignment="Center" />
 							</StackPanel>
 						</Button>
@@ -1024,7 +1028,7 @@
 							ToolTip.Tip="Model variant (e.g. reasoning effort)">
 							<StackPanel Orientation="Horizontal" Spacing="5">
 								<PathIcon Data="{StaticResource IconGauge}" Width="13" Height="13" Opacity="0.8" VerticalAlignment="Center" />
-								<TextBlock Text="{Binding SelectedVariant}" FontSize="12" VerticalAlignment="Center" />
+								<TextBlock Text="{Binding SelectedVariant}" FontSize="{DynamicResource FontSmall}" VerticalAlignment="Center" />
 								<PathIcon Data="{StaticResource IconChevronDown}" Width="10" Height="10" Opacity="0.6" VerticalAlignment="Center" />
 							</StackPanel>
 						</Button>

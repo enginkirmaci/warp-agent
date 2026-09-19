@@ -182,8 +182,22 @@ public partial class ChatTileViewModel : ObservableObject
 
     partial void OnSelectedModelChanged(string? value)
     {
+        OnPropertyChanged(nameof(SelectedModelShort));
         RefreshVariants();
         _owner.PersistComposer(this);
+    }
+
+    /// <summary>Display-only name for the composer pill: the segment after the last '/'
+    /// ("zai-coding-plan/glm-5.3-flash" → "glm-5.3-flash"); SelectedModel keeps the full id.</summary>
+    public string SelectedModelShort
+    {
+        get
+        {
+            if (SelectedModel is not { } m)
+                return string.Empty;
+            var i = m.LastIndexOf('/');
+            return i >= 0 ? m[(i + 1)..] : m;
+        }
     }
 
     partial void OnSelectedVariantChanged(string? value) => _owner.PersistComposer(this);

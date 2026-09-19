@@ -186,6 +186,35 @@ public partial class PermissionItem : ChatItem
     /// <summary>True when the reply was sent by auto-allow rather than a button click.</summary>
     public bool WasAutoAnswered { get; private set; }
 
+    private int? _autoCountdown;
+
+    /// <summary>Seconds left until auto-allow fires; null while no countdown is running.</summary>
+    public int? AutoCountdown
+    {
+        get => _autoCountdown;
+        set
+        {
+            if (SetProperty(ref _autoCountdown, value))
+            {
+                OnPropertyChanged(nameof(HasAutoCountdown));
+                OnPropertyChanged(nameof(AutoCountdownText));
+            }
+        }
+    }
+
+    public bool HasAutoCountdown => IsPending && AutoCountdown is > 0;
+
+    public string AutoCountdownText
+    {
+        get
+        {
+            var left = TimeSpan.FromSeconds(AutoCountdown ?? 0);
+            return left.TotalSeconds >= 60
+                ? $"auto-allow in {(int)left.TotalMinutes}m {left.Seconds}s"
+                : $"auto-allow in {left.Seconds}s";
+        }
+    }
+
     public string Title => $"Permission required — {Kind}";
     public string DetailPreview => Detail.Split('\n', 2)[0];
     public bool IsPending => _answer is null;
@@ -203,6 +232,7 @@ public partial class PermissionItem : ChatItem
     public void SetAnswer(string label, bool auto)
     {
         WasAutoAnswered = auto;
+        AutoCountdown = null;
         Answer = label;
     }
 

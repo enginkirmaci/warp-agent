@@ -21,8 +21,25 @@ public sealed class AppSettings
     /// <summary>Null = never chosen; auto-allow defaults to on until explicitly unticked.</summary>
     public bool? AutoAllowAlways { get; set; }
 
+    /// <summary>Random auto-allow wait in seconds: working-hours range; lunch and off hours use the away range.</summary>
+    public int AutoAllowDefaultMinSeconds { get; set; } = 1;
+    public int AutoAllowDefaultMaxSeconds { get; set; } = 15;
+
+    /// <summary>Range for lunch and off hours, when nobody is assumed to be watching.</summary>
+    public int AutoAllowAwayMinSeconds { get; set; } = 60;
+    public int AutoAllowAwayMaxSeconds { get; set; } = 600;
+
+    /// <summary>Local hours: lunch is [start, end); off hours run from start to WorkdayStartHour next morning.</summary>
+    public int LunchStartHour { get; set; } = 12;
+    public int LunchEndHour { get; set; } = 14;
+    public int OffHoursStartHour { get; set; } = 18;
+    public int WorkdayStartHour { get; set; } = 8;
+
     /// <summary>Text-size variant: "compact" / "normal" / "large"; null = normal.</summary>
     public string? FontScale { get; set; }
+
+    /// <summary>Accent preset key from AccentTheme; null = green.</summary>
+    public string? Accent { get; set; }
 
     private static string FilePath => AppPaths.SettingsFile;
 

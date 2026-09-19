@@ -29,6 +29,16 @@ public partial class MainWindow : SukiWindow
         CrashGuard.AttachOverlay(_vm.Error);
         if (SidebarColumn is { } column && _vm.SidebarWidth is { } width)
             column.Width = new GridLength(Math.Clamp(width, SidebarMinWidth, SidebarMaxWidth));
+        // the splitter drives column 0 directly and nothing caps it in XAML any more —
+        // clamp here so the sidebar and the width persisted on close stay in range
+        SidebarColumn?.PropertyChanged += (_, e) =>
+        {
+            if (e.Property != ColumnDefinition.WidthProperty || SidebarColumn is not { } col || !col.Width.IsAbsolute)
+                return;
+            var clamped = Math.Clamp(col.Width.Value, SidebarMinWidth, SidebarMaxWidth);
+            if (Math.Abs(clamped - col.Width.Value) > 0.5)
+                col.Width = new GridLength(clamped);
+        };
     }
 
     private void InitializeComponent() => AvaloniaXamlLoader.Load(this);
@@ -49,19 +59,6 @@ public partial class MainWindow : SukiWindow
         // opening the chat list is intent to work in that workspace
         if (expanding)
             _vm.ConnectExpandedWorkspace(ws);
-    }
-
-    private void OnWorkspaceCollapseClick(object? sender, RoutedEventArgs e)
-    {
-        if ((sender as Control)?.DataContext is WorkspaceItem ws)
-        {
-            e.Handled = true;
-            var expanding = !ws.IsExpanded;
-            ws.IsExpanded = expanding;
-            // opening the chat list is intent to work in that workspace
-            if (expanding)
-                _vm.ConnectExpandedWorkspace(ws);
-        }
     }
 
     private void OnSessionClick(object? sender, TappedEventArgs e)
@@ -198,6 +195,13 @@ public partial class MainWindow : SukiWindow
 
     private void OnCloseErrorClick(object? sender, RoutedEventArgs e) =>
         _vm.Error.CloseReportCommand.Execute(null);
+
+    protected override void OnOpened(EventArgs e)
+    {
+        base.OnOpened(e);
+        // Avalonia leaves the Wayland app_id empty; the taskbar matches the desktop entry by it
+        WaylandAppId.Apply(this, "WarpAgent");
+    }
 
     protected override void OnClosing(WindowClosingEventArgs e)
     {

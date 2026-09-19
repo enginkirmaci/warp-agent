@@ -10,6 +10,8 @@ internal static class Program
     public static int Main(string[] args)
     {
         AppLogging.Initialize();
+        // before the UI builds, so the first frame already honors the desktop text scale
+        SystemFontScale.Initialize();
         try
         {
             return BuildAvaloniaApp().StartWithClassicDesktopLifetime(args);
@@ -33,6 +35,11 @@ internal static class Program
             .UsePlatformDetect()
             .WithInterFont()
             .LogToTrace();
-        return OperatingSystem.IsWindows() ? builder : builder.UseWaylandWithFallback();
+        if (OperatingSystem.IsWindows())
+            return builder;
+        // X11 fallback path: keep WM_CLASS matching the desktop entry's StartupWMClass
+        if (OperatingSystem.IsLinux())
+            builder = builder.With(new X11PlatformOptions { WmClass = "WarpAgent" });
+        return builder.UseWaylandWithFallback();
     }
 }

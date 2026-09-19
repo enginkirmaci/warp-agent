@@ -219,6 +219,7 @@ public partial class MainViewModel : ObservableObject
         if (_settings.AutoAllowAlways is { } allowed && allowed != AutoAllow)
             AutoAllow = allowed;
         FontScale.Apply(_settings.FontScale);
+        AccentTheme.Apply(_settings.Accent);
     }
 
     partial void OnIsServerRunningChanged(bool value)
@@ -295,6 +296,7 @@ public partial class MainViewModel : ObservableObject
         // one-time migration: the pre-settings auto-allow choice moves into settings.json
         _settings.AutoAllowAlways ??= _state.AutoAllowAlways;
         FontScale.Apply(_settings.FontScale);
+        AccentTheme.Apply(_settings.Accent);
         SettingsPage = new SettingsPageViewModel(this);
         SettingsPage.Saved += (_, _) => IsSettingsOpen = false;
         if (_state.Workspaces.Count == 0 && !string.IsNullOrWhiteSpace(_state.Folder))
@@ -813,6 +815,7 @@ public partial class MainViewModel : ObservableObject
         ShowRestorePrompt = false;
         foreach (var ws in Workspaces.Where(w => w.State.OpenSessions.Count > 0).ToList())
         {
+            ws.IsExpanded = true; // restored chats belong in a visible sidebar section
             var wanted = ws.State.OpenSessions.ToList();
             if (!IsServerUp(ws))
                 await StartWorkspaceCommand.ExecuteAsync(ws);
@@ -1831,7 +1834,7 @@ public partial class MainViewModel : ObservableObject
         {
             tile.ChatItems.Add(item);
             if (AutoAllow)
-                _ = RespondToPermission(item, "always", isAuto: true);
+                _ = AutoAllowCountdown(item);
             return;
         }
         // a subagent's ask belongs to the chat that spawned it
@@ -1839,15 +1842,42 @@ public partial class MainViewModel : ObservableObject
         // another chat's ask: answer it from its own workspace's server, or park it until its tile opens
         if (!IsAppSession(owner))
             return;
-        if (AutoAllow)
-        {
-            _ = RespondToPermission(item, "always", isAuto: true);
-            return;
-        }
         if (!_pendingBySession.TryGetValue(owner, out var pending))
             _pendingBySession[owner] = pending = [];
         pending.Add(item);
-        MarkAttention(sessionId, true);
+        if (AutoAllow)
+            _ = AutoAllowCountdown(item);
+        else
+            MarkAttention(sessionId, true);
+    }
+
+    /// <summary>Random auto-allow wait: quick during working hours, long over lunch and off hours.</summary>
+    private (int Min, int Max) AutoAllowRange()
+    {
+        var hour = DateTime.Now.Hour;
+        var away = (hour >= _settings.LunchStartHour && hour < _settings.LunchEndHour)
+                || hour >= _settings.OffHoursStartHour || hour < _settings.WorkdayStartHour;
+        var (min, max) = away
+            ? (_settings.AutoAllowAwayMinSeconds, _settings.AutoAllowAwayMaxSeconds)
+            : (_settings.AutoAllowDefaultMinSeconds, _settings.AutoAllowDefaultMaxSeconds);
+        min = Math.Max(0, min);
+        return (min, Math.Max(min, max));
+    }
+
+    /// <summary>Counts down visibly, then answers "always" unless a manual reply beat it
+    /// or auto-allow was turned off in the meantime.</summary>
+    private async Task AutoAllowCountdown(PermissionItem item)
+    {
+        var (min, max) = AutoAllowRange();
+        var seconds = Random.Shared.Next(min, max + 1);
+        for (var left = seconds; left > 0 && item.IsPending; left--)
+        {
+            item.AutoCountdown = left;
+            await Task.Delay(1000);
+        }
+        item.AutoCountdown = null;
+        if (item.IsPending && AutoAllow)
+            await RespondToPermission(item, "always", isAuto: true);
     }
 
     private void FlushPendingPermissions(string sessionId)

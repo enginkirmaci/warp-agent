@@ -7,6 +7,8 @@
 		<ImplicitUsings>enable</ImplicitUsings>
 		<BuiltInComInteropSupport>true</BuiltInComInteropSupport>
 		<AvaloniaUseCompiledBindingsByDefault>false</AvaloniaUseCompiledBindingsByDefault>
+		<!--  same glyph as the titlebar LogoContent (IconSpark) — exe icon on Windows  -->
+		<ApplicationIcon>Assets/spark.ico</ApplicationIcon>
 	</PropertyGroup>
 
 	<ItemGroup>

@@ -4,10 +4,12 @@ using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Input;
 using Avalonia.Input.Platform;
+using Avalonia.Controls.Primitives;
 using Avalonia.Interactivity;
 using Avalonia.Markup.Xaml;
 using Avalonia.Media.Imaging;
 using Avalonia.Platform.Storage;
+using Avalonia.VisualTree;
 using WarpAgent.Models;
 using WarpAgent.ViewModels;
 
@@ -97,6 +99,16 @@ public partial class ChatTile : UserControl
     }
 
     private void OnTileTapped(object? sender, TappedEventArgs e) => Vm?.Focus();
+
+    // tapping dead space in the composer (padding, gaps around the pills) lands the
+    // caret in the input; the TextBox and pill/toggle taps carry their own handling
+    private void OnComposerTapped(object? sender, TappedEventArgs e)
+    {
+        for (var v = e.Source as Visual; v is not null && !ReferenceEquals(v, sender); v = v.GetVisualParent())
+            if (v is Button or ToggleButton)
+                return;
+        _input?.Focus();
+    }
 
     private async void OnAttachClick(object? sender, RoutedEventArgs e)
     {

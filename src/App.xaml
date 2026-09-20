@@ -35,9 +35,16 @@
 			<!--  surfaces — neutral grays (R=G=B) with a wide luminance ladder:
       dark canvas, elevated cards, inset code/diff, visible hairlines  -->
 			<SolidColorBrush x:Key="SurfaceBrush" Color="#FF121212" />
+			<!--  settings page sheet: visibly lighter than both the surface and the chrome so the
+			      page reads as its own layer; its cards drop back to SurfaceBrush  -->
+			<SolidColorBrush x:Key="SettingsBgBrush" Color="#FF202020" />
+			<!--  settings cards: one gray step down from the sheet, hairline border does the separation  -->
+			<SolidColorBrush x:Key="SettingsCardBrush" Color="#FF1A1A1A" />
 			<!--  flyout card: same tone as SurfaceBrush, 0.7 opacity so the chat shows through  -->
 			<SolidColorBrush x:Key="FlyoutSurfaceBrush" Color="#B3121212" />
-			<SolidColorBrush x:Key="CardBrush" Color="#FF1E1E1E" />
+			<!--  tile surface (also restore bar, error dialog, expanded folds): same tone as the
+			      main-area card since 2026-09-20 — the hairline border does the separation  -->
+			<SolidColorBrush x:Key="CardBrush" Color="#FF121212" />
 			<SolidColorBrush x:Key="InputBrush" Color="#FF2A2A2A" />
 			<SolidColorBrush x:Key="HairlineBrush" Color="#FF3E3E3E" />
 			<!--  tile header divider: one step darker than HairlineBrush so it sits quieter on the #121212 tile  -->
@@ -78,7 +85,9 @@
 
 			<!--  SukiUI surface overrides — its dark theme stays blue-cast otherwise
 			      (window shader excluded: MainWindow's root paints over it)  -->
-			<SolidColorBrush x:Key="WindowChromeBrush" Color="#FF181818" />
+			<!--  chrome (titlebar, sidebar, ring): one step lighter than the #121212 canvas so the
+			      rounded main card reads; unified-black experiment lasted a few hours (2026-09-20)  -->
+			<SolidColorBrush x:Key="WindowChromeBrush" Color="#FF1E1E1E" />
 			<SolidColorBrush x:Key="SukiStrongBackground" Color="#FF121212" />
 			<SolidColorBrush x:Key="SukiCardBackground" Color="#FF1E1E1E" />
 			<!--  opaque on purpose: the translucent default lets the background
@@ -116,6 +125,7 @@
 			<!--  icons (24×24 filled)  -->
 			<StreamGeometry x:Key="IconPlus">M11 4 H13 V11 H20 V13 H13 V20 H11 V13 H4 V11 H11 Z</StreamGeometry>
 			<StreamGeometry x:Key="IconKebab">M5 10.2 A1.8 1.8 0 1 1 5 13.8 A1.8 1.8 0 1 1 5 10.2 Z M12 10.2 A1.8 1.8 0 1 1 12 13.8 A1.8 1.8 0 1 1 12 10.2 Z M19 10.2 A1.8 1.8 0 1 1 19 13.8 A1.8 1.8 0 1 1 19 10.2 Z</StreamGeometry>
+			<StreamGeometry x:Key="IconTrash">F0 M4.4 6.6 H19.6 V19.6 A2.4 2.4 0 0 1 17.2 22 H6.8 A2.4 2.4 0 0 1 4.4 19.6 Z M6 6.6 V19.6 A0.8 0.8 0 0 0 6.8 20.4 H17.2 A0.8 0.8 0 0 0 18 19.6 V6.6 Z M3.6 5 H20.4 V6.6 H3.6 Z M9.2 10.6 H10.8 V16.4 H9.2 Z M13.2 10.6 H14.8 V16.4 H13.2 Z</StreamGeometry>
 			<StreamGeometry x:Key="IconClose">M6.4 5 L5 6.4 L10.6 12 L5 17.6 L6.4 19 L12 13.4 L17.6 19 L19 17.6 L13.4 12 L19 6.4 L17.6 5 L12 10.6 Z</StreamGeometry>
 			<StreamGeometry x:Key="IconSend">M2 21 L23 12 L2 3 L2 10 L17 12 L2 14 Z</StreamGeometry>
 			<StreamGeometry x:Key="IconStop">M7 7 H17 V17 H7 Z</StreamGeometry>
@@ -174,11 +184,11 @@
 			<Setter Property="VerticalContentAlignment" Value="Center" />
 		</Style>
 
-		<!--  the one working indicator: a single dot next to a chat tile's title  -->
+		<!--  the one working indicator: a single dot next to a chat tile's title (always green, not accent)  -->
 		<Style Selector="Ellipse.pulse">
 			<Setter Property="Width" Value="5" />
 			<Setter Property="Height" Value="5" />
-			<Setter Property="Fill" Value="{DynamicResource AccentBrush}" />
+			<Setter Property="Fill" Value="{DynamicResource SuccessBrush}" />
 			<Setter Property="VerticalAlignment" Value="Center" />
 			<Style.Animations>
 				<Animation Duration="0:0:2" IterationCount="Infinite">
@@ -190,9 +200,9 @@
 		</Style>
 
 		<!--  sidebar progress spinner: 8-spoke burst breathing while a chat's turn runs
-		      (RenderTransform rotation has no animator registered in this Avalonia build)  -->
+		      (RenderTransform rotation has no animator registered in this Avalonia build); always green  -->
 		<Style Selector="PathIcon.spin">
-			<Setter Property="Foreground" Value="{DynamicResource AccentBrush}" />
+			<Setter Property="Foreground" Value="{DynamicResource SuccessBrush}" />
 			<Style.Animations>
 				<Animation Duration="0:0:1.2" IterationCount="Infinite">
 					<KeyFrame Cue="0%"><Setter Property="Opacity" Value="0.25" /></KeyFrame>

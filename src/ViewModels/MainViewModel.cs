@@ -1533,39 +1533,6 @@ public partial class MainViewModel : ObservableObject
         }
     }
 
-    /// <summary>Shares the session and returns the public URL for the caller to copy; null when the server gave none.</summary>
-    public async Task<string?> ShareSessionAsync(SessionItem session)
-    {
-        if (ApiFor(session.Id) is not { } api)
-            return null;
-        try
-        {
-            return await api.ShareAsync(session.Id, CancellationToken.None);
-        }
-        catch (Exception ex)
-        {
-            Log.Warning(ex, "share failed for {Session}", session.Id);
-            AddNote($"Share failed: {ex.Message}", error: true);
-            return null;
-        }
-    }
-
-    public async Task UnshareSessionAsync(SessionItem session)
-    {
-        if (ApiFor(session.Id) is not { } api)
-            return;
-        try
-        {
-            await api.UnshareAsync(session.Id, CancellationToken.None);
-            AddNote("Session is no longer shared.");
-        }
-        catch (Exception ex)
-        {
-            Log.Warning(ex, "unshare failed for {Session}", session.Id);
-            AddNote($"Unshare failed: {ex.Message}", error: true);
-        }
-    }
-
     // ---- event stream ----
 
     private async Task PumpEventsAsync(OpenCodeApiClient api, CancellationToken ct, WorkspaceItem ws)

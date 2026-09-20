@@ -82,24 +82,6 @@ public partial class MainWindow : SukiWindow
             _vm.BeginRename(session);
     }
 
-    private async void OnShareClick(object? sender, RoutedEventArgs e)
-    {
-        if ((sender as Control)?.DataContext is not SessionItem session)
-            return;
-        var url = await _vm.ShareSessionAsync(session);
-        if (url is null)
-            return;
-        if (TopLevel.GetTopLevel(this)?.Clipboard is { } clipboard)
-            await clipboard.SetTextAsync(url);
-        _vm.Announce($"Share link copied: {url}");
-    }
-
-    private async void OnUnshareClick(object? sender, RoutedEventArgs e)
-    {
-        if ((sender as Control)?.DataContext is SessionItem session)
-            await _vm.UnshareSessionAsync(session);
-    }
-
     private void OnPinClick(object? sender, RoutedEventArgs e)
     {
         if ((sender as Control)?.DataContext is SessionItem session)

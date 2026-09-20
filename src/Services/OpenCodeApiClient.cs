@@ -143,20 +143,6 @@ public sealed class OpenCodeApiClient(string baseUrl)
     public Task RejectQuestionAsync(string requestId, CancellationToken ct) =>
         PostAsync($"/question/{requestId}/reject", new { }, TimeSpan.FromSeconds(15), ct);
 
-    /// <summary>Shares the session; returns the public URL, or null when already shared without a URL.</summary>
-    public async Task<string?> ShareAsync(string sessionId, CancellationToken ct)
-    {
-        using var resp = await PostAsync($"/session/{sessionId}/share", new { }, TimeSpan.FromSeconds(30), ct);
-        using var doc = await JsonDocument.ParseAsync(await resp.Content.ReadAsStreamAsync(ct), cancellationToken: ct);
-        return doc.RootElement.TryGetProperty("share", out var share) &&
-               share.TryGetProperty("url", out var url)
-            ? url.GetString()
-            : null;
-    }
-
-    public Task UnshareAsync(string sessionId, CancellationToken ct) =>
-        SendAsync(HttpMethod.Delete, $"/session/{sessionId}/share", null, TimeSpan.FromSeconds(30), ct);
-
     public async Task<List<AgentInfo>> GetAgentsAsync(CancellationToken ct)
     {
         using var resp = await Http.GetAsync($"{BaseUrl}/agent", ct);

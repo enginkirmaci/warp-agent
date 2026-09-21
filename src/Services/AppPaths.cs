@@ -16,6 +16,10 @@ public static class AppPaths
     public static readonly string SettingsFile = Path.Combine(ConfigDir, "settings.json");
     public static readonly string UiStateFile = Path.Combine(ConfigDir, "ui.json");
 
+    /// <summary>Cwd of the built-in General workspace: general-purpose chats that belong
+    /// to no project folder. The server still needs a directory; this one is ours.</summary>
+    public static readonly string GeneralWorkspacePath = Path.Combine(ConfigDir, "general");
+
     private static readonly string LegacyDir = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "opencode-agent");
 

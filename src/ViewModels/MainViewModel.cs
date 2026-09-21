@@ -301,6 +301,7 @@ public partial class MainViewModel : ObservableObject
         SettingsPage.Saved += (_, _) => IsSettingsOpen = false;
         if (_state.Workspaces.Count == 0 && !string.IsNullOrWhiteSpace(_state.Folder))
             _state.Workspaces.Add(new WorkspaceState { Path = NormalizeDir(_state.Folder) });
+        EnsureGeneralWorkspace();
         // every launch starts with the workspace sections collapsed, whatever was saved
         foreach (var ws in _state.Workspaces)
         {
@@ -342,6 +343,34 @@ public partial class MainViewModel : ObservableObject
         var selected = Workspaces.FirstOrDefault(w => w.FolderPath == _state.ActiveWorkspace) ?? Workspaces.FirstOrDefault();
         if (selected is not null)
             SelectedWorkspace = selected;
+    }
+
+    /// <summary>General is built in: general-purpose chats that belong to no project folder.
+    /// Its state (sessions, open tiles) persists like any workspace, it leads the sidebar
+    /// list, and it cannot be removed. The server still needs a cwd; ~/.warp-agent/general
+    /// is that directory and only shows up as the section's tooltip.</summary>
+    private void EnsureGeneralWorkspace()
+    {
+        var general = _state.Workspaces.FirstOrDefault(w => w.Path == AppPaths.GeneralWorkspacePath);
+        if (general is null)
+        {
+            general = new WorkspaceState { Path = AppPaths.GeneralWorkspacePath };
+            _state.Workspaces.Insert(0, general);
+        }
+        else if (_state.Workspaces[0] != general)
+        {
+            _state.Workspaces.Remove(general);
+            _state.Workspaces.Insert(0, general);
+        }
+        try
+        {
+            Directory.CreateDirectory(AppPaths.GeneralWorkspacePath);
+        }
+        catch (Exception ex)
+        {
+            // the server start below surfaces a bad folder on its own
+            Log.Warning(ex, "could not create the general workspace folder");
+        }
     }
 
     private void SaveState()
@@ -618,6 +647,8 @@ public partial class MainViewModel : ObservableObject
 
     public void RemoveWorkspace(WorkspaceItem ws)
     {
+        if (ws.IsGeneral)
+            return; // built in, always there
         var wasSelected = ReferenceEquals(SelectedWorkspace, ws);
         if (_runtimes.TryGetValue(ws.FolderPath, out var rt))
         {

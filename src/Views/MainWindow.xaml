@@ -285,13 +285,13 @@
 											<StackPanel Margin="0,1">
 											<Border
 												Classes="row-card"
-												ToolTip.Tip="{Binding FolderPath}"
+												ToolTip.Tip="{Binding ToolTipText}"
 												Tapped="OnWorkspaceClick">
 													<Border.ContextMenu>
 														<ContextMenu>
 															<MenuItem Header="Start server" Click="OnWorkspaceStartClick" IsVisible="{Binding !IsRunning}" />
 															<MenuItem Header="Stop server" Click="OnWorkspaceStopClick" IsVisible="{Binding IsRunning}" />
-															<MenuItem Header="Remove workspace" Click="OnWorkspaceRemoveClick" />
+															<MenuItem Header="Remove workspace" Click="OnWorkspaceRemoveClick" IsVisible="{Binding !IsGeneral}" />
 														</ContextMenu>
 													</Border.ContextMenu>
 <Grid ColumnDefinitions="*,Auto">
@@ -302,13 +302,20 @@
 															Width="{DynamicResource IconBody}"
 															Height="{DynamicResource IconBody}"
 															Foreground="{DynamicResource TextMutedBrush}"
-															IsVisible="{Binding IsExpanded}" />
+															IsVisible="{Binding ShowOpenFolder}" />
 														<PathIcon
 															Data="{StaticResource IconFolderOutline}"
 															Width="{DynamicResource IconBody}"
 															Height="{DynamicResource IconBody}"
 															Foreground="{DynamicResource TextMutedBrush}"
-															IsVisible="{Binding !IsExpanded}" />
+															IsVisible="{Binding ShowClosedFolder}" />
+														<!--  General is a chat, not a folder: one steady glyph  -->
+														<PathIcon
+															Data="{StaticResource IconChatOutline}"
+															Width="{DynamicResource IconBody}"
+															Height="{DynamicResource IconBody}"
+															Foreground="{DynamicResource TextMutedBrush}"
+															IsVisible="{Binding IsGeneral}" />
 													</Panel>
 															<TextBlock
 																Text="{Binding Name}"

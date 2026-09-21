@@ -14,9 +14,11 @@ public sealed class WorkspaceItem : ObservableObject
     public WorkspaceItem(WorkspaceState state)
     {
         State = state;
-        Name = Path.GetFileName(state.Path.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)) is { Length: > 0 } name
-            ? name
-            : state.Path;
+        Name = state.Path == AppPaths.GeneralWorkspacePath
+            ? "General"
+            : Path.GetFileName(state.Path.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)) is { Length: > 0 } name
+                ? name
+                : state.Path;
         Chats.CollectionChanged += (_, _) =>
         {
             OnPropertyChanged(nameof(HasChats));
@@ -29,7 +31,13 @@ public sealed class WorkspaceItem : ObservableObject
     /// <summary>Normalized absolute path; also the runtime dictionary key.</summary>
     public string FolderPath => State.Path;
 
+    /// <summary>The built-in general-purpose section: not a project folder, not removable.</summary>
+    public bool IsGeneral => FolderPath == AppPaths.GeneralWorkspacePath;
+
     public string Name { get; }
+
+    /// <summary>Row tooltip: the folder for real workspaces, a hint for General.</summary>
+    public string ToolTipText => IsGeneral ? "General chat — not tied to a folder" : FolderPath;
 
     public bool IsRunning
     {
@@ -61,9 +69,15 @@ public sealed class WorkspaceItem : ObservableObject
                 return;
             State.Collapsed = !value;
             OnPropertyChanged();
+            OnPropertyChanged(nameof(ShowOpenFolder));
+            OnPropertyChanged(nameof(ShowClosedFolder));
             StateChanged?.Invoke();
         }
     }
+
+    /// <summary>Folder glyphs only fit real folders; General renders the chat glyph instead.</summary>
+    public bool ShowOpenFolder => !IsGeneral && IsExpanded;
+    public bool ShowClosedFolder => !IsGeneral && !IsExpanded;
 
     /// <summary>Raised when a persisted field changes; MainViewModel hooks its save.</summary>
     public Action? StateChanged { get; set; }

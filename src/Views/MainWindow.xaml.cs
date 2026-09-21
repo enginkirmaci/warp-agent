@@ -49,8 +49,9 @@ public partial class MainWindow : SukiWindow
     {
         if ((sender as Control)?.DataContext is not WorkspaceItem ws)
             return;
-        // a tap on the kebab/plus buttons is their own business, not a section toggle
-        if (e.Source is Button)
+        // a tap on the kebab/new-chat buttons is their own business, not a section toggle;
+        // the glyph inside a button is the gesture source, so walk up the tree to catch it
+        if (e.Source is Avalonia.Visual visual && visual.GetVisualAncestors().OfType<Button>().Any())
             return;
         _vm.SelectWorkspace(ws);
         // the whole row is the toggle: anywhere-click expands or collapses the section

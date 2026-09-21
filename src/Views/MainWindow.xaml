@@ -264,7 +264,10 @@
 						<!--  explicit viewport width: the ScrollViewer's own horizontal measure goes
 						      stale across splitter drags, leaving the rows shifted/overflowing  -->
 						<StackPanel Width="{Binding $parent[ScrollViewer].Viewport.Width}" Spacing="10">
-							<Grid ColumnDefinitions="*,Auto" ColumnSpacing="4" Classes="projects-header">
+							<!--  Background=Transparent keeps :pointerover alive across the whole strip:
+							      without it only the TextBlock glyphs are hover-testable and the + hides
+							      the moment the pointer crosses the gap toward it  -->
+							<Grid ColumnDefinitions="*,Auto" ColumnSpacing="4" Classes="projects-header" Background="Transparent">
 								<TextBlock
 									Text="Workspaces"
 									FontSize="{DynamicResource FontSmall}"

@@ -16,10 +16,13 @@ public partial class MainWindow : SukiWindow
 {
     private const double SidebarMinWidth = 180;
     private const double SidebarMaxWidth = 480;
+    private const double SplitterWidth = 12;
 
     private readonly MainViewModel _vm = new();
     private Grid? _layoutRoot;
     private ColumnDefinition? SidebarColumn => _layoutRoot?.ColumnDefinitions[0];
+    // last absolute sidebar width; zero-width columns mean hidden, this is what Show restores
+    private double _sidebarShownWidth = 250;
 
     public MainWindow()
     {
@@ -28,18 +31,52 @@ public partial class MainWindow : SukiWindow
         DataContext = _vm;
         // the overlay exists from now on: CrashGuard errors land here instead of a queue
         CrashGuard.AttachOverlay(_vm.Error);
-        if (SidebarColumn is { } column && _vm.SidebarWidth is { } width)
-            column.Width = new GridLength(Math.Clamp(width, SidebarMinWidth, SidebarMaxWidth));
+        _sidebarShownWidth = Math.Clamp(_vm.SidebarWidth.GetValueOrDefault(250), SidebarMinWidth, SidebarMaxWidth);
+        ApplySidebarLayout();
         // the splitter drives column 0 directly and nothing caps it in XAML any more —
-        // clamp here so the sidebar and the width persisted on close stay in range
+        // clamp here so the sidebar and the width persisted on close stay in range;
+        // a zero width is the hidden state and must pass through untouched
         SidebarColumn?.PropertyChanged += (_, e) =>
         {
             if (e.Property != ColumnDefinition.WidthProperty || SidebarColumn is not { } col || !col.Width.IsAbsolute)
+                return;
+            if (col.Width.Value < 0.5)
                 return;
             var clamped = Math.Clamp(col.Width.Value, SidebarMinWidth, SidebarMaxWidth);
             if (Math.Abs(clamped - col.Width.Value) > 0.5)
                 col.Width = new GridLength(clamped);
         };
+    }
+
+    private void ApplySidebarLayout()
+    {
+        if (_layoutRoot is not { } root)
+            return;
+        var cols = root.ColumnDefinitions;
+        if (_vm.SidebarVisible)
+        {
+            cols[0].Width = new GridLength(_sidebarShownWidth);
+            cols[1].Width = new GridLength(SplitterWidth);
+        }
+        else
+        {
+            cols[0].Width = new GridLength(0);
+            cols[1].Width = new GridLength(0);
+        }
+    }
+
+    private void OnToggleSidebarClick(object? sender, RoutedEventArgs e)
+    {
+        if (SidebarColumn is not { } col)
+        {
+            _vm.SetSidebarVisible(!_vm.SidebarVisible);
+            ApplySidebarLayout();
+            return;
+        }
+        if (col.Width.IsAbsolute && col.Width.Value >= SidebarMinWidth)
+            _sidebarShownWidth = col.Width.Value;
+        _vm.SetSidebarVisible(!_vm.SidebarVisible);
+        ApplySidebarLayout();
     }
 
     private void InitializeComponent() => AvaloniaXamlLoader.Load(this);
@@ -197,7 +234,8 @@ public partial class MainWindow : SukiWindow
 
     protected override void OnClosing(WindowClosingEventArgs e)
     {
-        if (SidebarColumn is { } column && column.Width.IsAbsolute)
+        // a zero column width is the hidden sidebar — keep the width from before it was hidden
+        if (SidebarColumn is { } column && column.Width.IsAbsolute && column.Width.Value >= SidebarMinWidth)
             _vm.SetSidebarWidth(column.Width.Value);
         _vm.Shutdown();
         base.OnClosing(e);

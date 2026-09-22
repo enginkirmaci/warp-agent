@@ -129,6 +129,21 @@ public partial class MainViewModel : ObservableObject
         _state.Save();
     }
 
+    public bool SidebarVisible => _state.SidebarVisible ?? true;
+
+    public string SidebarToggleTip => SidebarVisible ? "Hide sidebar" : "Show sidebar";
+
+    /// <summary>Titlebar toggle; the width is untouched so showing restores the last dragged size.</summary>
+    public void SetSidebarVisible(bool visible)
+    {
+        if (SidebarVisible == visible)
+            return;
+        _state.SidebarVisible = visible;
+        _state.Save();
+        OnPropertyChanged(nameof(SidebarVisible));
+        OnPropertyChanged(nameof(SidebarToggleTip));
+    }
+
     /// <summary>Edited in place by the settings page; Save persists and re-applies.</summary>
     public AppSettings Settings => _settings;
 

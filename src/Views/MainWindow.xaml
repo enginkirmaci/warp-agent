@@ -22,11 +22,41 @@
 	mc:Ignorable="d">
 
 	<suki:SukiWindow.LogoContent>
-		<PathIcon
-			Width="{DynamicResource IconLarge}"
-			Height="{DynamicResource IconLarge}"
-			Data="{StaticResource IconSpark}"
-			Foreground="{DynamicResource TextMutedBrush}" />
+		<!--
+			logo and the sidebar toggle share one slot: at rest only the spark shows,
+			hovering the slot swaps it for the toggle. PART_Logo is ElementRole=User,
+			so the button stays clickable and the titlebar drag never swallows its
+			presses; Background=Transparent keeps :pointerover alive across the
+			whole slot, not just the glyphs
+		-->
+		<Panel
+			Classes="logo-swap"
+			Background="Transparent"
+			VerticalAlignment="Center">
+			<PathIcon
+				Classes="logo-glyph"
+				Width="{DynamicResource IconLarge}"
+				Height="{DynamicResource IconLarge}"
+				Data="{StaticResource IconSpark}"
+				Foreground="{DynamicResource TextMutedBrush}" />
+			<Button
+				Classes="icon titlebar-btn"
+				Click="OnToggleSidebarClick"
+				ToolTip.Tip="{Binding SidebarToggleTip}">
+				<Panel>
+					<PathIcon
+						Width="{DynamicResource IconMedium}"
+						Height="{DynamicResource IconMedium}"
+						Data="{StaticResource IconPanelLeft}"
+						IsVisible="{Binding SidebarVisible}" />
+					<PathIcon
+						Width="{DynamicResource IconMedium}"
+						Height="{DynamicResource IconMedium}"
+						Data="{StaticResource IconPanelLeftOpen}"
+						IsVisible="{Binding !SidebarVisible}" />
+				</Panel>
+			</Button>
+		</Panel>
 	</suki:SukiWindow.LogoContent>
 
 	<suki:SukiWindow.Styles>
@@ -172,6 +202,35 @@
 			<Setter Property="Background" Value="{DynamicResource HoverBrush}" />
 		</Style>
 
+		<!--
+			titlebar sidebar toggle: chrome-less, sized to the 32px titlebar and living
+			in the logo's slot — hover swaps the spark for the toggle, never both at
+			once; opacity (not visibility) keeps the slot size stable so the window
+			title never jumps
+		-->
+		<Style Selector="Panel.logo-swap:pointerover PathIcon.logo-glyph">
+			<Setter Property="Opacity" Value="0" />
+		</Style>
+		<Style Selector="Button.titlebar-btn">
+			<Setter Property="Width" Value="26" />
+			<Setter Property="Height" Value="26" />
+			<Setter Property="Background" Value="Transparent" />
+			<Setter Property="BorderThickness" Value="0" />
+			<Setter Property="CornerRadius" Value="7" />
+			<Setter Property="Padding" Value="0" />
+			<Setter Property="HorizontalContentAlignment" Value="Center" />
+			<Setter Property="VerticalContentAlignment" Value="Center" />
+			<Setter Property="Opacity" Value="0" />
+			<Setter Property="IsHitTestVisible" Value="False" />
+		</Style>
+		<Style Selector="Panel.logo-swap:pointerover Button.titlebar-btn">
+			<Setter Property="Opacity" Value="1" />
+			<Setter Property="IsHitTestVisible" Value="True" />
+		</Style>
+		<Style Selector="Button.titlebar-btn:pointerover">
+			<Setter Property="Background" Value="{DynamicResource HoverBrush}" />
+		</Style>
+
 		<!--  accent swatches: chrome-less color dot, muted ring when its preset is picked  -->
 		<Style Selector="RadioButton.accent-swatch">
 			<Setter Property="Template">
@@ -270,7 +329,8 @@
 		<Border
 			Grid.Column="0"
 			Margin="10,10,0,10"
-			Padding="10">
+			Padding="10"
+			IsVisible="{Binding SidebarVisible}">
 			<Grid RowDefinitions="*,Auto">
 				<ScrollViewer Grid.Row="0" HorizontalScrollBarVisibility="Disabled">
 					<!--
@@ -513,12 +573,13 @@
 			</Grid>
 		</Border>
 
-		<!--  drag to resize the sidebar  -->
+		<!--  drag to resize the sidebar; hidden together with it  -->
 		<GridSplitter
 			Grid.Column="1"
 			HorizontalAlignment="Stretch"
 			VerticalAlignment="Stretch"
-			Background="Red"
+			Background="Transparent"
+			IsVisible="{Binding SidebarVisible}"
 			ResizeBehavior="PreviousAndNext"
 			ResizeDirection="Columns" />
 

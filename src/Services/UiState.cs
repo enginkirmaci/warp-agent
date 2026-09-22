@@ -29,6 +29,9 @@ public sealed class UiState
     /// <summary>Last dragged sidebar width in DIPs; null keeps the 250 default.</summary>
     public double? SidebarWidth { get; set; }
 
+    /// <summary>Titlebar sidebar toggle; null/true = visible.</summary>
+    public bool? SidebarVisible { get; set; }
+
     private static string FilePath => AppPaths.UiStateFile;
 
     public static UiState Load()

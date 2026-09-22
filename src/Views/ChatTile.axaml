@@ -4,6 +4,7 @@
 	xmlns="https://github.com/avaloniaui"
 	xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
 	xmlns:c="using:WarpAgent.Controls"
+	xmlns:mk="using:MarkdownViewerKit"
 	xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
 	xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
 	xmlns:m="using:WarpAgent.Models"
@@ -530,7 +531,7 @@
 											</ContextMenu>
 										</Border.ContextMenu>
 											<StackPanel Spacing="2">
-												<c:MarkdownTextBlock Text="{Binding Text}" />
+												<mk:MarkdownViewer Markdown="{Binding Text, Mode=OneWay}" />
 												<StackPanel Orientation="Horizontal" Spacing="2" HorizontalAlignment="Right">
 													<Button
 														Classes="msg-copy"

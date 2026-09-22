@@ -37,7 +37,7 @@ internal static class Program
             .LogToTrace();
         if (OperatingSystem.IsWindows())
             return builder;
-        // X11 fallback path: keep WM_CLASS matching the desktop entry's StartupWMClass
+        // X11 fal        lback path: keep WM_CLASS matching the desktop entry's StartupWMClass
         if (OperatingSystem.IsLinux())
             builder = builder.With(new X11PlatformOptions { WmClass = "WarpAgent" });
         return builder.UseWaylandWithFallback();

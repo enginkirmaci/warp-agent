@@ -574,7 +574,7 @@ public partial class MainViewModel : ObservableObject
         if (tile.SessionId is not { } id)
             return;
         foreach (var entry in _queue.Where(e => e.SessionId == id).ToList())
-            tile.ChatItems.Add(entry.Item);
+            tile.QueueRows.Add(entry.Item);
     }
 
     [RelayCommand]
@@ -582,6 +582,7 @@ public partial class MainViewModel : ObservableObject
     {
         if (SelectedWorkspace is null)
             return;
+        SelectedWorkspace.IsExpanded = true; // the new chat belongs in a visible sidebar section
         if (OpenTiles.LastOrDefault() is { } last && last.IsUntouched)
         {
             FocusTile(last);
@@ -926,6 +927,7 @@ public partial class MainViewModel : ObservableObject
     /// that server if needed; the selected workspace is left alone.</summary>
     private async Task OpenSessionIntoGridAsync(WorkspaceItem ws, string sessionId)
     {
+        ws.IsExpanded = true; // the opened chat's row belongs in a visible sidebar section
         if (!_runtimes.TryGetValue(ws.FolderPath, out var rt))
         {
             await StartWorkspaceCommand.ExecuteAsync(ws);
@@ -1003,7 +1005,7 @@ public partial class MainViewModel : ObservableObject
                 Edit = queued => EditQueued(tile, queued),
             };
             _queue.Add(new QueueEntry(tile.SessionId!, text, attachments, item));
-            tile.ChatItems.Add(item);
+            tile.QueueRows.Add(item);
             return;
         }
         if (tile.SessionId is null)
@@ -1068,7 +1070,7 @@ public partial class MainViewModel : ObservableObject
         {
             // nothing running anymore: dispatch it right away
             _queue.RemoveAt(index);
-            tile.ChatItems.Remove(item);
+            tile.QueueRows.Remove(item);
             SendCoreAsync(sid, entry.Text, entry.Attachments);
             return;
         }
@@ -1089,7 +1091,7 @@ public partial class MainViewModel : ObservableObject
             return;
         var entry = _queue[index];
         _queue.RemoveAt(index);
-        tile.ChatItems.Remove(item);
+        tile.QueueRows.Remove(item);
         tile.LoadIntoInput(entry.Text);
         foreach (var attachment in entry.Attachments)
             tile.AttachFile(attachment.FileName, attachment.Mime, attachment.Data);
@@ -1101,7 +1103,7 @@ public partial class MainViewModel : ObservableObject
         if (index >= 0)
             _queue.RemoveAt(index);
         foreach (var tile in OpenTiles)
-            tile.ChatItems.Remove(item);
+            tile.QueueRows.Remove(item);
     }
 
     private void DropQueue(IReadOnlyCollection<string> sessionIds)
@@ -1111,7 +1113,7 @@ public partial class MainViewModel : ObservableObject
             if (!sessionIds.Contains(_queue[i].SessionId))
                 continue;
             var entry = _queue[i];
-            TileFor(entry.SessionId)?.ChatItems.Remove(entry.Item);
+            TileFor(entry.SessionId)?.QueueRows.Remove(entry.Item);
             _queue.RemoveAt(i);
         }
     }
@@ -1136,7 +1138,7 @@ public partial class MainViewModel : ObservableObject
         if (entry is null)
             return;
         _queue.Remove(entry);
-        TileFor(sessionId)?.ChatItems.Remove(entry.Item);
+        TileFor(sessionId)?.QueueRows.Remove(entry.Item);
         SendCoreAsync(sessionId, entry.Text, entry.Attachments);
     }
 

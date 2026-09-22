@@ -181,6 +181,13 @@ public partial class ChatTile : UserControl
             _ = PasteFromClipboardAsync();
             return;
         }
+        if (e.Key == Key.Tab && e.KeyModifiers == KeyModifiers.Shift)
+        {
+            // composer shortcut: cycle the agent pill, focus stays in the input
+            e.Handled = true;
+            Vm?.CycleAgent();
+            return;
+        }
         if (_input is { } box && (e.Key == Key.Up || e.Key == Key.Down))
         {
             // history browsing only from the first (Up) / last (Down) line, so

@@ -23,9 +23,11 @@ public partial class ChatTileViewModel : ObservableObject
     private readonly Dictionary<string, ReasoningItem> _reasoningByPart = new();
     private readonly Dictionary<string, ImageItem> _imageByPart = new();
     private string? _lastUsedModel;
-    // token total of every assistant message; the ctx pill shows their sum,
-    // i.e. the conversation's total usage — not just the last turn's
+    // token totals per assistant message in arrival order; the ctx pill shows the
+    // LATEST one — each message's tokens already describe that call's full context
+    // (cache reads included), so summing turns would multiply-count the window
     private readonly Dictionary<string, long> _tokensByMessage = new();
+    private readonly List<string> _tokenOrder = new();
     private int _contextLimit;
     private bool _isFocused;
     private string _title = MainViewModel.DraftTitle;
@@ -38,6 +40,7 @@ public partial class ChatTileViewModel : ObservableObject
         RefreshVariants(seedFromSettings: true);
         ChatItems.CollectionChanged += (_, _) => OnPropertyChanged(nameof(HasMessages));
         Attachments.CollectionChanged += (_, _) => OnPropertyChanged(nameof(HasAttachments));
+        QueueRows.CollectionChanged += (_, _) => OnPropertyChanged(nameof(HasQueueRows));
         Variants.CollectionChanged += (_, _) => OnPropertyChanged(nameof(HasVariants));
         Tasks.CollectionChanged += (_, _) =>
         {
@@ -69,6 +72,11 @@ public partial class ChatTileViewModel : ObservableObject
     public ObservableCollection<AttachmentItem> Attachments { get; } = [];
     public ObservableCollection<string> Variants { get; } = [];
     public ObservableCollection<TaskItem> Tasks { get; } = [];
+
+    /// <summary>Queued prompts render pinned above the composer, not interleaved in the transcript.</summary>
+    public ObservableCollection<QueuedMessageItem> QueueRows { get; } = [];
+
+    public bool HasQueueRows => QueueRows.Count > 0;
 
     public bool HasMessages => ChatItems.Count > 0;
     public bool HasAttachments => Attachments.Count > 0;
@@ -204,6 +212,17 @@ public partial class ChatTileViewModel : ObservableObject
 
     partial void OnSelectedAgentChanged(string? value) => _owner.PersistComposer(this);
 
+    /// <summary>Shift+Tab in the composer: next entry in the agent list, wrapping;
+    /// the "(default build)" sentinel participates in the cycle like any other entry.</summary>
+    internal void CycleAgent()
+    {
+        if (!_owner.HasAgents)
+            return;
+        var agents = _owner.Agents;
+        var index = SelectedAgent is { } current ? agents.IndexOf(current) : -1;
+        SelectedAgent = agents[(index + 1) % agents.Count];
+    }
+
     private void RefreshVariants(bool seedFromSettings = false)
     {
         Variants.Clear();
@@ -282,7 +301,10 @@ public partial class ChatTileViewModel : ObservableObject
         var total = ChatParsing.ReadTokenTotal(info);
         if (total > 0)
         {
-            _tokensByMessage[id] = total;
+            if (_tokensByMessage.TryAdd(id, total))
+                _tokenOrder.Add(id);
+            else
+                _tokensByMessage[id] = total;
             UpdateContextText();
         }
     }
@@ -292,17 +314,11 @@ public partial class ChatTileViewModel : ObservableObject
 
     private void UpdateContextText()
     {
-        if (_tokensByMessage.Count == 0)
-        {
-            ContextText = null;
-            return;
-        }
-        var total = 0L;
-        foreach (var value in _tokensByMessage.Values)
-            total += value;
-        ContextText = _contextLimit > 0
-            ? $"Ctx {ChatParsing.FormatPercent(total * 100.0 / _contextLimit)}% · {ChatParsing.FormatTokens(total)} / {ChatParsing.FormatTokens(_contextLimit)}"
-            : $"Ctx {ChatParsing.FormatTokens(total)} tok";
+        var total = _tokenOrder.Count > 0 ? _tokensByMessage[_tokenOrder[^1]] : 0;
+        ContextText = total <= 0 ? null
+            : _contextLimit > 0
+                ? $"Ctx {ChatParsing.FormatPercent(total * 100.0 / _contextLimit)}% · {ChatParsing.FormatTokens(total)} / {ChatParsing.FormatTokens(_contextLimit)}"
+                : $"Ctx {ChatParsing.FormatTokens(total)} tok";
     }
 
     internal void OnPartUpdated(JsonElement data)
@@ -430,7 +446,12 @@ public partial class ChatTileViewModel : ObservableObject
                 }
                 var total = ChatParsing.ReadTokenTotal(msg.Info);
                 if (total > 0)
-                    _tokensByMessage[msg.Id] = total;
+                {
+                    if (_tokensByMessage.TryAdd(msg.Id, total))
+                        _tokenOrder.Add(msg.Id);
+                    else
+                        _tokensByMessage[msg.Id] = total;
+                }
             }
             var createdAt = ChatParsing.FromMs(msg.CreatedMs);
             foreach (var part in msg.Parts)

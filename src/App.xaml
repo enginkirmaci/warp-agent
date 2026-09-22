@@ -35,10 +35,7 @@
 			<!--  surfaces — neutral grays (R=G=B) with a wide luminance ladder:
       dark canvas, elevated cards, inset code/diff, visible hairlines  -->
 			<SolidColorBrush x:Key="SurfaceBrush" Color="#FF121212" />
-			<!--  settings page sheet: visibly lighter than both the surface and the chrome so the
-			      page reads as its own layer; its cards drop back to SurfaceBrush  -->
-			<SolidColorBrush x:Key="SettingsBgBrush" Color="#FF202020" />
-			<!--  settings cards: one gray step down from the sheet, hairline border does the separation  -->
+			<!--  settings cards: one gray step down from the SukiPopupBackground sheet, hairline border does the separation  -->
 			<SolidColorBrush x:Key="SettingsCardBrush" Color="#FF1A1A1A" />
 			<!--  flyout card: same tone as SurfaceBrush, 0.7 opacity so the chat shows through  -->
 			<SolidColorBrush x:Key="FlyoutSurfaceBrush" Color="#B3121212" />
@@ -115,11 +112,6 @@
 			<Color x:Key="SukiInformationColor">#CC929292</Color>
 			<Color x:Key="SukiInformationMediumColor">#CC7A7A7A</Color>
 			<Color x:Key="SukiInformationDarkColor">#CC7A7A7A</Color>
-			<Color x:Key="ThemeAccentColor">#FF3FB950</Color>
-			<Color x:Key="ThemeAccentColor2">#FF2EA043</Color>
-			<Color x:Key="ThemeAccentColor3">#FF4AC265</Color>
-			<Color x:Key="ThemeAccentColor4">#FF1F6F38</Color>
-			<Color x:Key="ThemeAccentBadgeColor">#303FB950</Color>
 			<Color x:Key="ThemeControlLowColor">#FF8B8B8B</Color>
 			<Color x:Key="ThemeControlMidHighColor">#FFC3C3C3</Color>
 			<Color x:Key="GlassBorderBrush">#FF343434</Color>
@@ -170,6 +162,7 @@
 		      balloon onto these 30px icon buttons and the popup window swallows the click  -->
 		<Style Selector="ToolTip">
 			<Setter Property="ToolTip.Placement" Value="Top" />
+			<Setter Property="ToolTip.VerticalOffset" Value="-2" />
 		</Style>
 
 		<!--  every icon button renders as a square with a centered glyph  -->

@@ -10,26 +10,32 @@
 	xmlns:v="using:WarpAgent.Views"
 	xmlns:vm="using:WarpAgent.ViewModels"
 	Title="Warp Agent"
-	Icon="avares://WarpAgent/Assets/spark.png"
 	Width="1180"
 	Height="800"
 	MinWidth="860"
 	MinHeight="580"
-	BackgroundStyle="Flat"
-	BackgroundAnimationEnabled="False"
-	WindowStartupLocation="CenterScreen"
 	x:DataType="vm:MainViewModel"
+	BackgroundAnimationEnabled="False"
+	BackgroundStyle="Flat"
+	Icon="avares://WarpAgent/Assets/spark.png"
+	WindowStartupLocation="CenterScreen"
 	mc:Ignorable="d">
 
 	<suki:SukiWindow.LogoContent>
-		<PathIcon Data="{StaticResource IconSpark}" Width="{DynamicResource IconLarge}" Height="{DynamicResource IconLarge}" Foreground="{DynamicResource TextMutedBrush}" />
+		<PathIcon
+			Width="{DynamicResource IconLarge}"
+			Height="{DynamicResource IconLarge}"
+			Data="{StaticResource IconSpark}"
+			Foreground="{DynamicResource TextMutedBrush}" />
 	</suki:SukiWindow.LogoContent>
 
 	<suki:SukiWindow.Styles>
-		<!--  flatten the titlebar too: the SukiUI shader (waves/gradient) must never show.
-		      PART_TitleBarBackground is a GlassCard, not a Border — its card layer paints
-		      the background at GlassOpacity (0.18) so the shader bleeds through, and
-		      PART_ClipBorder stacks another tint on top; pin both to the flat chrome  -->
+		<!--
+			flatten the titlebar too: the SukiUI shader (waves/gradient) must never show.
+			PART_TitleBarBackground is a GlassCard, not a Border — its card layer paints
+			the background at GlassOpacity (0.18) so the shader bleeds through, and
+			PART_ClipBorder stacks another tint on top; pin both to the flat chrome
+		-->
 		<Style Selector="suki|SukiWindow /template/ suki|GlassCard#PART_TitleBarBackground /template/ Border.GlassCardBorderPartCard">
 			<Setter Property="Background" Value="{DynamicResource WindowChromeBrush}" />
 			<Setter Property="Opacity" Value="1" />
@@ -58,8 +64,10 @@
 			<Setter Property="Margin" Value="4,8" />
 		</Style>
 
-		<!--  sidebar rows draw their own hover + selection; SukiUI's check badge and
-		      selected tint are suppressed — selection is the accent border only  -->
+		<!--
+			sidebar rows draw their own hover + selection; SukiUI's check badge and
+			selected tint are suppressed — selection is the accent border only
+		-->
 		<Style Selector="Border.row-card">
 			<Setter Property="CornerRadius" Value="8" />
 			<Setter Property="Padding" Value="8,6" />
@@ -86,9 +94,11 @@
 			<Setter Property="IsHitTestVisible" Value="True" />
 		</Style>
 
-		<!--  the chat row's updated-at time is the inverse: visible at rest, gone on hover
-		      (its place is taken by the delete ws-action button; opacity must live in a
-		      style because a local value would beat the hover setter)  -->
+		<!--
+			the chat row's updated-at time is the inverse: visible at rest, gone on hover
+			(its place is taken by the delete ws-action button; opacity must live in a
+			style because a local value would beat the hover setter)
+		-->
 		<Style Selector="TextBlock.row-time">
 			<Setter Property="Opacity" Value="0.45" />
 		</Style>
@@ -170,10 +180,10 @@
 						x:Name="SwatchDot"
 						Width="24"
 						Height="24"
-						CornerRadius="12"
 						Background="{Binding SwatchBrush}"
+						BorderBrush="Transparent"
 						BorderThickness="2"
-						BorderBrush="Transparent" />
+						CornerRadius="12" />
 				</ControlTemplate>
 			</Setter>
 		</Style>
@@ -244,9 +254,11 @@
 		</Style>
 	</suki:SukiWindow.Styles>
 
-	<!--  painted root: solid flat canvas over the SukiUI shader — no gradient, no waves.
-	      the chrome — titlebar, sidebar and the ring around the main card — paints
-	      WindowChromeBrush; the main area floats on it as a rounded SurfaceBrush card  -->
+	<!--
+		painted root: solid flat canvas over the SukiUI shader — no gradient, no waves.
+		the chrome — titlebar, sidebar and the ring around the main card — paints
+		WindowChromeBrush; the main area floats on it as a rounded SurfaceBrush card
+	-->
 	<Grid x:Name="LayoutRoot" Background="{DynamicResource WindowChromeBrush}">
 		<Grid.ColumnDefinitions>
 			<ColumnDefinition Width="250" />
@@ -259,525 +271,723 @@
 			Grid.Column="0"
 			Margin="10,10,0,10"
 			Padding="10">
-				<Grid RowDefinitions="*,Auto">
-					<ScrollViewer Grid.Row="0" HorizontalScrollBarVisibility="Disabled">
-						<!--  explicit viewport width: the ScrollViewer's own horizontal measure goes
-						      stale across splitter drags, leaving the rows shifted/overflowing  -->
-						<StackPanel Width="{Binding $parent[ScrollViewer].Viewport.Width}" Spacing="10">
-							<!--  Background=Transparent keeps :pointerover alive across the whole strip:
-							      without it only the TextBlock glyphs are hover-testable and the + hides
-							      the moment the pointer crosses the gap toward it  -->
-							<Grid ColumnDefinitions="*,Auto" ColumnSpacing="4" Classes="projects-header" Background="Transparent">
-								<TextBlock
-									Text="Workspaces"
-									FontSize="{DynamicResource FontSmall}"
-									FontWeight="SemiBold"
-									Opacity="0.7"
-									VerticalAlignment="Center" />
-								<Button
-									Grid.Column="1"
-									Classes="icon ws-action"
-									Click="OnAddWorkspaceClicked"
-									ToolTip.Tip="Add workspace folder">
-									<PathIcon Data="{StaticResource IconPlus}" Width="{DynamicResource IconBody}" Height="{DynamicResource IconBody}" />
-								</Button>
-							</Grid>
-							<ItemsControl ItemsSource="{Binding Workspaces}">
-								<ItemsControl.ItemTemplate>
-										<DataTemplate>
-											<StackPanel Margin="0,1">
-											<Border
-												Classes="row-card"
-												ToolTip.Tip="{Binding ToolTipText}"
-												Tapped="OnWorkspaceClick">
-													<Border.ContextMenu>
-														<ContextMenu>
-															<MenuItem Header="Start server" Click="OnWorkspaceStartClick" IsVisible="{Binding !IsRunning}" />
-															<MenuItem Header="Stop server" Click="OnWorkspaceStopClick" IsVisible="{Binding IsRunning}" />
-															<MenuItem Header="Remove workspace" Click="OnWorkspaceRemoveClick" IsVisible="{Binding !IsGeneral}" />
-														</ContextMenu>
-													</Border.ContextMenu>
-<Grid ColumnDefinitions="*,Auto">
+			<Grid RowDefinitions="*,Auto">
+				<ScrollViewer Grid.Row="0" HorizontalScrollBarVisibility="Disabled">
+					<!--
+						explicit viewport width: the ScrollViewer's own horizontal measure goes
+						stale across splitter drags, leaving the rows shifted/overflowing
+					-->
+					<StackPanel Width="{Binding $parent[ScrollViewer].Viewport.Width}" Spacing="10">
+						<!--
+							Background=Transparent keeps :pointerover alive across the whole strip:
+							without it only the TextBlock glyphs are hover-testable and the + hides
+							the moment the pointer crosses the gap toward it
+						-->
+						<Grid
+							Background="Transparent"
+							Classes="projects-header"
+							ColumnDefinitions="*,Auto"
+							ColumnSpacing="4">
+							<TextBlock
+								VerticalAlignment="Center"
+								FontSize="{DynamicResource FontSmall}"
+								FontWeight="SemiBold"
+								Opacity="0.7"
+								Text="Workspaces" />
+							<Button
+								Grid.Column="1"
+								Classes="icon ws-action"
+								Click="OnAddWorkspaceClicked"
+								ToolTip.Tip="Add workspace folder">
+								<PathIcon
+									Width="{DynamicResource IconBody}"
+									Height="{DynamicResource IconBody}"
+									Data="{StaticResource IconPlus}" />
+							</Button>
+						</Grid>
+						<ItemsControl ItemsSource="{Binding Workspaces}">
+							<ItemsControl.ItemTemplate>
+								<DataTemplate>
+									<StackPanel Margin="0,1">
+										<Border
+											Classes="row-card"
+											Tapped="OnWorkspaceClick"
+											ToolTip.Tip="{Binding ToolTipText}">
+											<Border.ContextMenu>
+												<ContextMenu>
+													<MenuItem
+														Click="OnWorkspaceStartClick"
+														Header="Start server"
+														IsVisible="{Binding !IsRunning}" />
+													<MenuItem
+														Click="OnWorkspaceStopClick"
+														Header="Stop server"
+														IsVisible="{Binding IsRunning}" />
+													<MenuItem
+														Click="OnWorkspaceRemoveClick"
+														Header="Remove workspace"
+														IsVisible="{Binding !IsGeneral}" />
+												</ContextMenu>
+											</Border.ContextMenu>
+											<Grid ColumnDefinitions="*,Auto">
 												<StackPanel Orientation="Horizontal" Spacing="7">
 													<Panel VerticalAlignment="Center">
 														<PathIcon
-															Data="{StaticResource IconFolderOpenOutline}"
 															Width="{DynamicResource IconBody}"
 															Height="{DynamicResource IconBody}"
+															Data="{StaticResource IconFolderOpenOutline}"
 															Foreground="{DynamicResource TextMutedBrush}"
 															IsVisible="{Binding ShowOpenFolder}" />
 														<PathIcon
-															Data="{StaticResource IconFolderOutline}"
 															Width="{DynamicResource IconBody}"
 															Height="{DynamicResource IconBody}"
+															Data="{StaticResource IconFolderOutline}"
 															Foreground="{DynamicResource TextMutedBrush}"
 															IsVisible="{Binding ShowClosedFolder}" />
 														<!--  General is a chat, not a folder: one steady glyph  -->
 														<PathIcon
-															Data="{StaticResource IconChatOutline}"
 															Width="{DynamicResource IconBody}"
 															Height="{DynamicResource IconBody}"
+															Data="{StaticResource IconChatOutline}"
 															Foreground="{DynamicResource TextMutedBrush}"
 															IsVisible="{Binding IsGeneral}" />
 													</Panel>
-															<TextBlock
-																Text="{Binding Name}"
-																TextTrimming="CharacterEllipsis"
-																FontSize="{DynamicResource FontBody}"
-																VerticalAlignment="Center" />
-															<Ellipse
-																Width="6"
-																Height="6"
-																Fill="{DynamicResource SuccessBrush}"
-																VerticalAlignment="Center"
-																IsVisible="{Binding IsRunning}" />
-														</StackPanel>
-														<StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="2" VerticalAlignment="Center">
-															<Button
-																Classes="icon ws-action"
-																Click="OnWorkspaceMenuClick"
-																ToolTip.Tip="Workspace actions">
-																<PathIcon Data="{StaticResource IconKebab}" Width="{DynamicResource IconBody}" Height="{DynamicResource IconBody}" />
-															</Button>
-															<Button
-																Classes="icon ws-action"
-																Command="{Binding $parent[ItemsControl].DataContext.NewChatForWorkspaceCommand}"
-																CommandParameter="{Binding}"
-																ToolTip.Tip="New chat in this workspace">
-																<PathIcon Data="{StaticResource IconChatOutline}" Width="{DynamicResource IconBody}" Height="{DynamicResource IconBody}" />
-															</Button>
-														</StackPanel>
-													</Grid>
-												</Border>
-											<StackPanel IsVisible="{Binding IsExpanded}">
-												<TextBlock
-													Classes="sidebar-hint"
-													Margin="26,1,0,1"
-													HorizontalAlignment="Left"
-													TextAlignment="Left"
-													IsVisible="{Binding ShowEmptyHint}"
-													Text="No chats yet" />
-												<ItemsControl ItemsSource="{Binding Chats}">
+													<TextBlock
+														VerticalAlignment="Center"
+														FontSize="{DynamicResource FontBody}"
+														Text="{Binding Name}"
+														TextTrimming="CharacterEllipsis" />
+													<Ellipse
+														Width="6"
+														Height="6"
+														VerticalAlignment="Center"
+														Fill="{DynamicResource SuccessBrush}"
+														IsVisible="{Binding IsRunning}" />
+												</StackPanel>
+												<StackPanel
+													Grid.Column="2"
+													VerticalAlignment="Center"
+													Orientation="Horizontal"
+													Spacing="2">
+													<Button
+														Classes="icon ws-action"
+														Click="OnWorkspaceMenuClick"
+														ToolTip.Tip="Workspace actions">
+														<PathIcon
+															Width="{DynamicResource IconBody}"
+															Height="{DynamicResource IconBody}"
+															Data="{StaticResource IconKebab}" />
+													</Button>
+													<Button
+														Classes="icon ws-action"
+														Command="{Binding $parent[ItemsControl].DataContext.NewChatForWorkspaceCommand}"
+														CommandParameter="{Binding}"
+														ToolTip.Tip="New chat in this workspace">
+														<PathIcon
+															Width="{DynamicResource IconBody}"
+															Height="{DynamicResource IconBody}"
+															Data="{StaticResource IconChatOutline}" />
+													</Button>
+												</StackPanel>
+											</Grid>
+										</Border>
+										<StackPanel IsVisible="{Binding IsExpanded}">
+											<TextBlock
+												Margin="26,1,0,1"
+												HorizontalAlignment="Left"
+												Classes="sidebar-hint"
+												IsVisible="{Binding ShowEmptyHint}"
+												Text="No chats yet"
+												TextAlignment="Left" />
+											<ItemsControl ItemsSource="{Binding Chats}">
 												<ItemsControl.ItemTemplate>
 													<DataTemplate>
 														<Border
+															Margin="26,0,0,0"
 															Classes="row-card"
 															Classes.selected="{Binding IsSelected}"
-															Margin="26,0,0,0"
-															ToolTip.Tip="{Binding Title}"
-															Tapped="OnSessionClick">
+															Tapped="OnSessionClick"
+															ToolTip.Tip="{Binding Title}">
 															<Border.ContextMenu>
 																<ContextMenu>
-																	<MenuItem Header="Pin" Click="OnPinClick" IsVisible="{Binding !IsPinned}" />
-																	<MenuItem Header="Unpin" Click="OnUnpinClick" IsVisible="{Binding IsPinned}" />
-																	<MenuItem Header="Rename" Click="OnRenameClick" />
-																	<MenuItem Header="Remove from workspace" Click="OnUnlinkClick" />
-																	<MenuItem Header="Delete" Click="OnDeleteClick" />
+																	<MenuItem
+																		Click="OnPinClick"
+																		Header="Pin"
+																		IsVisible="{Binding !IsPinned}" />
+																	<MenuItem
+																		Click="OnUnpinClick"
+																		Header="Unpin"
+																		IsVisible="{Binding IsPinned}" />
+																	<MenuItem Click="OnRenameClick" Header="Rename" />
+																	<MenuItem Click="OnUnlinkClick" Header="Remove from workspace" />
+																	<MenuItem Click="OnDeleteClick" Header="Delete" />
 																</ContextMenu>
 															</Border.ContextMenu>
 															<Grid ColumnDefinitions="13,*,Auto" ColumnSpacing="5">
-																<!--  gutter: spinner while the turn runs, pin otherwise —
-																      titles stay aligned across all chat rows  -->
+																<!--
+																	gutter: spinner while the turn runs, pin otherwise —
+																	titles stay aligned across all chat rows
+																-->
 																<Panel VerticalAlignment="Center">
 																	<PathIcon
-																		Classes="spin"
-																		Data="{StaticResource IconSpinner}"
 																		Width="{DynamicResource IconSmall}"
 																		Height="{DynamicResource IconSmall}"
+																		Classes="spin"
+																		Data="{StaticResource IconSpinner}"
 																		IsVisible="{Binding IsRunning}" />
 																	<PathIcon
-																		Data="{StaticResource IconPin}"
 																		Width="{DynamicResource IconXSmall}"
 																		Height="{DynamicResource IconXSmall}"
-																		Foreground="{DynamicResource TextMutedBrush}"
 																		VerticalAlignment="Center"
+																		Data="{StaticResource IconPin}"
+																		Foreground="{DynamicResource TextMutedBrush}"
 																		IsVisible="{Binding PinVisible}" />
 																</Panel>
 																<TextBlock
 																	Grid.Column="1"
-																	Text="{Binding Title}"
-																	TextTrimming="CharacterEllipsis"
-																	FontSize="{DynamicResource FontBody}"
 																	VerticalAlignment="Center"
-																	IsVisible="{Binding !IsEditing}" />
+																	FontSize="{DynamicResource FontBody}"
+																	IsVisible="{Binding !IsEditing}"
+																	Text="{Binding Title}"
+																	TextTrimming="CharacterEllipsis" />
 																<TextBox
 																	Grid.Column="1"
-																	Text="{Binding DraftTitle}"
 																	IsVisible="{Binding IsEditing}"
 																	KeyDown="OnRenameKeyDown"
-																	LostFocus="OnRenameLostFocus" />
+																	LostFocus="OnRenameLostFocus"
+																	Text="{Binding DraftTitle}" />
 																<!--  column 2 swaps by row hover: updated-at time at rest, delete on hover  -->
 																<TextBlock
 																	Grid.Column="2"
-																	Classes="row-time"
-																	Text="{Binding UpdatedLabel}"
-																	FontSize="{DynamicResource FontMicro}"
 																	VerticalAlignment="Center"
-																	IsVisible="{Binding !IsEditing}" />
+																	Classes="row-time"
+																	FontSize="{DynamicResource FontMicro}"
+																	IsVisible="{Binding !IsEditing}"
+																	Text="{Binding UpdatedLabel}" />
 																<Button
 																	Grid.Column="2"
 																	Classes="icon ws-action"
 																	Click="OnDeleteClick"
 																	ToolTip.Tip="Delete chat">
-																	<PathIcon Data="{StaticResource IconTrash}" Width="{DynamicResource IconXSmall}" Height="{DynamicResource IconXSmall}" />
+																	<PathIcon
+																		Width="{DynamicResource IconXSmall}"
+																		Height="{DynamicResource IconXSmall}"
+																		Data="{StaticResource IconTrash}" />
 																</Button>
 															</Grid>
 														</Border>
 													</DataTemplate>
 												</ItemsControl.ItemTemplate>
-												</ItemsControl>
-											</StackPanel>
+											</ItemsControl>
 										</StackPanel>
-									</DataTemplate>
-								</ItemsControl.ItemTemplate>
-							</ItemsControl>
-							<TextBlock
-								Classes="sidebar-hint"
-								IsVisible="{Binding HasNoWorkspace}"
-								Text="Add a workspace folder to begin." />
-						</StackPanel>
-					</ScrollViewer>
-					<Button
-						Grid.Row="1"
-						Classes="settings-btn"
-						Command="{Binding OpenSettingsCommand}"
-						ToolTip.Tip="Settings">
-						<StackPanel Orientation="Horizontal" Spacing="7">
-							<PathIcon Data="{StaticResource IconCog}" Width="{DynamicResource IconMedium}" Height="{DynamicResource IconMedium}" />
-							<TextBlock Text="Settings" FontSize="{DynamicResource FontSmall}" VerticalAlignment="Center" />
-						</StackPanel>
-					</Button>
-				</Grid>
-			</Border>
+									</StackPanel>
+								</DataTemplate>
+							</ItemsControl.ItemTemplate>
+						</ItemsControl>
+						<TextBlock
+							Classes="sidebar-hint"
+							IsVisible="{Binding HasNoWorkspace}"
+							Text="Add a workspace folder to begin." />
+					</StackPanel>
+				</ScrollViewer>
+				<Button
+					Grid.Row="1"
+					Classes="settings-btn"
+					Command="{Binding OpenSettingsCommand}"
+					ToolTip.Tip="Settings">
+					<StackPanel Orientation="Horizontal" Spacing="7">
+						<PathIcon
+							Width="{DynamicResource IconMedium}"
+							Height="{DynamicResource IconMedium}"
+							Data="{StaticResource IconCog}" />
+						<TextBlock
+							VerticalAlignment="Center"
+							FontSize="{DynamicResource FontSmall}"
+							Text="Settings" />
+					</StackPanel>
+				</Button>
+			</Grid>
+		</Border>
 
 		<!--  drag to resize the sidebar  -->
 		<GridSplitter
 			Grid.Column="1"
-			Background="Transparent"
-			ResizeBehavior="PreviousAndNext"
-			ResizeDirection="Columns"
 			HorizontalAlignment="Stretch"
-			VerticalAlignment="Stretch" />
+			VerticalAlignment="Stretch"
+			Background="Red"
+			ResizeBehavior="PreviousAndNext"
+			ResizeDirection="Columns" />
 
-		<Grid Grid.Column="2" Margin="10,10,10,10">
-				<!--  rounded main-area card: floats on the dark chrome; the content grid
-				      above it stays transparent so the corners read through  -->
-				<Border CornerRadius="12" Background="{DynamicResource SurfaceBrush}" BorderBrush="{DynamicResource HairlineBrush}" BorderThickness="0" />
-				<Grid RowDefinitions="*">
+		<Grid Grid.Column="2">
+			<!--
+				rounded main-area card: floats on the dark chrome; the content grid
+				above it stays transparent so the corners read through
+			-->
+			<Border
+				Background="{DynamicResource SurfaceBrush}"
+				BorderBrush="{DynamicResource HairlineBrush}"
+				BorderThickness="0"
+				CornerRadius="12" />
+			<Grid RowDefinitions="*">
 
-					<!--  Tile grid: every open chat is one tile  -->
-					<Grid Margin="0,8,0,0">
-						<ItemsControl ItemsSource="{Binding OpenTiles}">
-							<ItemsControl.ItemsPanel>
-								<ItemsPanelTemplate>
-									<UniformGrid Columns="{Binding TileColumns}" />
-								</ItemsPanelTemplate>
-							</ItemsControl.ItemsPanel>
-							<ItemsControl.ItemTemplate>
-								<DataTemplate>
-									<v:ChatTile Margin="4" />
-								</DataTemplate>
-							</ItemsControl.ItemTemplate>
-						</ItemsControl>
-						<StackPanel
+				<!--  Tile grid: every open chat is one tile  -->
+				<Grid >
+					<ItemsControl ItemsSource="{Binding OpenTiles}">
+						<ItemsControl.ItemsPanel>
+							<ItemsPanelTemplate>
+								<UniformGrid Columns="{Binding TileColumns}" />
+							</ItemsPanelTemplate>
+						</ItemsControl.ItemsPanel>
+						<ItemsControl.ItemTemplate>
+							<DataTemplate>
+								<v:ChatTile Margin="4" />
+							</DataTemplate>
+						</ItemsControl.ItemTemplate>
+					</ItemsControl>
+					<StackPanel
+						HorizontalAlignment="Center"
+						VerticalAlignment="Center"
+						IsVisible="{Binding !HasTiles}">
+						<PathIcon
+							Width="56"
+							Height="56"
+							Margin="0,0,0,16"
 							HorizontalAlignment="Center"
-							VerticalAlignment="Center"
-							IsVisible="{Binding !HasTiles}">
-							<PathIcon
-								Data="{StaticResource IconSpark}"
-								Width="56"
-								Height="56"
-								Foreground="{DynamicResource TextMutedBrush}"
-								HorizontalAlignment="Center"
-								Margin="0,0,0,16" />
-							<TextBlock
-								Classes="sidebar-hint"
-								IsVisible="{Binding HasNoWorkspace}"
-								Text="Add a workspace folder to begin." />
-							<TextBlock
-								Classes="sidebar-hint"
-								IsVisible="{Binding HasIdleWorkspace}"
-								Text="Start the server to load your chats." />
+							Data="{StaticResource IconSpark}"
+							Foreground="{DynamicResource TextMutedBrush}" />
+						<TextBlock
+							Classes="sidebar-hint"
+							IsVisible="{Binding HasNoWorkspace}"
+							Text="Add a workspace folder to begin." />
+						<TextBlock
+							Classes="sidebar-hint"
+							IsVisible="{Binding HasIdleWorkspace}"
+							Text="Start the server to load your chats." />
 						<TextBlock
 							Classes="sidebar-hint"
 							IsVisible="{Binding HasRunningWorkspace}"
 							Text="Open a chat from the sidebar, or start a new one with the + next to a workspace." />
+					</StackPanel>
+
+					<!--  relaunch offer: the last session left chats tiled  -->
+					<Border
+						Margin="0,12,0,0"
+						HorizontalAlignment="Center"
+						VerticalAlignment="Top"
+						Classes="restore-bar"
+						IsVisible="{Binding ShowRestorePrompt}">
+						<StackPanel Orientation="Horizontal" Spacing="12">
+							<PathIcon
+								Width="{DynamicResource IconMedium}"
+								Height="{DynamicResource IconMedium}"
+								VerticalAlignment="Center"
+								Data="{StaticResource IconClock}"
+								Foreground="{DynamicResource TextMutedBrush}" />
+							<TextBlock
+								VerticalAlignment="Center"
+								FontSize="{DynamicResource FontBody}"
+								Text="{Binding RestorePromptText}" />
+							<Button
+								Classes="btn-soft"
+								Command="{Binding RestorePreviousSessionCommand}"
+								ToolTip.Tip="Reopen the chats from the last session">
+								<TextBlock
+									VerticalAlignment="Center"
+									FontSize="{DynamicResource FontBody}"
+									Text="Restore" />
+							</Button>
+							<Button
+								Classes="btn-soft"
+								Command="{Binding DismissRestorePromptCommand}"
+								ToolTip.Tip="Discard the saved tile list">
+								<TextBlock
+									VerticalAlignment="Center"
+									FontSize="{DynamicResource FontBody}"
+									Text="Ignore" />
+							</Button>
 						</StackPanel>
+					</Border>
 
-						<!--  relaunch offer: the last session left chats tiled  -->
-						<Border
-							Classes="restore-bar"
-							HorizontalAlignment="Center"
-							VerticalAlignment="Top"
-							Margin="0,12,0,0"
-							IsVisible="{Binding ShowRestorePrompt}">
-							<StackPanel Orientation="Horizontal" Spacing="12">
-								<PathIcon
-									Data="{StaticResource IconClock}"
-									Width="{DynamicResource IconMedium}"
-									Height="{DynamicResource IconMedium}"
-									Foreground="{DynamicResource TextMutedBrush}"
-									VerticalAlignment="Center" />
-								<TextBlock Text="{Binding RestorePromptText}" FontSize="{DynamicResource FontBody}" VerticalAlignment="Center" />
-								<Button Classes="btn-soft" Command="{Binding RestorePreviousSessionCommand}" ToolTip.Tip="Reopen the chats from the last session">
-									<TextBlock Text="Restore" FontSize="{DynamicResource FontBody}" VerticalAlignment="Center" />
-								</Button>
-								<Button Classes="btn-soft" Command="{Binding DismissRestorePromptCommand}" ToolTip.Tip="Discard the saved tile list">
-									<TextBlock Text="Ignore" FontSize="{DynamicResource FontBody}" VerticalAlignment="Center" />
-								</Button>
-							</StackPanel>
-						</Border>
-
-							<!--  Settings page: covers the tile grid while open (same cell, later
-							      child = on top; Row 1 would fall into an implicit row and leak
-							      the tile grid above it)  -->
-							<Border
-								Margin="0,8,0,0"
-								CornerRadius="12"
-								Background="{DynamicResource SettingsBgBrush}"
-								IsVisible="{Binding IsSettingsOpen}">
-							<ScrollViewer HorizontalScrollBarVisibility="Disabled">
-								<StackPanel
-									Margin="28,24"
-									MaxWidth="1040"
-									HorizontalAlignment="Left"
-									Spacing="18"
-									DataContext="{Binding SettingsPage}"
-									x:DataType="vm:SettingsPageViewModel">
-									<Grid ColumnDefinitions="*,Auto">
-										<TextBlock
-											Text="Settings"
-											FontSize="{DynamicResource FontTitle}"
-											FontWeight="SemiBold"
-											VerticalAlignment="Center" />
-										<Button
-											Grid.Column="1"
-											Classes="btn-soft"
-											Command="{Binding $parent[Window].DataContext.CloseSettingsCommand}"
-											ToolTip.Tip="Close without saving">
-											<StackPanel Orientation="Horizontal" Spacing="6">
-												<PathIcon Data="{StaticResource IconClose}" Width="{DynamicResource IconXSmall}" Height="{DynamicResource IconXSmall}" />
-												<TextBlock Text="Back" VerticalAlignment="Center" />
-											</StackPanel>
-										</Button>
-									</Grid>
-
-									<Grid ColumnDefinitions="*,*" ColumnSpacing="16">
-										<StackPanel Grid.Column="0" Spacing="18">
-
-											<!--  server  -->
-											<StackPanel Spacing="6">
-												<TextBlock Classes="settings-section" Text="Server" />
-												<Border Classes="settings-card">
-													<StackPanel Spacing="8">
-														<Grid ColumnDefinitions="150,*" ColumnSpacing="10">
-															<TextBlock Classes="settings-label" Text="OpenCode executable" />
-															<TextBox
-																Grid.Column="1"
-																Text="{Binding OpenCodeExecutable}"
-																PlaceholderText="opencode"
-																ToolTip.Tip="Binary name (resolved on PATH) or full path to the opencode executable" />
-														</Grid>
-														<TextBlock Classes="settings-hint" Text="Running servers keep their current binary until stopped and started again." />
-													</StackPanel>
-												</Border>
-											</StackPanel>
-
-											<!--  chat defaults  -->
-											<StackPanel Spacing="6">
-												<TextBlock Classes="settings-section" Text="Chat defaults" />
-												<Border Classes="settings-card">
-													<StackPanel Spacing="10">
-														<Grid ColumnDefinitions="150,*" ColumnSpacing="10">
-															<TextBlock Classes="settings-label" Text="Model" />
-															<TextBox Grid.Column="1" Text="{Binding DefaultModel}" PlaceholderText="provider/model-id — empty = server default" />
-														</Grid>
-														<Grid ColumnDefinitions="150,*" ColumnSpacing="10">
-															<TextBlock Classes="settings-label" Text="Variant" />
-															<TextBox Grid.Column="1" Text="{Binding DefaultVariant}" PlaceholderText="empty = model default" />
-														</Grid>
-														<Grid ColumnDefinitions="150,*" ColumnSpacing="10">
-															<TextBlock Classes="settings-label" Text="Agent" />
-															<TextBox Grid.Column="1" Text="{Binding DefaultAgent}" PlaceholderText="empty = default build" />
-														</Grid>
-													</StackPanel>
-												</Border>
-											</StackPanel>
-
-										</StackPanel>
-										<StackPanel Grid.Column="1" Spacing="18">
-
-											<!--  appearance  -->
-											<StackPanel Spacing="6">
-												<TextBlock Classes="settings-section" Text="Appearance" />
-												<Border Classes="settings-card">
-													<StackPanel Spacing="12">
-														<Grid ColumnDefinitions="150,*" ColumnSpacing="10">
-															<TextBlock Classes="settings-label" Text="Text size" />
-															<StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="14">
-																<RadioButton GroupName="TextSize" Content="Small" IsChecked="{Binding IsTextCompact}" />
-																<RadioButton GroupName="TextSize" Content="Normal" IsChecked="{Binding IsTextNormal}" />
-																<RadioButton GroupName="TextSize" Content="Large" IsChecked="{Binding IsTextLarge}" />
-															</StackPanel>
-														</Grid>
-														<TextBlock Classes="settings-hint" Margin="160,0,0,0" Text="Applied across the app as soon as it's saved." />
-														<Border Height="1" Background="{DynamicResource HairlineBrush}" />
-														<Grid ColumnDefinitions="150,*" ColumnSpacing="10">
-															<TextBlock Classes="settings-label" Text="Accent" />
-															<ItemsControl Grid.Column="1" ItemsSource="{Binding AccentOptions}">
-																<ItemsControl.ItemsPanel>
-																	<ItemsPanelTemplate>
-																		<StackPanel Orientation="Horizontal" Spacing="10" />
-																	</ItemsPanelTemplate>
-																</ItemsControl.ItemsPanel>
-																<ItemsControl.ItemTemplate>
-																	<DataTemplate>
-																		<RadioButton
-																			Classes="accent-swatch"
-																			GroupName="Accent"
-																			IsChecked="{Binding IsSelected, Mode=TwoWay}"
-																			ToolTip.Tip="{Binding Label}" />
-																	</DataTemplate>
-																</ItemsControl.ItemTemplate>
-															</ItemsControl>
-														</Grid>
-															<TextBlock Classes="settings-hint" Margin="160,0,0,0" Text="Green, amber, salmon and four gray tones; recolors selected states, focus ring and success dots." />
-													</StackPanel>
-												</Border>
-											</StackPanel>
-
-											<!--  permissions  -->
-											<StackPanel Spacing="6">
-												<TextBlock Classes="settings-section" Text="Permissions" />
-												<Border Classes="settings-card">
-													<StackPanel Spacing="12">
-														<CheckBox IsChecked="{Binding AutoAllow}" Content="Always allow tool permissions (edit, bash, webfetch)" />
-														<StackPanel Spacing="10" IsVisible="{Binding AutoAllow}">
-															<Border Height="1" Background="{DynamicResource HairlineBrush}" />
-															<TextBlock Classes="settings-label" FontWeight="SemiBold" Text="Auto-allow delay" />
-															<Grid ColumnDefinitions="150,*" ColumnSpacing="10">
-																<TextBlock Classes="settings-label" Text="Working hours" />
-																<StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
-																	<TextBox Width="64" Text="{Binding AutoAllowDefaultMin}" ToolTip.Tip="Minimum random wait" />
-																	<TextBlock Text="–" VerticalAlignment="Center" Opacity="0.8" />
-																	<TextBox Width="64" Text="{Binding AutoAllowDefaultMax}" ToolTip.Tip="Maximum random wait" />
-																	<TextBlock Text="seconds" VerticalAlignment="Center" Opacity="0.5" FontStyle="Italic" FontSize="{DynamicResource FontSmall}" />
-																</StackPanel>
-															</Grid>
-															<Grid ColumnDefinitions="150,*" ColumnSpacing="10">
-																<TextBlock Classes="settings-label" Text="Lunch" />
-																<StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
-																	<TextBox Width="52" Text="{Binding LunchStartHour}" ToolTip.Tip="Lunch start hour" />
-																	<TextBlock Text="–" VerticalAlignment="Center" Opacity="0.8" />
-																	<TextBox Width="52" Text="{Binding LunchEndHour}" ToolTip.Tip="Lunch end hour" />
-																	<TextBlock Text="→" VerticalAlignment="Center" Opacity="0.8" />
-																	<TextBox Width="64" Text="{Binding AutoAllowAwayMin}" ToolTip.Tip="Minimum random wait" />
-																	<TextBlock Text="–" VerticalAlignment="Center" Opacity="0.8" />
-																	<TextBox Width="64" Text="{Binding AutoAllowAwayMax}" ToolTip.Tip="Maximum random wait" />
-																</StackPanel>
-															</Grid>
-															<Grid ColumnDefinitions="150,*" ColumnSpacing="10">
-																<TextBlock Classes="settings-label" Text="Off hours" />
-																<StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
-																	<TextBox Width="52" Text="{Binding OffHoursStartHour}" ToolTip.Tip="Off-hours start hour" />
-																	<TextBlock Text="→" VerticalAlignment="Center" Opacity="0.8" />
-																	<TextBox Width="52" Text="{Binding WorkdayStartHour}" ToolTip.Tip="Workday start hour next morning" />
-																	<TextBlock Text="→" VerticalAlignment="Center" Opacity="0.8" />
-																	<TextBlock Text="same range as lunch" VerticalAlignment="Center" Opacity="0.6" FontStyle="Italic" />
-																</StackPanel>
-															</Grid>
-															<TextBlock Classes="settings-hint" Text="Random wait before auto-allow, picked by local time: working hours use the short range, lunch and off hours the long one." />
-														</StackPanel>
-													</StackPanel>
-												</Border>
-											</StackPanel>
-
-										</StackPanel>
-									</Grid>
-
-									<Button Classes="btn-soft" HorizontalAlignment="Left" Command="{Binding SaveCommand}">
+					<!--
+						Settings page: covers the tile grid while open (same cell, later
+						child = on top; Row 1 would fall into an implicit row and leak
+						the tile grid above it)
+					-->
+					<Border
+						Background="{DynamicResource SettingsBgBrush}"
+						CornerRadius="12"
+						IsVisible="{Binding IsSettingsOpen}">
+						<ScrollViewer HorizontalScrollBarVisibility="Disabled">
+							<StackPanel
+								MaxWidth="1040"
+								Margin="28,24"
+								HorizontalAlignment="Left"
+								x:DataType="vm:SettingsPageViewModel"
+								DataContext="{Binding SettingsPage}"
+								Spacing="18">
+								<Grid ColumnDefinitions="*,Auto">
+									<TextBlock
+										VerticalAlignment="Center"
+										FontSize="{DynamicResource FontTitle}"
+										FontWeight="SemiBold"
+										Text="Settings" />
+									<Button
+										Grid.Column="1"
+										Classes="btn-soft"
+										Command="{Binding $parent[Window].DataContext.CloseSettingsCommand}"
+										ToolTip.Tip="Close without saving">
 										<StackPanel Orientation="Horizontal" Spacing="6">
-											<PathIcon Data="{StaticResource IconCheck}" Width="{DynamicResource IconXSmall}" Height="{DynamicResource IconXSmall}" />
-											<TextBlock Text="Save" VerticalAlignment="Center" />
+											<PathIcon
+												Width="{DynamicResource IconXSmall}"
+												Height="{DynamicResource IconXSmall}"
+												Data="{StaticResource IconClose}" />
+											<TextBlock VerticalAlignment="Center" Text="Back" />
 										</StackPanel>
 									</Button>
-								</StackPanel>
-							</ScrollViewer>
-						</Border>
-					</Grid>
+								</Grid>
+
+								<Grid ColumnDefinitions="*,*" ColumnSpacing="16">
+									<StackPanel Grid.Column="0" Spacing="18">
+
+										<!--  server  -->
+										<StackPanel Spacing="6">
+											<TextBlock Classes="settings-section" Text="Server" />
+											<Border Classes="settings-card">
+												<StackPanel Spacing="8">
+													<Grid ColumnDefinitions="150,*" ColumnSpacing="10">
+														<TextBlock Classes="settings-label" Text="OpenCode executable" />
+														<TextBox
+															Grid.Column="1"
+															PlaceholderText="opencode"
+															Text="{Binding OpenCodeExecutable}"
+															ToolTip.Tip="Binary name (resolved on PATH) or full path to the opencode executable" />
+													</Grid>
+													<TextBlock Classes="settings-hint" Text="Running servers keep their current binary until stopped and started again." />
+												</StackPanel>
+											</Border>
+										</StackPanel>
+
+										<!--  chat defaults  -->
+										<StackPanel Spacing="6">
+											<TextBlock Classes="settings-section" Text="Chat defaults" />
+											<Border Classes="settings-card">
+												<StackPanel Spacing="10">
+													<Grid ColumnDefinitions="150,*" ColumnSpacing="10">
+														<TextBlock Classes="settings-label" Text="Model" />
+														<TextBox
+															Grid.Column="1"
+															PlaceholderText="provider/model-id — empty = server default"
+															Text="{Binding DefaultModel}" />
+													</Grid>
+													<Grid ColumnDefinitions="150,*" ColumnSpacing="10">
+														<TextBlock Classes="settings-label" Text="Variant" />
+														<TextBox
+															Grid.Column="1"
+															PlaceholderText="empty = model default"
+															Text="{Binding DefaultVariant}" />
+													</Grid>
+													<Grid ColumnDefinitions="150,*" ColumnSpacing="10">
+														<TextBlock Classes="settings-label" Text="Agent" />
+														<TextBox
+															Grid.Column="1"
+															PlaceholderText="empty = default build"
+															Text="{Binding DefaultAgent}" />
+													</Grid>
+												</StackPanel>
+											</Border>
+										</StackPanel>
+
+									</StackPanel>
+									<StackPanel Grid.Column="1" Spacing="18">
+
+										<!--  appearance  -->
+										<StackPanel Spacing="6">
+											<TextBlock Classes="settings-section" Text="Appearance" />
+											<Border Classes="settings-card">
+												<StackPanel Spacing="12">
+													<Grid ColumnDefinitions="150,*" ColumnSpacing="10">
+														<TextBlock Classes="settings-label" Text="Text size" />
+														<StackPanel
+															Grid.Column="1"
+															Orientation="Horizontal"
+															Spacing="14">
+															<RadioButton
+																Content="Small"
+																GroupName="TextSize"
+																IsChecked="{Binding IsTextCompact}" />
+															<RadioButton
+																Content="Normal"
+																GroupName="TextSize"
+																IsChecked="{Binding IsTextNormal}" />
+															<RadioButton
+																Content="Large"
+																GroupName="TextSize"
+																IsChecked="{Binding IsTextLarge}" />
+														</StackPanel>
+													</Grid>
+													<TextBlock
+														Margin="160,0,0,0"
+														Classes="settings-hint"
+														Text="Applied across the app as soon as it's saved." />
+													<Border Height="1" Background="{DynamicResource HairlineBrush}" />
+													<Grid ColumnDefinitions="150,*" ColumnSpacing="10">
+														<TextBlock Classes="settings-label" Text="Accent" />
+														<ItemsControl Grid.Column="1" ItemsSource="{Binding AccentOptions}">
+															<ItemsControl.ItemsPanel>
+																<ItemsPanelTemplate>
+																	<StackPanel Orientation="Horizontal" Spacing="10" />
+																</ItemsPanelTemplate>
+															</ItemsControl.ItemsPanel>
+															<ItemsControl.ItemTemplate>
+																<DataTemplate>
+																	<RadioButton
+																		Classes="accent-swatch"
+																		GroupName="Accent"
+																		IsChecked="{Binding IsSelected, Mode=TwoWay}"
+																		ToolTip.Tip="{Binding Label}" />
+																</DataTemplate>
+															</ItemsControl.ItemTemplate>
+														</ItemsControl>
+													</Grid>
+													<TextBlock
+														Margin="160,0,0,0"
+														Classes="settings-hint"
+														Text="Green, amber, salmon and four gray tones; recolors selected states, focus ring and success dots." />
+												</StackPanel>
+											</Border>
+										</StackPanel>
+
+										<!--  permissions  -->
+										<StackPanel Spacing="6">
+											<TextBlock Classes="settings-section" Text="Permissions" />
+											<Border Classes="settings-card">
+												<StackPanel Spacing="12">
+													<CheckBox Content="Always allow tool permissions (edit, bash, webfetch)" IsChecked="{Binding AutoAllow}" />
+													<StackPanel IsVisible="{Binding AutoAllow}" Spacing="10">
+														<Border Height="1" Background="{DynamicResource HairlineBrush}" />
+														<TextBlock
+															Classes="settings-label"
+															FontWeight="SemiBold"
+															Text="Auto-allow delay" />
+														<Grid ColumnDefinitions="150,*" ColumnSpacing="10">
+															<TextBlock Classes="settings-label" Text="Working hours" />
+															<StackPanel
+																Grid.Column="1"
+																VerticalAlignment="Center"
+																Orientation="Horizontal"
+																Spacing="6">
+																<TextBox
+																	Width="64"
+																	Text="{Binding AutoAllowDefaultMin}"
+																	ToolTip.Tip="Minimum random wait" />
+																<TextBlock
+																	VerticalAlignment="Center"
+																	Opacity="0.8"
+																	Text="–" />
+																<TextBox
+																	Width="64"
+																	Text="{Binding AutoAllowDefaultMax}"
+																	ToolTip.Tip="Maximum random wait" />
+																<TextBlock
+																	VerticalAlignment="Center"
+																	FontSize="{DynamicResource FontSmall}"
+																	FontStyle="Italic"
+																	Opacity="0.5"
+																	Text="seconds" />
+															</StackPanel>
+														</Grid>
+														<Grid ColumnDefinitions="150,*" ColumnSpacing="10">
+															<TextBlock Classes="settings-label" Text="Lunch" />
+															<StackPanel
+																Grid.Column="1"
+																VerticalAlignment="Center"
+																Orientation="Horizontal"
+																Spacing="6">
+																<TextBox
+																	Width="52"
+																	Text="{Binding LunchStartHour}"
+																	ToolTip.Tip="Lunch start hour" />
+																<TextBlock
+																	VerticalAlignment="Center"
+																	Opacity="0.8"
+																	Text="–" />
+																<TextBox
+																	Width="52"
+																	Text="{Binding LunchEndHour}"
+																	ToolTip.Tip="Lunch end hour" />
+																<TextBlock
+																	VerticalAlignment="Center"
+																	Opacity="0.8"
+																	Text="→" />
+																<TextBox
+																	Width="64"
+																	Text="{Binding AutoAllowAwayMin}"
+																	ToolTip.Tip="Minimum random wait" />
+																<TextBlock
+																	VerticalAlignment="Center"
+																	Opacity="0.8"
+																	Text="–" />
+																<TextBox
+																	Width="64"
+																	Text="{Binding AutoAllowAwayMax}"
+																	ToolTip.Tip="Maximum random wait" />
+															</StackPanel>
+														</Grid>
+														<Grid ColumnDefinitions="150,*" ColumnSpacing="10">
+															<TextBlock Classes="settings-label" Text="Off hours" />
+															<StackPanel
+																Grid.Column="1"
+																VerticalAlignment="Center"
+																Orientation="Horizontal"
+																Spacing="6">
+																<TextBox
+																	Width="52"
+																	Text="{Binding OffHoursStartHour}"
+																	ToolTip.Tip="Off-hours start hour" />
+																<TextBlock
+																	VerticalAlignment="Center"
+																	Opacity="0.8"
+																	Text="→" />
+																<TextBox
+																	Width="52"
+																	Text="{Binding WorkdayStartHour}"
+																	ToolTip.Tip="Workday start hour next morning" />
+																<TextBlock
+																	VerticalAlignment="Center"
+																	Opacity="0.8"
+																	Text="→" />
+																<TextBlock
+																	VerticalAlignment="Center"
+																	FontStyle="Italic"
+																	Opacity="0.6"
+																	Text="same range as lunch" />
+															</StackPanel>
+														</Grid>
+														<TextBlock Classes="settings-hint" Text="Random wait before auto-allow, picked by local time: working hours use the short range, lunch and off hours the long one." />
+													</StackPanel>
+												</StackPanel>
+											</Border>
+										</StackPanel>
+
+									</StackPanel>
+								</Grid>
+
+								<Button
+									HorizontalAlignment="Left"
+									Classes="btn-soft"
+									Command="{Binding SaveCommand}">
+									<StackPanel Orientation="Horizontal" Spacing="6">
+										<PathIcon
+											Width="{DynamicResource IconXSmall}"
+											Height="{DynamicResource IconXSmall}"
+											Data="{StaticResource IconCheck}" />
+										<TextBlock VerticalAlignment="Center" Text="Save" />
+									</StackPanel>
+								</Button>
+							</StackPanel>
+						</ScrollViewer>
+					</Border>
 				</Grid>
 			</Grid>
-			<!--  error overlay: CrashGuard's last-ditch dialog. An error never takes the app
-			      down — this explains what failed and hands the full report to the clipboard  -->
-			<Border
-				Grid.Column="0"
-				Grid.ColumnSpan="3"
-				Background="#A6000000"
-				IsVisible="{Binding Error.IsVisible}">
-				<Border
-					Classes="error-dialog"
-					MaxWidth="560"
-					Margin="24"
-					HorizontalAlignment="Center"
-					VerticalAlignment="Center">
-					<StackPanel Spacing="12">
-						<Grid ColumnDefinitions="Auto,*,Auto">
-							<PathIcon
-								Data="{StaticResource IconWarn}"
-								Width="{DynamicResource IconLarge}"
-								Height="{DynamicResource IconLarge}"
-								Foreground="{DynamicResource DangerBrush}"
-								VerticalAlignment="Top" />
-							<StackPanel Grid.Column="1" Margin="10,0,0,0" Spacing="2">
-								<TextBlock Text="Something went wrong" FontSize="{DynamicResource FontBodyLarge}" FontWeight="SemiBold" />
-								<TextBlock Classes="error-sub" Text="{Binding Error.Source}" />
-							</StackPanel>
-							<Button
-								Grid.Column="2"
-								Classes="icon"
-								Click="OnCloseErrorClick"
-								ToolTip.Tip="Dismiss">
-								<PathIcon Data="{StaticResource IconClose}" Width="{DynamicResource IconSmall}" Height="{DynamicResource IconSmall}" />
-							</Button>
-						</Grid>
-						<TextBlock
-							Classes="error-sub"
-							Foreground="{DynamicResource DangerBrush}"
-							TextWrapping="Wrap"
-							IsVisible="{Binding Error.IsFatal}"
-							Text="This error is fatal — the app closes when you continue." />
-						<TextBlock
-							FontSize="{DynamicResource FontBody}"
-							TextWrapping="Wrap"
-							Text="{Binding Error.ErrorMessage}" />
-						<Border Classes="error-detail">
-							<ScrollViewer MaxHeight="220" VerticalScrollBarVisibility="Auto">
-								<TextBlock Classes="error-mono" Text="{Binding Error.ErrorDetails}" />
-							</ScrollViewer>
-						</Border>
-						<Grid ColumnDefinitions="Auto,*">
-							<TextBlock
-								Classes="error-sub"
-								VerticalAlignment="Center"
-								IsVisible="{Binding Error.HasMore}"
-								Text="{Binding Error.MoreCount, StringFormat='+{0} more waiting'}" />
-							<StackPanel Grid.Column="1" Orientation="Horizontal" HorizontalAlignment="Right" Spacing="8">
-								<Button Classes="btn-soft" Click="OnCopyErrorClick" ToolTip.Tip="Copy the full report">
-									<StackPanel Orientation="Horizontal" Spacing="6">
-										<PathIcon Data="{StaticResource IconCopy}" Width="{DynamicResource IconXSmall}" Height="{DynamicResource IconXSmall}" />
-										<TextBlock Text="Copy details" VerticalAlignment="Center" />
-									</StackPanel>
-								</Button>
-								<Button Classes="btn-soft" Click="OnCloseErrorClick" ToolTip.Tip="Keep going">
-									<StackPanel Orientation="Horizontal" Spacing="6">
-										<PathIcon Data="{StaticResource IconCheck}" Width="{DynamicResource IconXSmall}" Height="{DynamicResource IconXSmall}" />
-										<TextBlock Text="Continue" VerticalAlignment="Center" />
-									</StackPanel>
-								</Button>
-							</StackPanel>
-						</Grid>
-					</StackPanel>
-				</Border>
-			</Border>
 		</Grid>
-	</suki:SukiWindow>
+		<!--
+			error overlay: CrashGuard's last-ditch dialog. An error never takes the app
+			down — this explains what failed and hands the full report to the clipboard
+		-->
+		<Border
+			Grid.Column="0"
+			Grid.ColumnSpan="3"
+			Background="#A6000000"
+			IsVisible="{Binding Error.IsVisible}">
+			<Border
+				MaxWidth="560"
+				Margin="24"
+				HorizontalAlignment="Center"
+				VerticalAlignment="Center"
+				Classes="error-dialog">
+				<StackPanel Spacing="12">
+					<Grid ColumnDefinitions="Auto,*,Auto">
+						<PathIcon
+							Width="{DynamicResource IconLarge}"
+							Height="{DynamicResource IconLarge}"
+							VerticalAlignment="Top"
+							Data="{StaticResource IconWarn}"
+							Foreground="{DynamicResource DangerBrush}" />
+						<StackPanel
+							Grid.Column="1"
+							Margin="10,0,0,0"
+							Spacing="2">
+							<TextBlock
+								FontSize="{DynamicResource FontBodyLarge}"
+								FontWeight="SemiBold"
+								Text="Something went wrong" />
+							<TextBlock Classes="error-sub" Text="{Binding Error.Source}" />
+						</StackPanel>
+						<Button
+							Grid.Column="2"
+							Classes="icon"
+							Click="OnCloseErrorClick"
+							ToolTip.Tip="Dismiss">
+							<PathIcon
+								Width="{DynamicResource IconSmall}"
+								Height="{DynamicResource IconSmall}"
+								Data="{StaticResource IconClose}" />
+						</Button>
+					</Grid>
+					<TextBlock
+						Classes="error-sub"
+						Foreground="{DynamicResource DangerBrush}"
+						IsVisible="{Binding Error.IsFatal}"
+						Text="This error is fatal — the app closes when you continue."
+						TextWrapping="Wrap" />
+					<TextBlock
+						FontSize="{DynamicResource FontBody}"
+						Text="{Binding Error.ErrorMessage}"
+						TextWrapping="Wrap" />
+					<Border Classes="error-detail">
+						<ScrollViewer MaxHeight="220" VerticalScrollBarVisibility="Auto">
+							<TextBlock Classes="error-mono" Text="{Binding Error.ErrorDetails}" />
+						</ScrollViewer>
+					</Border>
+					<Grid ColumnDefinitions="Auto,*">
+						<TextBlock
+							VerticalAlignment="Center"
+							Classes="error-sub"
+							IsVisible="{Binding Error.HasMore}"
+							Text="{Binding Error.MoreCount, StringFormat='+{0} more waiting'}" />
+						<StackPanel
+							Grid.Column="1"
+							HorizontalAlignment="Right"
+							Orientation="Horizontal"
+							Spacing="8">
+							<Button
+								Classes="btn-soft"
+								Click="OnCopyErrorClick"
+								ToolTip.Tip="Copy the full report">
+								<StackPanel Orientation="Horizontal" Spacing="6">
+									<PathIcon
+										Width="{DynamicResource IconXSmall}"
+										Height="{DynamicResource IconXSmall}"
+										Data="{StaticResource IconCopy}" />
+									<TextBlock VerticalAlignment="Center" Text="Copy details" />
+								</StackPanel>
+							</Button>
+							<Button
+								Classes="btn-soft"
+								Click="OnCloseErrorClick"
+								ToolTip.Tip="Keep going">
+								<StackPanel Orientation="Horizontal" Spacing="6">
+									<PathIcon
+										Width="{DynamicResource IconXSmall}"
+										Height="{DynamicResource IconXSmall}"
+										Data="{StaticResource IconCheck}" />
+									<TextBlock VerticalAlignment="Center" Text="Continue" />
+								</StackPanel>
+							</Button>
+						</StackPanel>
+					</Grid>
+				</StackPanel>
+			</Border>
+		</Border>
+	</Grid>
+</suki:SukiWindow>

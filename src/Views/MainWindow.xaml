@@ -316,6 +316,10 @@
 											<Border.ContextMenu>
 												<ContextMenu>
 													<MenuItem
+														Click="OnWorkspaceOpenFolderClick"
+														Header="Open folder"
+														IsVisible="{Binding !IsGeneral}" />
+													<MenuItem
 														Click="OnWorkspaceStartClick"
 														Header="Start server"
 														IsVisible="{Binding !IsRunning}" />

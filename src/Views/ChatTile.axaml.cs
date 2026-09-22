@@ -17,23 +17,26 @@ namespace WarpAgent.Views;
 
 public partial class ChatTile : UserControl
 {
+    // open tasks popups across all tiles; opening one closes the others, matching
+    // the single-flyout-at-a-time behavior the light-dismiss Flyout used to give
+    private static readonly List<Popup> s_openTasksPopups = new();
+
     private ScrollViewer? _chatScroll;
     private Button? _jumpLatest;
-    private Button? _tasksButton;
+    private Popup? _tasksPopup;
     private TextBox? _input;
     // follow-the-latest intent, not a position: recomputing it from the scroll position
     // while content grows is what killed autoscroll right after sending a prompt
     private bool _pinned = true;
-    // last on-screen spot of the tasks button; a change while its flyout is open means
-    // the grid reflowed and the popup would sit orphaned over some other tile
-    private Point _tasksButtonSpot;
 
     public ChatTile()
     {
         InitializeComponent();
         _chatScroll = this.FindControl<ScrollViewer>("ChatScroll");
         _jumpLatest = this.FindControl<Button>("JumpLatest");
-        _tasksButton = this.FindControl<Button>("TasksButton");
+        _tasksPopup = this.FindControl<Popup>("TasksPopup");
+        if (_tasksPopup is { } tasksPopup)
+            tasksPopup.Closed += (_, _) => s_openTasksPopups.Remove(tasksPopup);
         _input = this.FindControl<TextBox>("InputBox");
         // an AcceptsReturn TextBox consumes Enter before bubbling; tunnel to send first
         _input?.AddHandler(InputElement.KeyDownEvent, OnInputKeyDown, RoutingStrategies.Tunnel);
@@ -42,21 +45,36 @@ public partial class ChatTile : UserControl
         this.FindControl<Button>("SendButton")?.Click += (_, _) => PinToLatest();
         if (_chatScroll is not null)
             _chatScroll.ScrollChanged += OnChatScrollChanged;
-        LayoutUpdated += OnLayoutUpdated;
+        // the popup has no light dismiss, so a collapsed button (last task/agent gone)
+        // would leave an orphaned empty panel floating — close it with the source
+        DataContextChanged += (_, _) =>
+        {
+            if (Vm is not { } vm)
+                return;
+            vm.PropertyChanged += (_, args) =>
+            {
+                if (args.PropertyName == nameof(ChatTileViewModel.HasTasksOrAgents) && !vm.HasTasksOrAgents)
+                    _tasksPopup!.IsOpen = false;
+            };
+        };
     }
 
-    private void OnLayoutUpdated(object? sender, EventArgs e)
+    // no light dismiss: the panel stays open while the user works elsewhere and
+    // only this button toggles it; the popup follows its button on reflow
+    private void OnTasksButtonClick(object? sender, RoutedEventArgs e)
     {
-        if (_tasksButton is not { } btn || btn.Flyout is not Flyout { IsOpen: true } flyout)
+        if (_tasksPopup is not { } popup)
             return;
-        var root = TopLevel.GetTopLevel(btn);
-        if (root is null)
+        if (popup.IsOpen)
+        {
+            popup.IsOpen = false;
             return;
-        var spot = btn.TranslatePoint(new Point(0, 0), root);
-        if (spot is { } p && _tasksButtonSpot != default && p != _tasksButtonSpot)
-            flyout.Hide();
-        if (spot is { } q)
-            _tasksButtonSpot = q;
+        }
+        foreach (var open in s_openTasksPopups)
+            open.IsOpen = false;
+        s_openTasksPopups.Clear();
+        popup.IsOpen = true;
+        s_openTasksPopups.Add(popup);
     }
 
     private ChatTileViewModel? Vm => DataContext as ChatTileViewModel;

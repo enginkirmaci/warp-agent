@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using Avalonia.Controls;
 using Avalonia.Input;
 using Avalonia.Input.Platform;
@@ -135,6 +136,14 @@ public partial class MainWindow : SukiWindow
     }
 
     // ---- workspace context menu ----
+
+    // file manager on the workspace folder; General is not a folder, so it has no item
+    private void OnWorkspaceOpenFolderClick(object? sender, RoutedEventArgs e)
+    {
+        if ((sender as Control)?.DataContext is not WorkspaceItem { IsGeneral: false } ws || !Directory.Exists(ws.FolderPath))
+            return;
+        using var _ = Process.Start(new ProcessStartInfo(ws.FolderPath) { UseShellExecute = true });
+    }
 
     private void OnWorkspaceStartClick(object? sender, RoutedEventArgs e)
     {

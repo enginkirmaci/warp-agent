@@ -36,7 +36,12 @@ public partial class ChatTile : UserControl
         _jumpLatest = this.FindControl<Button>("JumpLatest");
         _tasksPopup = this.FindControl<Popup>("TasksPopup");
         if (_tasksPopup is { } tasksPopup)
+        {
+            // the popup sits outside the visual tree, so a {Binding #TasksButton} target
+            // is unreliable — anchor it to the corner button explicitly
+            tasksPopup.PlacementTarget = this.FindControl<Button>("TasksButton");
             tasksPopup.Closed += (_, _) => s_openTasksPopups.Remove(tasksPopup);
+        }
         _input = this.FindControl<TextBox>("InputBox");
         // an AcceptsReturn TextBox consumes Enter before bubbling; tunnel to send first
         _input?.AddHandler(InputElement.KeyDownEvent, OnInputKeyDown, RoutingStrategies.Tunnel);
@@ -51,12 +56,25 @@ public partial class ChatTile : UserControl
         {
             if (Vm is not { } vm)
                 return;
+            // a live todo batch springs the flyout open at the corner, same as clicking
+            vm.TodosUpdated += OpenTasksPopup;
             vm.PropertyChanged += (_, args) =>
             {
                 if (args.PropertyName == nameof(ChatTileViewModel.HasTasksOrAgents) && !vm.HasTasksOrAgents)
                     _tasksPopup!.IsOpen = false;
             };
         };
+    }
+
+    private void OpenTasksPopup()
+    {
+        if (_tasksPopup is not { } popup)
+            return;
+        foreach (var open in s_openTasksPopups)
+            open.IsOpen = false;
+        s_openTasksPopups.Clear();
+        popup.IsOpen = true;
+        s_openTasksPopups.Add(popup);
     }
 
     // no light dismiss: the panel stays open while the user works elsewhere and
@@ -70,11 +88,7 @@ public partial class ChatTile : UserControl
             popup.IsOpen = false;
             return;
         }
-        foreach (var open in s_openTasksPopups)
-            open.IsOpen = false;
-        s_openTasksPopups.Clear();
-        popup.IsOpen = true;
-        s_openTasksPopups.Add(popup);
+        OpenTasksPopup();
     }
 
     private ChatTileViewModel? Vm => DataContext as ChatTileViewModel;

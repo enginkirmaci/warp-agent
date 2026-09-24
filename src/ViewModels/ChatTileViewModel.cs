@@ -424,7 +424,14 @@ public partial class ChatTileViewModel : ObservableObject
             var status = todo.TryGetProperty("status", out var st) ? st.GetString() ?? "pending" : "pending";
             Tasks.Add(new TaskItem(content, status));
         }
+        // live arrivals only — Restore fills Tasks without raising this, so reopening
+        // an old session never springs the flyout on its own
+        if (Tasks.Count > 0)
+            TodosUpdated?.Invoke();
     }
+
+    /// <summary>The tile's view auto-opens the tasks flyout on this signal.</summary>
+    internal event Action? TodosUpdated;
 
     internal void Restore(List<StoredMessage> messages)
     {

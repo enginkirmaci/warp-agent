@@ -153,7 +153,16 @@
 			<StreamGeometry x:Key="IconShield">F0 M12 2 L4 5 V11 C4 16 7.4 20.4 12 22 C16.6 20.4 20 16 20 11 V5 Z M12 4.2 L18 6.5 V11 C18 15.1 15.4 18.7 12 20.1 C8.6 18.7 6 15.1 6 11 V6.5 Z</StreamGeometry>
 			<StreamGeometry x:Key="IconShieldFilled">M12 2 L4 5 V11 C4 16 7.4 20.4 12 22 C16.6 20.4 20 16 20 11 V5 Z</StreamGeometry>
 			<StreamGeometry x:Key="IconCog">F0 M19.14 12.94 C19.18 12.64 19.2 12.33 19.2 12 S19.18 11.36 19.13 11.06 L21.16 9.48 C21.34 9.34 21.39 9.07 21.28 8.87 L19.36 5.55 C19.24 5.33 18.99 5.26 18.77 5.33 L16.38 6.29 C15.88 5.91 15.35 5.59 14.76 5.35 L14.4 2.81 C14.36 2.57 14.16 2.4 13.92 2.4 H10.08 C9.84 2.4 9.65 2.57 9.61 2.81 L9.25 5.35 C8.66 5.59 8.12 5.92 7.63 6.29 L5.24 5.33 C5.02 5.25 4.77 5.33 4.65 5.55 L2.73 8.87 C2.61 9.08 2.65 9.34 2.85 9.48 L4.88 11.06 C4.83 11.36 4.79 11.69 4.79 12 S4.81 12.64 4.86 12.94 L2.83 14.52 C2.65 14.66 2.6 14.93 2.71 15.13 L4.63 18.45 C4.75 18.67 5 18.74 5.22 18.67 L7.61 17.71 C8.11 18.09 8.64 18.41 9.23 18.65 L9.59 21.19 C9.64 21.43 9.83 21.6 10.07 21.6 H13.91 C14.15 21.6 14.35 21.43 14.38 21.19 L14.74 18.65 C15.33 18.41 15.87 18.09 16.36 17.71 L18.75 18.67 C18.97 18.75 19.22 18.67 19.34 18.45 L21.26 15.13 C21.38 14.91 21.33 14.66 21.14 14.52 Z M12 15.6 C10.02 15.6 8.4 13.98 8.4 12 S10.02 8.4 12 8.4 S15.6 10.02 15.6 12 13.98 15.6 12 15.6 Z</StreamGeometry>
-			<StreamGeometry x:Key="IconSpark">M12 2 L14.4 9.6 L22 12 L14.4 14.4 L12 22 L9.6 14.4 L2 12 L9.6 9.6 Z</StreamGeometry>
+			<!--  brand mark: main spark + companion, same construction as Assets/spark.svg;
+			      subpaths never overlap so the default fill rule is safe  -->
+			<StreamGeometry x:Key="IconSpark">M11 5 Q12.9 11.1 19 13 Q12.9 14.9 11 21 Q9.1 14.9 3 13 Q9.1 11.1 11 5 Z M18.1 1.8 Q19.05 4.75 22 5.7 Q19.05 6.65 18.1 9.6 Q17.15 6.65 14.2 5.7 Q17.15 4.75 18.1 1.8 Z</StreamGeometry>
+			<!--  brand gradient: white -> lavender -> purple, vertical; spans the PathIcon's
+			      stretched bounds so it maps 1:1 onto the SVG viewBox gradient  -->
+			<LinearGradientBrush x:Key="SparkFillBrush" StartPoint="0%,0%" EndPoint="0%,100%">
+				<GradientStop Color="#FFFFFFFF" Offset="0" />
+				<GradientStop Color="#FFCDB9F0" Offset="0.55" />
+				<GradientStop Color="#FF8B6AD9" Offset="1" />
+			</LinearGradientBrush>
 			<StreamGeometry x:Key="IconFolder">M3 5 H9 L11 7 H21 V19 H3 Z</StreamGeometry>
 			<StreamGeometry x:Key="IconFolderOutline">F0 M1.8 4 H9.4 L11.4 6 H22.2 V19.2 H1.8 Z M3.4 5.6 H8.6 L10.6 7.6 H20.6 V17.6 H3.4 Z</StreamGeometry>
 			<StreamGeometry x:Key="IconFolderOpenOutline">F0 M1.42 15.66 L1.42 4.04 L1.6 3.69 L2.02 3.45 L9.54 3.45 L9.89 3.63 L11.53 5.33 L17.76 5.39 L20.58 7.77 L20.63 10.11 L21.86 12.17 L21.86 12.58 L21.68 12.87 L20.98 15.57 L20.28 18.68 L19.7 19.26 L4.49 19.26 L1.6 16.52 Z M2.77 4.97 L2.77 15.66 L4.7 17.6 L18.65 17.6 L20 12.63 L20 12.29 L19.23 10.94 L8.24 10.94 L6.65 13.87 L6.07 14.27 L5.55 14.22 L5.13 13.69 L5.19 13.1 L7.01 9.83 L7.42 9.43 L18.6 9.36 L18.6 8.37 L16.72 6.76 L10.4 6.7 L8.59 4.97 Z</StreamGeometry>

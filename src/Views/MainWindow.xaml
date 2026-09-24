@@ -34,11 +34,11 @@
 			Background="Transparent"
 			VerticalAlignment="Center">
 			<PathIcon
-				Classes="logo-glyph"
-				Width="{DynamicResource IconLarge}"
-				Height="{DynamicResource IconLarge}"
-				Data="{StaticResource IconSpark}"
-				Foreground="{DynamicResource TextMutedBrush}" />
+					Classes="logo-glyph"
+					Width="{DynamicResource IconLarge}"
+					Height="{DynamicResource IconLarge}"
+					Data="{StaticResource IconSpark}"
+					Foreground="{DynamicResource SparkFillBrush}" />
 			<Button
 				Classes="icon titlebar-btn"
 				Click="OnToggleSidebarClick"
@@ -619,7 +619,7 @@
 							Margin="0,0,0,16"
 							HorizontalAlignment="Center"
 							Data="{StaticResource IconSpark}"
-							Foreground="{DynamicResource TextMutedBrush}" />
+							Foreground="{DynamicResource SparkFillBrush}" />
 						<TextBlock
 							Classes="sidebar-hint"
 							IsVisible="{Binding HasNoWorkspace}"

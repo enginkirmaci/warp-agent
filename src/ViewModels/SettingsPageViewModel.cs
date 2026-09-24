@@ -16,6 +16,8 @@ public partial class SettingsPageViewModel : ObservableObject
     [ObservableProperty] private string? _defaultVariant;
     [ObservableProperty] private string? _defaultAgent;
     [ObservableProperty] private bool _autoAllow;
+    [ObservableProperty] private bool _autoAllowInstant;
+    [ObservableProperty] private bool _showToolTips;
 
     // auto-allow delay buffers: string boxes, parsed on save
     [ObservableProperty] private string _autoAllowDefaultMin;
@@ -47,6 +49,8 @@ public partial class SettingsPageViewModel : ObservableObject
         _defaultVariant = s.DefaultVariant;
         _defaultAgent = s.DefaultAgent;
         _autoAllow = s.AutoAllowAlways ?? true;
+        _autoAllowInstant = s.AutoAllowInstant;
+        _showToolTips = s.ShowToolTips;
         _autoAllowDefaultMin = s.AutoAllowDefaultMinSeconds.ToString();
         _autoAllowDefaultMax = s.AutoAllowDefaultMaxSeconds.ToString();
         _autoAllowAwayMin = s.AutoAllowAwayMinSeconds.ToString();
@@ -84,6 +88,8 @@ public partial class SettingsPageViewModel : ObservableObject
         s.DefaultVariant = NullIfBlank(DefaultVariant);
         s.DefaultAgent = NullIfBlank(DefaultAgent);
         s.AutoAllowAlways = AutoAllow;
+        s.AutoAllowInstant = AutoAllowInstant;
+        s.ShowToolTips = ShowToolTips;
         s.AutoAllowDefaultMinSeconds = ParseInt(AutoAllowDefaultMin, s.AutoAllowDefaultMinSeconds, 1);
         s.AutoAllowDefaultMaxSeconds = ParseInt(AutoAllowDefaultMax, s.AutoAllowDefaultMaxSeconds, 15);
         s.AutoAllowAwayMinSeconds = ParseInt(AutoAllowAwayMin, s.AutoAllowAwayMinSeconds, 60);

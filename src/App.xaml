@@ -35,10 +35,16 @@
 			<!--  surfaces — neutral grays (R=G=B) with a wide luminance ladder:
       dark canvas, elevated cards, inset code/diff, visible hairlines  -->
 			<SolidColorBrush x:Key="SurfaceBrush" Color="#FF121212" />
-			<!--  settings cards: one gray step down from the SukiPopupBackground sheet, hairline border does the separation  -->
+			<!--  settings page sheet: visibly lighter than both the surface and the chrome so the
+			      page reads as its own layer  -->
+			<SolidColorBrush x:Key="SettingsBgBrush" Color="#FF202020" />
+			<!--  settings cards: one gray step down from the sheet, hairline border does the separation  -->
 			<SolidColorBrush x:Key="SettingsCardBrush" Color="#FF1A1A1A" />
 			<!--  flyout card: same tone as SurfaceBrush, 0.7 opacity so the chat shows through  -->
 			<SolidColorBrush x:Key="FlyoutSurfaceBrush" Color="#B3121212" />
+			<!--  primary text: PopupRoot misses the themed TextBlock default, so raw Popup
+			      content (tasks flyout) needs this set explicitly or it renders invisible  -->
+			<SolidColorBrush x:Key="TextBrush" Color="#FFE4E4E4" />
 			<!--  tile surface (also restore bar, error dialog, expanded folds): same tone as the
 			      main-area card since 2026-09-20 — the hairline border does the separation  -->
 			<SolidColorBrush x:Key="CardBrush" Color="#FF121212" />

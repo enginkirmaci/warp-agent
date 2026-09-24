@@ -818,6 +818,15 @@
 														Margin="160,0,0,0"
 														Classes="settings-hint"
 														Text="Green, amber, salmon and four gray tones; recolors selected states, focus ring and success dots." />
+													<Border Height="1" Background="{DynamicResource HairlineBrush}" />
+													<Grid ColumnDefinitions="150,*" ColumnSpacing="10">
+														<TextBlock Classes="settings-label" Text="Tooltips" />
+														<CheckBox
+															Grid.Column="1"
+															VerticalAlignment="Center"
+															Content="Show on hover"
+															IsChecked="{Binding ShowToolTips}" />
+													</Grid>
 												</StackPanel>
 											</Border>
 										</StackPanel>
@@ -827,9 +836,13 @@
 											<TextBlock Classes="settings-section" Text="Permissions" />
 											<Border Classes="settings-card">
 												<StackPanel Spacing="12">
-													<CheckBox Content="Always allow tool permissions (edit, bash, webfetch)" IsChecked="{Binding AutoAllow}" />
+													<CheckBox Content="Auto-allow tool permissions (edit, bash, webfetch)" IsChecked="{Binding AutoAllow}" />
 													<StackPanel IsVisible="{Binding AutoAllow}" Spacing="10">
 														<Border Height="1" Background="{DynamicResource HairlineBrush}" />
+														<CheckBox
+															Content="Allow immediately (skip the random wait)"
+															IsChecked="{Binding AutoAllowInstant}" />
+														<StackPanel IsVisible="{Binding !AutoAllowInstant}" Spacing="10">
 														<TextBlock
 															Classes="settings-label"
 															FontWeight="SemiBold"
@@ -929,6 +942,7 @@
 															</StackPanel>
 														</Grid>
 														<TextBlock Classes="settings-hint" Text="Random wait before auto-allow, picked by local time: working hours use the short range, lunch and off hours the long one." />
+														</StackPanel>
 													</StackPanel>
 												</StackPanel>
 											</Border>

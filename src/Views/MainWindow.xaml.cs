@@ -28,6 +28,9 @@ public partial class MainWindow : SukiWindow
     {
         InitializeComponent();
         _layoutRoot = this.FindControl<Grid>("LayoutRoot");
+        // the vm's ctor already loaded the tooltip preference, but this window is not
+        // in desktop.Windows yet — seed it explicitly
+        ToolTips.ApplyTo(this);
         DataContext = _vm;
         // the overlay exists from now on: CrashGuard errors land here instead of a queue
         CrashGuard.AttachOverlay(_vm.Error);

@@ -235,6 +235,7 @@ public partial class MainViewModel : ObservableObject
             AutoAllow = allowed;
         FontScale.Apply(_settings.FontScale);
         AccentTheme.Apply(_settings.Accent);
+        ToolTips.Apply(_settings.ShowToolTips);
     }
 
     partial void OnIsServerRunningChanged(bool value)
@@ -312,6 +313,7 @@ public partial class MainViewModel : ObservableObject
         _settings.AutoAllowAlways ??= _state.AutoAllowAlways;
         FontScale.Apply(_settings.FontScale);
         AccentTheme.Apply(_settings.Accent);
+        ToolTips.Apply(_settings.ShowToolTips);
         SettingsPage = new SettingsPageViewModel(this);
         SettingsPage.Saved += (_, _) => IsSettingsOpen = false;
         if (_state.Workspaces.Count == 0 && !string.IsNullOrWhiteSpace(_state.Folder))
@@ -1879,18 +1881,21 @@ public partial class MainViewModel : ObservableObject
         return (min, Math.Max(min, max));
     }
 
-    /// <summary>Counts down visibly, then answers "always" unless a manual reply beat it
-    /// or auto-allow was turned off in the meantime.</summary>
+    /// <summary>Answers "always" unless a manual reply beat it or auto-allow was turned off
+    /// in the meantime; waits out the random countdown first unless instant mode is set.</summary>
     private async Task AutoAllowCountdown(PermissionItem item)
     {
-        var (min, max) = AutoAllowRange();
-        var seconds = Random.Shared.Next(min, max + 1);
-        for (var left = seconds; left > 0 && item.IsPending; left--)
+        if (!_settings.AutoAllowInstant)
         {
-            item.AutoCountdown = left;
-            await Task.Delay(1000);
+            var (min, max) = AutoAllowRange();
+            var seconds = Random.Shared.Next(min, max + 1);
+            for (var left = seconds; left > 0 && item.IsPending; left--)
+            {
+                item.AutoCountdown = left;
+                await Task.Delay(1000);
+            }
+            item.AutoCountdown = null;
         }
-        item.AutoCountdown = null;
         if (item.IsPending && AutoAllow)
             await RespondToPermission(item, "always", isAuto: true);
     }

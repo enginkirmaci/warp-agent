@@ -21,6 +21,9 @@ public sealed class AppSettings
     /// <summary>Null = never chosen; auto-allow defaults to on until explicitly unticked.</summary>
     public bool? AutoAllowAlways { get; set; }
 
+    /// <summary>True = auto-allow answers instantly; false = wait out the random delay first.</summary>
+    public bool AutoAllowInstant { get; set; }
+
     /// <summary>Random auto-allow wait in seconds: working-hours range; lunch and off hours use the away range.</summary>
     public int AutoAllowDefaultMinSeconds { get; set; } = 1;
     public int AutoAllowDefaultMaxSeconds { get; set; } = 15;
@@ -40,6 +43,9 @@ public sealed class AppSettings
 
     /// <summary>Accent preset key from AccentTheme; null = green.</summary>
     public string? Accent { get; set; }
+
+    /// <summary>Tooltip visibility; off hides every hover tooltip app-wide.</summary>
+    public bool ShowToolTips { get; set; } = true;
 
     private static string FilePath => AppPaths.SettingsFile;
 

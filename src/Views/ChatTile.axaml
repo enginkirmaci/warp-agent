@@ -337,19 +337,20 @@
 									VerticalAlignment="Center" />
 							</StackPanel>
 						</Button>
-						<Popup
-							x:Name="TasksPopup"
-							PlacementTarget="{Binding #TasksButton}"
-							Placement="BottomEdgeAlignedRight"
-							IsLightDismissEnabled="False">
-							<Border
-								MinWidth="300"
-								MaxWidth="440"
-								CornerRadius="12"
-								Background="{DynamicResource FlyoutSurfaceBrush}"
-								BorderBrush="{DynamicResource HairlineBrush}"
-								BorderThickness="1"
-								Padding="12,10">
+							<Popup
+								x:Name="TasksPopup"
+								PlacementTarget="{Binding #TasksButton}"
+								Placement="BottomEdgeAlignedRight"
+								IsLightDismissEnabled="False">
+								<Border
+									MinWidth="300"
+									MaxWidth="440"
+									CornerRadius="12"
+									Background="{DynamicResource FlyoutSurfaceBrush}"
+									BorderBrush="{DynamicResource HairlineBrush}"
+									BorderThickness="1"
+									Padding="12,10"
+									TextElement.Foreground="{DynamicResource TextBrush}">
 								<ScrollViewer MaxHeight="460" HorizontalScrollBarVisibility="Disabled">
 									<StackPanel Spacing="8">
 										<Grid ColumnDefinitions="*,Auto" IsVisible="{Binding HasTasks}">

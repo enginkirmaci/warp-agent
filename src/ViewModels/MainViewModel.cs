@@ -475,6 +475,16 @@ public partial class MainViewModel : ObservableObject
 
     private bool IsAppSession(string sessionId) => _workspaceBySession.ContainsKey(sessionId);
 
+    /// <summary>The chat a session's asks belong to: the session itself, or the root chat
+    /// that spawned it (a nested subagent climbs to its top-level parent).</summary>
+    private string OwnerSessionId(string sessionId)
+    {
+        var current = sessionId;
+        while (_subagentBySession.TryGetValue(current, out var sub))
+            current = sub.ParentSessionId;
+        return current;
+    }
+
     private string TitleFor(string sessionId) =>
         _titleBySession.TryGetValue(sessionId, out var title)
             ? title
@@ -1360,6 +1370,11 @@ public partial class MainViewModel : ObservableObject
             {
                 if (!ReferenceEquals(SelectedWorkspace, ws))
                     return;
+                // keep the subagent→parent map warm from the listing too, so asks parked
+                // by a subtask stay attributable after an app restart
+                foreach (var s in sessions)
+                    if (s.ParentId is { } parentId)
+                        TrackSessionInfo(s.Id, parentId, null);
                 // only chats this app created under this workspace are listed
                 var known = ws.State.Sessions.ToHashSet();
                 var mine = sessions
@@ -1490,6 +1505,11 @@ public partial class MainViewModel : ObservableObject
             var sessions = await rt.Api.ListSessionsAsync(CancellationToken.None);
             await Dispatcher.UIThread.InvokeAsync(() =>
             {
+                // keep the subagent→parent map warm from the listing too, so asks parked
+                // by a subtask stay attributable after an app restart
+                foreach (var s in sessions)
+                    if (s.ParentId is { } parentId)
+                        TrackSessionInfo(s.Id, parentId, null);
                 // only chats this app created under this workspace are listed
                 var known = ws.State.Sessions.ToHashSet();
                 ws.Chats.Clear();
@@ -1847,18 +1867,18 @@ public partial class MainViewModel : ObservableObject
             IsV2 = v2,
             Respond = RespondToPermission,
         };
-        if (TileFor(sessionId) is { } tile)
+        // a subagent's ask belongs to the chat that spawned it; an open tile takes the
+        // card now, otherwise it parks until that chat's tile opens
+        var owner = OwnerSessionId(sessionId);
+        if (!IsAppSession(owner))
+            return;
+        if (TileFor(owner) is { } tile)
         {
             tile.ChatItems.Add(item);
             if (AutoAllow)
                 _ = AutoAllowCountdown(item);
             return;
         }
-        // a subagent's ask belongs to the chat that spawned it
-        var owner = _subagentBySession.TryGetValue(sessionId, out var sub) ? sub.ParentSessionId : sessionId;
-        // another chat's ask: answer it from its own workspace's server, or park it until its tile opens
-        if (!IsAppSession(owner))
-            return;
         if (!_pendingBySession.TryGetValue(owner, out var pending))
             _pendingBySession[owner] = pending = [];
         pending.Add(item);
@@ -1972,16 +1992,18 @@ public partial class MainViewModel : ObservableObject
     {
         if (OpenCodeApiClient.ReadQuestionRequest(data) is not { } request || request.Questions.Count == 0)
             return;
-        if (TileFor(request.SessionId) is { } tile)
+        // a subagent's ask belongs to the chat that spawned it; when that chat's tile is
+        // open the card must land now — the parked list only drains when a tile opens,
+        // and the ask blocks the turn, so nothing later in the run would flush it
+        var owner = OwnerSessionId(request.SessionId);
+        if (!IsAppSession(owner))
+            return;
+        if (TileFor(owner) is { } tile)
         {
             if (!tile.ChatItems.OfType<QuestionItem>().Any(i => i.Id == request.Id))
                 tile.ChatItems.Add(BuildQuestionItem(request));
             return;
         }
-        // a subagent's ask belongs to the chat that spawned it
-        var owner = _subagentBySession.TryGetValue(request.SessionId, out var sub) ? sub.ParentSessionId : request.SessionId;
-        if (!IsAppSession(owner))
-            return;
         if (!_pendingQuestionsBySession.TryGetValue(owner, out var pending))
             _pendingQuestionsBySession[owner] = pending = [];
         if (!pending.Any(i => i.Id == request.Id))
@@ -2101,7 +2123,8 @@ public partial class MainViewModel : ObservableObject
             {
                 if (TileFor(sessionId) is not { } tile)
                     return;
-                foreach (var request in pending.Where(q => q.SessionId == sessionId))
+                // a subagent's ask lists under the child session; it belongs to this chat
+                foreach (var request in pending.Where(q => OwnerSessionId(q.SessionId) == sessionId))
                     if (!tile.ChatItems.OfType<QuestionItem>().Any(existing => existing.Id == request.Id))
                         tile.ChatItems.Add(BuildQuestionItem(request));
             });

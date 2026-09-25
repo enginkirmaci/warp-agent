@@ -7,7 +7,7 @@ using WarpAgent.Models;
 
 namespace WarpAgent.Services;
 
-public sealed record SessionInfo(string Id, string Title, string? Directory, DateTime UpdatedAt);
+public sealed record SessionInfo(string Id, string Title, string? Directory, DateTime UpdatedAt, string? ParentId = null);
 
 public sealed record StoredMessage(string Id, string Role, long CreatedMs, JsonElement Info, List<JsonElement> Parts);
 
@@ -235,7 +235,8 @@ public sealed class OpenCodeApiClient(string baseUrl)
         var updated = s.TryGetProperty("time", out var time) &&
                       time.TryGetProperty("updated", out var u) &&
                       u.TryGetInt64(out var ms) ? FromMs(ms) : DateTime.MinValue;
-        return new SessionInfo(id, title, directory, updated);
+        var parent = s.TryGetProperty("parentID", out var pid) ? pid.GetString() : null;
+        return new SessionInfo(id, title, directory, updated, parent);
     }
 
     /// <summary>Shared by the /question listing and the question.asked event — same Request shape.</summary>

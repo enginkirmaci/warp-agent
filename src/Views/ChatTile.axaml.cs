@@ -9,6 +9,7 @@ using Avalonia.Interactivity;
 using Avalonia.Markup.Xaml;
 using Avalonia.Media.Imaging;
 using Avalonia.Platform.Storage;
+using Avalonia.Threading;
 using Avalonia.VisualTree;
 using WarpAgent.Models;
 using WarpAgent.ViewModels;
@@ -17,10 +18,6 @@ namespace WarpAgent.Views;
 
 public partial class ChatTile : UserControl
 {
-    // open tasks popups across all tiles; opening one closes the others, matching
-    // the single-flyout-at-a-time behavior the light-dismiss Flyout used to give
-    private static readonly List<Popup> s_openTasksPopups = new();
-
     private ScrollViewer? _chatScroll;
     private Button? _jumpLatest;
     private Popup? _tasksPopup;
@@ -40,7 +37,6 @@ public partial class ChatTile : UserControl
             // the popup sits outside the visual tree, so a {Binding #TasksButton} target
             // is unreliable — anchor it to the corner button explicitly
             tasksPopup.PlacementTarget = this.FindControl<Button>("TasksButton");
-            tasksPopup.Closed += (_, _) => s_openTasksPopups.Remove(tasksPopup);
         }
         _input = this.FindControl<TextBox>("InputBox");
         // an AcceptsReturn TextBox consumes Enter before bubbling; tunnel to send first
@@ -56,8 +52,10 @@ public partial class ChatTile : UserControl
         {
             if (Vm is not { } vm)
                 return;
-            // a live todo batch springs the flyout open at the corner, same as clicking
-            vm.TodosUpdated += OpenTasksPopup;
+            // a live todo batch springs the flyout open at the corner, same as clicking;
+            // deferred to Background so the corner button is arranged before the popup
+            // anchors to it (the first batch also flips the button visible in-flight)
+            vm.TodosUpdated += () => Dispatcher.UIThread.Post(OpenTasksPopup, DispatcherPriority.Background);
             vm.PropertyChanged += (_, args) =>
             {
                 if (args.PropertyName == nameof(ChatTileViewModel.HasTasksOrAgents) && !vm.HasTasksOrAgents)
@@ -68,13 +66,10 @@ public partial class ChatTile : UserControl
 
     private void OpenTasksPopup()
     {
-        if (_tasksPopup is not { } popup)
-            return;
-        foreach (var open in s_openTasksPopups)
-            open.IsOpen = false;
-        s_openTasksPopups.Clear();
-        popup.IsOpen = true;
-        s_openTasksPopups.Add(popup);
+        // per-tile panels: several tiles may show theirs at once, each anchored to
+        // its own corner; the ⤢ button toggles only this tile's panel
+        if (_tasksPopup is { } popup)
+            popup.IsOpen = true;
     }
 
     // no light dismiss: the panel stays open while the user works elsewhere and

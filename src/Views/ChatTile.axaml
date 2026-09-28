@@ -718,49 +718,46 @@
 														FontWeight="SemiBold"
 														Foreground="{DynamicResource WarnBrush}"
 														VerticalAlignment="Center" />
+												</StackPanel>
+												<TextBlock
+													Text="{Binding Detail}"
+													FontFamily="{StaticResource CodeFont}"
+													FontSize="{DynamicResource FontDetail}"
+													TextWrapping="Wrap"
+													Opacity="0.9" />
+												<StackPanel Orientation="Horizontal" Spacing="6" IsVisible="{Binding IsPending}">
+													<Button Classes="btn-allow" Content="Allow" Command="{Binding AllowCommand}" />
+													<Button
+														Classes="btn-soft-accent"
+														Content="Always"
+														Command="{Binding AllowAlwaysCommand}"
+														ToolTip.Tip="Always allow this permission" />
+													<Button Classes="btn-deny" Content="Deny" Command="{Binding DenyCommand}" />
 													<TextBlock
-														Text="{Binding DetailPreview}"
-														FontFamily="{StaticResource CodeFont}"
-														FontSize="{DynamicResource FontDetail}"
-														MaxWidth="330"
-														TextTrimming="CharacterEllipsis"
-														VerticalAlignment="Center"
-														Opacity="0.9"
-														ToolTip.Tip="{Binding Detail}" />
-													<StackPanel Orientation="Horizontal" Spacing="6" IsVisible="{Binding IsPending}">
-														<Button Classes="btn-allow" Content="Allow" Command="{Binding AllowCommand}" />
-														<Button
-															Classes="btn-soft-accent"
-															Content="Always"
-															Command="{Binding AllowAlwaysCommand}"
-															ToolTip.Tip="Always allow this permission" />
-														<Button Classes="btn-deny" Content="Deny" Command="{Binding DenyCommand}" />
-														<TextBlock
-															Text="{Binding AutoCountdownText}"
-															IsVisible="{Binding HasAutoCountdown}"
-															FontStyle="Italic"
-															FontSize="{DynamicResource FontXSmall}"
-															Opacity="0.7"
-															VerticalAlignment="Center" />
-													</StackPanel>
-													<TextBlock
-														Text="{Binding Answer}"
-														IsVisible="{Binding !IsPending}"
-														Opacity="0.85"
+														Text="{Binding AutoCountdownText}"
+														IsVisible="{Binding HasAutoCountdown}"
 														FontStyle="Italic"
+														FontSize="{DynamicResource FontXSmall}"
+														Opacity="0.7"
 														VerticalAlignment="Center" />
 												</StackPanel>
-												<Expander Classes="disclose chat-fold" IsVisible="{Binding HasDiff}">
-													<Expander.Header>
-														<TextBlock Text="View diff" FontSize="{DynamicResource FontXSmall}" Opacity="0.7" />
-													</Expander.Header>
-													<Border Classes="fold-body">
-														<ScrollViewer Classes="fold-scroll">
-															<c:DiffTextBlock Text="{Binding Diff}" />
-														</ScrollViewer>
-													</Border>
-												</Expander>
+												<TextBlock
+													Text="{Binding Answer}"
+													IsVisible="{Binding !IsPending}"
+													Opacity="0.85"
+													FontStyle="Italic"
+													VerticalAlignment="Center" />
 											</StackPanel>
+											<Expander Classes="disclose chat-fold" IsVisible="{Binding HasDiff}">
+												<Expander.Header>
+													<TextBlock Text="View diff" FontSize="{DynamicResource FontXSmall}" Opacity="0.7" />
+												</Expander.Header>
+												<Border Classes="fold-body">
+													<ScrollViewer Classes="fold-scroll">
+														<c:DiffTextBlock Text="{Binding Diff}" />
+													</ScrollViewer>
+												</Border>
+											</Expander>
 										</Grid>
 									</Border>
 								</DataTemplate>

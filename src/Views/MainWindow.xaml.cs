@@ -185,6 +185,14 @@ public partial class MainWindow : SukiWindow
         using var _ = Process.Start(new ProcessStartInfo(ws.FolderPath) { UseShellExecute = true });
     }
 
+    // the opencode TUI in a terminal at the workspace folder, independent of the served instance
+    private void OnWorkspaceOpenInOpenCodeClick(object? sender, RoutedEventArgs e)
+    {
+        if ((sender as Control)?.DataContext is not WorkspaceItem { IsGeneral: false } ws || !Directory.Exists(ws.FolderPath))
+            return;
+        TerminalLauncher.OpenInOpenCode(ws.FolderPath, _vm.Settings.OpenCodeExecutable);
+    }
+
     private void OnWorkspaceStartClick(object? sender, RoutedEventArgs e)
     {
         if ((sender as Control)?.DataContext is WorkspaceItem ws)

@@ -380,6 +380,10 @@
 														Header="Open folder"
 														IsVisible="{Binding !IsGeneral}" />
 													<MenuItem
+														Click="OnWorkspaceOpenInOpenCodeClick"
+														Header="Open in opencode"
+														IsVisible="{Binding !IsGeneral}" />
+													<MenuItem
 														Click="OnWorkspaceStartClick"
 														Header="Start server"
 														IsVisible="{Binding !IsRunning}" />

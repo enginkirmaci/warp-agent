@@ -216,7 +216,6 @@ public partial class PermissionItem : ChatItem
     }
 
     public string Title => $"Permission required — {Kind}";
-    public string DetailPreview => Detail.Split('\n', 2)[0];
     public bool IsPending => _answer is null;
 
     public string? Answer

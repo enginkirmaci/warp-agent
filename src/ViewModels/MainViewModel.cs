@@ -70,24 +70,8 @@ public partial class MainViewModel : ObservableObject
     public bool HasNoWorkspace => Workspaces.Count == 0;
     public bool HasIdleWorkspace => Workspaces.Count > 0 && !IsServerRunning;
     public bool HasRunningWorkspace => Workspaces.Count > 0 && IsServerRunning;
-    public bool CanStartSelected => SelectedWorkspace is not null && !IsServerRunning;
-    public bool CanStopSelected => IsServerRunning;
     public bool MultipleWorkspaces => Workspaces.Count > 1;
     public bool HasAgents => Agents.Count > 1;
-    public bool HasBackgroundAgents => RunningAgents.Any(r => r.IsBackground);
-
-    /// <summary>"N running" summary for the flyout's Agents header (N counts background agents only).</summary>
-    public string AgentsSummary
-    {
-        get
-        {
-            var n = RunningAgents.Count(r => r.IsBackground);
-            return n == 1 ? "1 running" : $"{n} running";
-        }
-    }
-    public bool HasSidePanel => HasBackgroundAgents || (FocusedTile?.HasTasks ?? false);
-    public bool HasFocusedTasks => FocusedTile?.HasTasks ?? false;
-    public bool HasTasksAndAgents => HasBackgroundAgents && HasFocusedTasks;
     public bool HasAttentionNeeded => RunningAgents.Any(r => r.NeedsAttention);
 
     public bool AnyBusy => _runningBySession.Count > 0;
@@ -119,11 +103,17 @@ public partial class MainViewModel : ObservableObject
 
     public double? SidebarWidth => _state.SidebarWidth;
 
+    // one source for the view's GridSplitter clamp, the persisted clamp and the
+    // XAML column default — dragging behavior is identical everywhere
+    public const double SidebarMinWidth = 180;
+    public const double SidebarMaxWidth = 480;
+    public const double SidebarDefaultWidth = 250;
+
     /// <summary>Persists the dragged sidebar width; clamped to the same bounds as the view.</summary>
     public void SetSidebarWidth(double width)
     {
-        width = Math.Clamp(width, 180, 480);
-        if (Math.Abs(_state.SidebarWidth.GetValueOrDefault(250) - width) < 1)
+        width = Math.Clamp(width, SidebarMinWidth, SidebarMaxWidth);
+        if (Math.Abs(_state.SidebarWidth.GetValueOrDefault(SidebarDefaultWidth) - width) < 1)
             return;
         _state.SidebarWidth = width;
         _state.Save();
@@ -162,42 +152,19 @@ public partial class MainViewModel : ObservableObject
         _contextLimitByModel.TryGetValue(model, out limit);
 
     private ChatTileViewModel? _focusedTile;
-    private INotifyCollectionChanged? _focusedTasksHook;
 
-    /// <summary>The tile that header actions act on; its tasks drive the corner flyout.</summary>
+    /// <summary>The tile that header actions act on.</summary>
     public ChatTileViewModel? FocusedTile
     {
         get => _focusedTile;
         private set
         {
-            if (_focusedTasksHook is { } oldHook)
-            {
-                oldHook.CollectionChanged -= OnFocusedTasksChanged;
-                _focusedTasksHook = null;
-            }
-            if (SetProperty(ref _focusedTile, value))
-            {
-                OnPropertyChanged(nameof(HasSidePanel));
-                OnPropertyChanged(nameof(HasTasksAndAgents));
-            }
-            if (_focusedTile is { } tile)
-            {
-                _focusedTasksHook = tile.Tasks;
-                tile.Tasks.CollectionChanged += OnFocusedTasksChanged;
-            }
+            SetProperty(ref _focusedTile, value);
             UpdateSidebarSelection();
         }
     }
 
-    private void OnFocusedTasksChanged(object? sender, NotifyCollectionChangedEventArgs e)
-    {
-        // todos can land on an already-focused tile; the corner flyout gates on them
-        OnPropertyChanged(nameof(HasSidePanel));
-        OnPropertyChanged(nameof(HasTasksAndAgents));
-    }
-
     [ObservableProperty] private WorkspaceItem? _selectedWorkspace;
-    [ObservableProperty] private string _statusText = "Server stopped";
     [ObservableProperty] private bool _isServerRunning;
     [ObservableProperty] private bool _autoAllow;
     [ObservableProperty] private bool _isSettingsOpen;
@@ -240,8 +207,6 @@ public partial class MainViewModel : ObservableObject
 
     partial void OnIsServerRunningChanged(bool value)
     {
-        OnPropertyChanged(nameof(CanStartSelected));
-        OnPropertyChanged(nameof(CanStopSelected));
         OnPropertyChanged(nameof(HasIdleWorkspace));
         OnPropertyChanged(nameof(HasRunningWorkspace));
         RefreshTileConnectivity();
@@ -249,8 +214,6 @@ public partial class MainViewModel : ObservableObject
 
     partial void OnSelectedWorkspaceChanged(WorkspaceItem? value)
     {
-        OnPropertyChanged(nameof(CanStartSelected));
-        OnPropertyChanged(nameof(CanStopSelected));
         UpdateSidebarSelection();
         if (value is null)
         {
@@ -296,15 +259,6 @@ public partial class MainViewModel : ObservableObject
             _ = StartWorkspaceCommand.ExecuteAsync(ws);
     }
 
-    private void OnSidePanelChanged()
-    {
-        OnPropertyChanged(nameof(HasBackgroundAgents));
-        OnPropertyChanged(nameof(AgentsSummary));
-        OnPropertyChanged(nameof(HasSidePanel));
-        OnPropertyChanged(nameof(HasTasksAndAgents));
-        OnPropertyChanged(nameof(HasAttentionNeeded));
-    }
-
     public MainViewModel()
     {
         _state = UiState.Load();
@@ -340,17 +294,15 @@ public partial class MainViewModel : ObservableObject
             OnPropertyChanged(nameof(HasNoWorkspace));
             OnPropertyChanged(nameof(HasIdleWorkspace));
             OnPropertyChanged(nameof(HasRunningWorkspace));
-            OnPropertyChanged(nameof(CanStartSelected));
             OnPropertyChanged(nameof(MultipleWorkspaces));
             UpdateSidebarSelection();
         };
-        RunningAgents.CollectionChanged += (_, _) => OnSidePanelChanged();
+        RunningAgents.CollectionChanged += (_, _) => OnPropertyChanged(nameof(HasAttentionNeeded));
         Agents.CollectionChanged += (_, _) => OnPropertyChanged(nameof(HasAgents));
         OpenTiles.CollectionChanged += (_, _) =>
         {
             OnPropertyChanged(nameof(TileColumns));
             OnPropertyChanged(nameof(HasTiles));
-            RefreshBackgroundFlags();
             // a tile reaching the grid on its own (manual open, expand-restore, new chat)
             // ends the relaunch offer without touching the saved lists
             if (OpenTiles.Count > 0)
@@ -708,10 +660,7 @@ public partial class MainViewModel : ObservableObject
             // hand selection to the next workspace; null only when the last one is gone
             SelectedWorkspace = Workspaces.FirstOrDefault();
             if (SelectedWorkspace is null)
-            {
                 IsServerRunning = false;
-                StatusText = "Server stopped";
-            }
         }
         RefreshTileConnectivity();
         SaveState();
@@ -722,7 +671,6 @@ public partial class MainViewModel : ObservableObject
     {
         if (ws is null || (_runtimes.TryGetValue(ws.FolderPath, out var existing) && existing.Server.IsRunning))
             return;
-        StatusText = $"Starting opencode serve — {ws.Name}…";
         var serverLog = Log.ForContext("SourceContext", $"opencode/{ws.Name}");
         try
         {
@@ -741,13 +689,11 @@ public partial class MainViewModel : ObservableObject
             if (!ReferenceEquals(ws, SelectedWorkspace))
             {
                 // started from the context menu; the grid keeps whatever is tiled
-                StatusText = $"Server ready — {ws.Name} ({server.BaseUrl})";
                 _ = PrimeWorkspaceTitlesAsync(ws, rt);
                 _ = LoadWorkspaceChatsAsync(ws, rt);
                 return;
             }
             IsServerRunning = true;
-            StatusText = (server.Spawned ? "Server ready — " : "Attached — ") + server.BaseUrl;
             await RefreshSessionsAsync();
             // restore this workspace's saved tiles; sessions already tiled are skipped
             await RestoreOpenTilesAsync(ws, rt, gen, ws.State.OpenSessions.ToList());
@@ -755,7 +701,6 @@ public partial class MainViewModel : ObservableObject
         catch (Exception ex)
         {
             Log.Error(ex, "server start failed for {Workspace}", ws.Name);
-            StatusText = "Start failed";
             AddNote($"Failed to start: {ex.Message}", error: true);
         }
     }
@@ -781,7 +726,6 @@ public partial class MainViewModel : ObservableObject
         if (ReferenceEquals(ws, SelectedWorkspace))
         {
             IsServerRunning = false;
-            StatusText = "Server stopped";
             Sessions.Clear();
             SnapSelection();
         }
@@ -799,20 +743,18 @@ public partial class MainViewModel : ObservableObject
         _runtimes.Clear();
     }
 
-    /// <summary>Selecting a workspace retargets the sidebar, status line and new chats;
-    /// the grid keeps every open tile, so different workspaces share it. An empty grid
-    /// stays empty — chats open through the sidebar or the workspace's + button.</summary>
+    /// <summary>Selecting a workspace retargets the sidebar and new chats; the grid keeps
+    /// every open tile, so different workspaces share it. An empty grid stays empty —
+    /// chats open through the sidebar or the workspace's + button.</summary>
     private async Task SelectWorkspaceAsync(WorkspaceItem ws)
     {
         Sessions.Clear();
         if (!_runtimes.TryGetValue(ws.FolderPath, out var rt) || !rt.Server.IsRunning)
         {
             IsServerRunning = false;
-            StatusText = $"Server stopped — {ws.Name}";
             return;
         }
         IsServerRunning = true;
-        StatusText = (rt.Server.Spawned ? "Server ready — " : "Attached — ") + rt.Server.BaseUrl;
         var gen = ++_workspaceGeneration;
         _ = LoadModelsAsync(rt, gen);
         _ = LoadAgentsAsync(rt, gen);
@@ -1217,7 +1159,6 @@ public partial class MainViewModel : ObservableObject
         _titleBySession[info.Id] = info.Title;
         _tileBySession[info.Id] = tile;
         tile.SetSession(info.Id, info.Title);
-        RefreshBackgroundFlags();
         tile.AutoTitlePending = true;
         ws.State.Sessions.Insert(0, info.Id);
         Sessions.Insert(0, new SessionItem(info.Id, info.Title, info.UpdatedAt));
@@ -1753,7 +1694,6 @@ public partial class MainViewModel : ObservableObject
         {
             RunningAgents.Remove(existing);
         }
-        RefreshBackgroundFlags();
         UpdateSidebarRunning();
         NotifyBusyChanged();
     }
@@ -1810,18 +1750,6 @@ public partial class MainViewModel : ObservableObject
         {
             RunningAgents.Remove(existing);
         }
-        RefreshBackgroundFlags();
-    }
-
-    /// <summary>Background = running with no open tile: a closed chat that kept going, or another workspace's chat.</summary>
-    private void RefreshBackgroundFlags()
-    {
-        var tiled = OpenTiles.Select(t => t.SessionId).ToHashSet();
-        foreach (var item in RunningAgents)
-            item.IsBackground = !tiled.Contains(item.SessionId);
-        OnPropertyChanged(nameof(HasBackgroundAgents));
-        OnPropertyChanged(nameof(AgentsSummary));
-        OnSidePanelChanged();
     }
 
     private void OnPermissionAsked(JsonElement data, bool v2)
@@ -2192,13 +2120,13 @@ public partial class MainViewModel : ObservableObject
     public void Announce(string text, bool error = false) => AddNote(text, error);
 }
 
-/// <summary>A chat whose turn is currently running, any workspace; the side panel lists only background ones.
-/// Subagent runs are listed too, attributed to the chat that spawned them.</summary>
+/// <summary>A chat whose turn is currently running, any workspace. Subagent runs are
+/// attributed to the chat that spawned them; each open tile's flyout lists only
+/// the subagents that chat spawned.</summary>
 public sealed class RunningAgentItem(string sessionId, string workspace, string title) : ObservableObject
 {
     private string _title = title;
     private bool _needsAttention;
-    private bool _isBackground;
     private bool _isSubagent;
 
     public string SessionId { get; } = sessionId;
@@ -2208,9 +2136,6 @@ public sealed class RunningAgentItem(string sessionId, string workspace, string 
 
     public string Workspace { get; } = workspace;
     public string Title { get => _title; set => SetProperty(ref _title, value); }
-
-    /// <summary>True while no open tile shows this chat, so the side panel is its only surface.</summary>
-    public bool IsBackground { get => _isBackground; set => SetProperty(ref _isBackground, value); }
 
     /// <summary>A subagent (child session) run rather than a chat's own turn.</summary>
     public bool IsSubagent { get => _isSubagent; set => SetProperty(ref _isSubagent, value); }

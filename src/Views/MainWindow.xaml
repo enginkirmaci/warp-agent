@@ -112,14 +112,14 @@
 			<Setter Property="Background" Value="{DynamicResource HoverBrush}" />
 		</Style>
 
-		<!--  workspace row actions appear on hover only  -->
+		<!--  sidebar actions (workspace rows and the Workspaces header +) appear on hover only  -->
 		<Style Selector="Button.ws-action">
 			<Setter Property="Opacity" Value="0" />
 			<Setter Property="IsHitTestVisible" Value="False" />
 			<Setter Property="Background" Value="Transparent" />
 			<Setter Property="BorderThickness" Value="0" />
 		</Style>
-		<Style Selector="Border.row-card:pointerover Button.ws-action">
+		<Style Selector="Border.row-card:pointerover Button.ws-action, Grid.projects-header:pointerover Button.ws-action">
 			<Setter Property="Opacity" Value="1" />
 			<Setter Property="IsHitTestVisible" Value="True" />
 		</Style>
@@ -134,18 +134,6 @@
 		</Style>
 		<Style Selector="Border.row-card:pointerover TextBlock.row-time">
 			<Setter Property="Opacity" Value="0" />
-		</Style>
-
-		<!--  the Workspaces header's + behaves the same: hidden until the header is hovered  -->
-		<Style Selector="Grid.projects-header Button.ws-action">
-			<Setter Property="Opacity" Value="0" />
-			<Setter Property="IsHitTestVisible" Value="False" />
-			<Setter Property="Background" Value="Transparent" />
-			<Setter Property="BorderThickness" Value="0" />
-		</Style>
-		<Style Selector="Grid.projects-header:pointerover Button.ws-action">
-			<Setter Property="Opacity" Value="1" />
-			<Setter Property="IsHitTestVisible" Value="True" />
 		</Style>
 
 		<Style Selector="ListBoxItem /template/ PathIcon#CheckSelected">
@@ -432,31 +420,39 @@
 														Fill="{DynamicResource SuccessBrush}"
 														IsVisible="{Binding IsRunning}" />
 												</StackPanel>
-												<StackPanel
-													Grid.Column="2"
-													VerticalAlignment="Center"
-													Orientation="Horizontal"
-													Spacing="2">
-													<Button
-														Classes="icon ws-action"
-														Click="OnWorkspaceMenuClick"
-														ToolTip.Tip="Workspace actions">
-														<PathIcon
-															Width="{DynamicResource IconBody}"
-															Height="{DynamicResource IconBody}"
-															Data="{StaticResource IconKebab}" />
-													</Button>
-													<Button
-														Classes="icon ws-action"
-														Command="{Binding $parent[ItemsControl].DataContext.NewChatForWorkspaceCommand}"
-														CommandParameter="{Binding}"
-														ToolTip.Tip="New chat in this workspace">
-														<PathIcon
-															Width="{DynamicResource IconBody}"
-															Height="{DynamicResource IconBody}"
-															Data="{StaticResource IconChatOutline}" />
-													</Button>
-												</StackPanel>
+												<!--  right side swaps by row hover: chat count at rest, actions on hover  -->
+												<Grid Grid.Column="2" VerticalAlignment="Center">
+													<TextBlock
+														VerticalAlignment="Center"
+														HorizontalAlignment="Right"
+														Classes="row-time"
+														FontSize="{DynamicResource FontMicro}"
+														IsVisible="{Binding HasChats}"
+														Text="{Binding Chats.Count}" />
+													<StackPanel
+														Orientation="Horizontal"
+														Spacing="2">
+														<Button
+															Classes="icon ws-action"
+															Click="OnWorkspaceMenuClick"
+															ToolTip.Tip="Workspace actions">
+															<PathIcon
+																Width="{DynamicResource IconBody}"
+																Height="{DynamicResource IconBody}"
+																Data="{StaticResource IconKebab}" />
+														</Button>
+														<Button
+															Classes="icon ws-action"
+															Command="{Binding $parent[ItemsControl].DataContext.NewChatForWorkspaceCommand}"
+															CommandParameter="{Binding}"
+															ToolTip.Tip="New chat in this workspace">
+															<PathIcon
+																Width="{DynamicResource IconBody}"
+																Height="{DynamicResource IconBody}"
+																Data="{StaticResource IconChatOutline}" />
+														</Button>
+													</StackPanel>
+												</Grid>
 											</Grid>
 										</Border>
 										<StackPanel IsVisible="{Binding IsExpanded}">

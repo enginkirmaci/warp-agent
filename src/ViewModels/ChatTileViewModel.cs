@@ -49,22 +49,23 @@ public partial class ChatTileViewModel : ObservableObject
             OnPropertyChanged(nameof(HasTasksOrAgents));
             OnPropertyChanged(nameof(HasTasksAndAgents));
         };
-        // background agents are grid-wide; the tile re-evaluates when the owner's set changes
-        _owner.PropertyChanged += OnOwnerPropertyChanged;
-    }
-
-    private void OnOwnerPropertyChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e)
-    {
-        if (e.PropertyName is nameof(MainViewModel.HasBackgroundAgents))
+        TileAgents.CollectionChanged += (_, _) =>
         {
+            OnPropertyChanged(nameof(HasTileAgents));
+            OnPropertyChanged(nameof(TileAgentsSummary));
             OnPropertyChanged(nameof(HasTasksOrAgents));
             OnPropertyChanged(nameof(HasTasksAndAgents));
-        }
+        };
+        // the flyout lists only this chat's runs; mirror the owner's running set as it changes
+        _owner.RunningAgents.CollectionChanged += OnOwnerRunningChanged;
     }
+
+    private void OnOwnerRunningChanged(object? sender, System.Collections.Specialized.NotifyCollectionChangedEventArgs e) =>
+        RefreshTileAgents();
 
     /// <summary>Cuts the subscription to the app-lifetime owner when the tile leaves the grid;
     /// without it every closed tile (with its whole transcript) stays rooted forever.</summary>
-    internal void DetachFromOwner() => _owner.PropertyChanged -= OnOwnerPropertyChanged;
+    internal void DetachFromOwner() => _owner.RunningAgents.CollectionChanged -= OnOwnerRunningChanged;
 
     public MainViewModel Owner => _owner;
 
@@ -72,6 +73,22 @@ public partial class ChatTileViewModel : ObservableObject
     public ObservableCollection<AttachmentItem> Attachments { get; } = [];
     public ObservableCollection<string> Variants { get; } = [];
     public ObservableCollection<TaskItem> Tasks { get; } = [];
+
+    /// <summary>Subagent runs spawned by THIS chat — the flyout's Agents section is scoped here,
+    /// never another tile's agents or chats running without a tile.</summary>
+    public ObservableCollection<RunningAgentItem> TileAgents { get; } = [];
+
+    public bool HasTileAgents => TileAgents.Count > 0;
+
+    /// <summary>"N running" counter for the flyout's Agents header, scoped to this chat.</summary>
+    public string TileAgentsSummary
+    {
+        get
+        {
+            var n = TileAgents.Count;
+            return n == 1 ? "1 running" : $"{n} running";
+        }
+    }
 
     /// <summary>Queued prompts render pinned above the composer, not interleaved in the transcript.</summary>
     public ObservableCollection<QueuedMessageItem> QueueRows { get; } = [];
@@ -86,11 +103,11 @@ public partial class ChatTileViewModel : ObservableObject
     /// <summary>"3/5" completed counter for the flyout's Progress header.</summary>
     public string TasksProgress => $"{Tasks.Count(t => t.Done)}/{Tasks.Count}";
 
-    /// <summary>Drives the header tasks button: this chat's tasks or any grid-wide background agents.</summary>
-    public bool HasTasksOrAgents => HasTasks || Owner.HasBackgroundAgents;
+    /// <summary>Drives the header tasks button: this chat's tasks or the subagent runs it spawned.</summary>
+    public bool HasTasksOrAgents => HasTasks || HasTileAgents;
 
     /// <summary>Both sections visible in the flyout — shows the divider between them.</summary>
-    public bool HasTasksAndAgents => HasTasks && Owner.HasBackgroundAgents;
+    public bool HasTasksAndAgents => HasTasks && HasTileAgents;
 
     /// <summary>Null while the tile is an unsent draft; the session is created on first send.</summary>
     public string? SessionId { get; private set; }
@@ -119,6 +136,16 @@ public partial class ChatTileViewModel : ObservableObject
         SessionId = id;
         Title = title;
         RefreshConnectivity();
+        RefreshTileAgents();
+    }
+
+    /// <summary>Mirrors the owner's running set into this chat's flyout: only rows whose parent
+    /// is this session (the subagent runs it spawned) — never other tiles' agents.</summary>
+    private void RefreshTileAgents()
+    {
+        TileAgents.Clear();
+        foreach (var run in _owner.RunningAgents.Where(r => r.ParentSessionId == SessionId))
+            TileAgents.Add(run);
     }
 
     internal void SetTitle(string title) => Title = title;

@@ -14,15 +14,18 @@ namespace WarpAgent.Views;
 
 public partial class MainWindow : SukiWindow
 {
-    private const double SidebarMinWidth = 180;
-    private const double SidebarMaxWidth = 480;
+    // width bounds live on the VM (same consts feed the persisted clamp); only the
+    // splitter column's own DIP width is view-local
+    private const double SidebarMinWidth = MainViewModel.SidebarMinWidth;
+    private const double SidebarMaxWidth = MainViewModel.SidebarMaxWidth;
+    private const double SidebarDefaultWidth = MainViewModel.SidebarDefaultWidth;
     private const double SplitterWidth = 12;
 
     private readonly MainViewModel _vm = new();
     private Grid? _layoutRoot;
     private ColumnDefinition? SidebarColumn => _layoutRoot?.ColumnDefinitions[0];
     // last absolute sidebar width; zero-width columns mean hidden, this is what Show restores
-    private double _sidebarShownWidth = 250;
+    private double _sidebarShownWidth = SidebarDefaultWidth;
 
     public MainWindow()
     {
@@ -34,7 +37,7 @@ public partial class MainWindow : SukiWindow
         DataContext = _vm;
         // the overlay exists from now on: CrashGuard errors land here instead of a queue
         CrashGuard.AttachOverlay(_vm.Error);
-        _sidebarShownWidth = Math.Clamp(_vm.SidebarWidth.GetValueOrDefault(250), SidebarMinWidth, SidebarMaxWidth);
+        _sidebarShownWidth = Math.Clamp(_vm.SidebarWidth.GetValueOrDefault(SidebarDefaultWidth), SidebarMinWidth, SidebarMaxWidth);
         ApplySidebarLayout();
         // the splitter drives column 0 directly and nothing caps it in XAML any more —
         // clamp here so the sidebar and the width persisted on close stay in range;
@@ -215,12 +218,6 @@ public partial class MainWindow : SukiWindow
     {
         if ((sender as Control)?.DataContext is SessionItem session)
             _vm.RemoveFromWorkspace(session);
-    }
-
-    private void OnRunningClick(object? sender, RoutedEventArgs e)
-    {
-        if ((sender as Control)?.DataContext is RunningAgentItem running)
-            _ = _vm.OpenRunningAsync(running);
     }
 
     // ---- error overlay ----

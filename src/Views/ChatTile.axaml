@@ -429,18 +429,17 @@
 											</ItemsControl.ItemTemplate>
 										</ItemsControl>
 										<Border Height="1" Background="{DynamicResource HairlineBrush}" Margin="0,3" IsVisible="{Binding HasTasksAndAgents}" />
-										<Grid ColumnDefinitions="*,Auto" IsVisible="{Binding Owner.HasBackgroundAgents}">
+										<Grid ColumnDefinitions="*,Auto" IsVisible="{Binding HasTileAgents}">
 											<TextBlock Text="Agents" FontWeight="SemiBold" FontSize="{DynamicResource FontBodyLarge}" Margin="2,0,0,0" VerticalAlignment="Center" />
-											<TextBlock Grid.Column="1" Text="{Binding Owner.AgentsSummary}" FontSize="{DynamicResource FontDetail}" Opacity="0.6" VerticalAlignment="Center" Margin="0,0,2,0" />
+											<TextBlock Grid.Column="1" Text="{Binding TileAgentsSummary}" FontSize="{DynamicResource FontDetail}" Opacity="0.6" VerticalAlignment="Center" Margin="0,0,2,0" />
 										</Grid>
-										<ItemsControl ItemsSource="{Binding Owner.RunningAgents}" IsVisible="{Binding Owner.HasBackgroundAgents}">
+										<ItemsControl ItemsSource="{Binding TileAgents}" IsVisible="{Binding HasTileAgents}">
 											<ItemsControl.ItemTemplate>
 												<DataTemplate>
 													<StackPanel
 														Orientation="Horizontal"
 														Spacing="7"
-														Margin="2,4"
-														IsVisible="{Binding IsBackground}">
+														Margin="2,4">
 														<Ellipse
 															Width="5"
 															Height="5"

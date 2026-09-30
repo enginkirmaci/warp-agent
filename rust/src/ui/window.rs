@@ -3,11 +3,11 @@
 
 use crate::store::{Store, WorkspaceItem};
 use crate::theme;
-use crate::ui::input::TextField;
+use gpui_kit::component::input::{Input, InputEvent, InputState};
 use crate::ui::settings::SettingsBuffers;
 use crate::ui::tile::TileView;
 use gpui::prelude::*;
-use gpui::{canvas, div, px, AnimationExt, App, Context, Entity, MouseButton, Pixels, Render, SharedString, Window};
+use gpui::{canvas, div, px, AnimationExt, App, Context, Entity, MouseButton, Render, SharedString, Window};
 use std::collections::HashMap;
 
 #[derive(Clone)]
@@ -89,9 +89,9 @@ pub struct WarpWindow {
     add_folder_sender: async_channel::Sender<String>,
     add_folder_receiver: async_channel::Receiver<String>,
     settings_buffers: SettingsBuffers,
-    settings_fields: Vec<(&'static str, Entity<TextField>)>,
+    settings_fields: Vec<(&'static str, Entity<InputState>)>,
     /// session being renamed + its edit field
-    rename: Option<(String, Entity<TextField>)>,
+    rename: Option<(String, Entity<InputState>)>,
     /// active sidebar resize: (start pointer x, start sidebar width); shared with
     /// the paint-phase listener registration because window.on_mouse_event may
     /// only be called during paint in this gpui rev
@@ -162,7 +162,7 @@ impl Render for WarpWindow {
                 .map(|c| (Some(c.id.clone()), Some(c.draft_title.clone())))
                 .unwrap_or((None, None))
         };
-        self.sync_rename_field(editing, draft, cx);
+        self.sync_rename_field(editing, draft, window, cx);
 
         let fonts = self.store.read(cx).fonts;
         let sidebar_visible = self.store.read(cx).sidebar_visible;
@@ -240,29 +240,27 @@ impl Render for WarpWindow {
 }
 
 impl WarpWindow {
-    fn sync_rename_field(&mut self, editing: Option<String>, draft: Option<String>, cx: &mut Context<Self>) {
+    fn sync_rename_field(&mut self, editing: Option<String>, draft: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
         match (editing, &self.rename) {
             (Some(id), None) => {
-                let row_focus = cx.focus_handle();
-                let entity = cx.new(|_| {
-                    let mut field = TextField::single_line("", row_focus);
-                    field.set_text(draft.unwrap_or_default());
-                    field
+                let entity = cx.new(|cx| {
+                    InputState::new(window, cx)
+                        .placeholder("")
+                        .default_value(draft.clone().unwrap_or_default())
                 });
-                let weak = entity.downgrade();
                 let store_handle = self.store.clone();
                 let id_enter = id.clone();
-                entity.update(cx, |f, _| {
-                    f.hooks.on_send = Some(Box::new(move |_, cx| {
-                        let Some(field) = weak.upgrade() else { return };
-                        let text = field.read(cx).text.clone();
+                cx.subscribe(&entity, move |_, field, event: &InputEvent, cx| {
+                    if matches!(event, InputEvent::PressEnter { .. }) {
+                        let text = field.read(cx).value().to_string();
                         let id = id_enter.clone();
                         store_handle.update(cx, |s, cx| {
                             s.set_rename_draft(&id, text);
                             s.commit_rename(&id, cx);
                         });
-                    }));
-                });
+                    }
+                })
+                .detach();
                 self.rename = Some((id, entity));
             }
             (None, Some(_)) => {
@@ -439,12 +437,12 @@ impl WarpWindow {
                     .rounded_lg()
                     .cursor_pointer()
                     .hover(|s| s.bg(theme::HOVER))
-                    .on_click(cx.listener(|this, _, _, cx| {
+                    .on_click(cx.listener(|this, _, window, cx| {
                         this.store.update(cx, |s, _| {
                             s.is_settings_open = true;
                         });
                         this.settings_buffers = SettingsBuffers::from_settings(&this.store.read(cx).settings);
-                        this.settings_fields = this.make_settings_fields(cx);
+                        this.settings_fields = this.make_settings_fields(window, cx);
                         cx.notify();
                     }))
                     .child(crate::ui::icon("icons/cog.svg", px(fonts.icon_medium), theme::TEXT_MUTED))
@@ -516,6 +514,8 @@ impl WarpWindow {
                     ws_menu_rows(s, &menu_path)
                 };
                 let _ = menu_tx.send_blocking(MenuState { x: event.position.x.as_f32(), y: event.position.y.as_f32(), rows });
+                // right-click alone doesn't repaint — nudge the store so the menu shows now
+                menu_store.update(cx, |_, _| {});
             })
             .child(glyph)
             .child(
@@ -634,12 +634,14 @@ impl WarpWindow {
                     chat_menu_rows(s, &id_menu)
                 };
                 let _ = menu_tx.send_blocking(MenuState { x: event.position.x.as_f32(), y: event.position.y.as_f32(), rows });
+                // right-click alone doesn't repaint — nudge the store so the menu shows now
+                menu_store.update(cx, |_, _| {});
             })
             .child(div().w(px(13.)).flex().items_center().justify_center().child(gutter));
 
         if chat.is_editing {
             if let Some((_, field)) = &self.rename {
-                row = row.child(div().flex_1().min_w_0().child(field.clone()));
+                row = row.child(div().flex_1().min_w_0().child(Input::new(field)));
             }
         } else {
             row = row
@@ -697,7 +699,10 @@ impl WarpWindow {
             })
             .child(
                 canvas(
-                    move |_, window, _| {
+                    // this gpui rev: canvas(prepaint, paint) — on_mouse_event must
+                    // register from the second closure, prepaint panics on it
+                    |_, _, _| {},
+                    move |_, _, window, _| {
                         // registered during paint, as this gpui rev requires
                         if drag_for_paint.get().is_some() {
                             let drag = drag_for_paint.clone();
@@ -727,7 +732,6 @@ impl WarpWindow {
                             );
                         }
                     },
-                    |_, _, _, _| {},
                 )
                 .absolute()
                 .size_full(),
@@ -753,7 +757,7 @@ impl WarpWindow {
         .detach();
     }
 
-    fn make_settings_fields(&mut self, cx: &mut Context<Self>) -> Vec<(&'static str, Entity<TextField>)> {
+    fn make_settings_fields(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Vec<(&'static str, Entity<InputState>)> {
         let b = self.settings_buffers.clone();
         let rows: Vec<(&'static str, String)> = vec![
             ("executable", b.open_code_executable),
@@ -771,11 +775,10 @@ impl WarpWindow {
         ];
         rows.into_iter()
             .map(|(key, value)| {
-                let row_focus = cx.focus_handle();
-                let entity = cx.new(|_| {
-                    let mut field = TextField::single_line("", row_focus);
-                    field.set_text(value);
-                    field
+                let entity = cx.new(|cx| {
+                    InputState::new(window, cx)
+                        .placeholder("")
+                        .default_value(value)
                 });
                 (key, entity)
             })
@@ -786,7 +789,7 @@ impl WarpWindow {
         self.settings_fields
             .iter()
             .find(|(k, _)| *k == key)
-            .map(|(_, f)| div().flex_1().min_w_0().child(f.clone()).into_any_element())
+            .map(|(_, f)| div().flex_1().min_w_0().child(Input::new(f)).into_any_element())
             .unwrap_or_else(|| div().into_any_element())
     }
 
@@ -936,10 +939,7 @@ impl WarpWindow {
     // ---- main area -------------------------------------------------------------
 
     fn render_main(&mut self, window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
-        let (fonts, accent) = {
-            let store = self.store.read(cx);
-            (store.fonts, store.accent.accent)
-        };
+        let fonts = self.store.read(cx).fonts;
 
         // keep TileView entities in sync with the store's tile list
         let keys: Vec<String> = self.store.read(cx).open_tiles.iter().map(|t| t.key.clone()).collect();
@@ -947,7 +947,7 @@ impl WarpWindow {
             if !self.tile_views.contains_key(key) {
                 let store_handle = self.store.clone();
                 let key_clone = key.clone();
-                let view = cx.new(|cx| TileView::new(store_handle, key_clone, cx));
+                let view = cx.new(|cx| TileView::new(store_handle, key_clone, window, cx));
                 self.tile_views.insert(key.clone(), view);
             }
         }
@@ -960,6 +960,8 @@ impl WarpWindow {
             .gap_2()
             .flex_1()
             .min_h_0()
+            .min_w_0()
+            .overflow_hidden()
             .p_1();
         for key in &keys {
             if let Some(view) = self.tile_views.get(key) {
@@ -1083,7 +1085,14 @@ impl WarpWindow {
         let close_store = self.store.clone();
         let save_store = self.store.clone();
 
-        let mut page = div().id("settings-page").absolute().inset_0().overflow_y_scroll().child(
+        let mut page = div()
+            .id("settings-page")
+            .absolute()
+            .inset_0()
+            // opaque sheet: without it the chat tiles bleed through the cards
+            .bg(theme::SETTINGS_BG)
+            .overflow_y_scroll()
+            .child(
             div()
                 .max_w(px(1040.))
                 .m(px(28.))
@@ -1227,7 +1236,7 @@ impl WarpWindow {
                     move |cx| {
                         let mut buffers = buffers.clone();
                         for (key, field) in &fields {
-                            let text = field.read(cx).text.clone();
+                            let text = field.read(cx).value().to_string();
                             match *key {
                                 "executable" => buffers.open_code_executable = text,
                                 "model" => buffers.default_model = text,

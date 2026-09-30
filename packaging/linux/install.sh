@@ -16,8 +16,9 @@ cp "$here/icons/warpagent.svg" "$icon_root/scalable/apps/"
 
 app_dir="${XDG_DATA_HOME:-$HOME/.local/share}/applications"
 mkdir -p "$app_dir"
-cp "$here/warpagent.desktop" "$app_dir/"
+rm -f "$app_dir/warpagent.desktop" # pre-Rust entry, replaced by warp-agent.desktop
+cp "$here/warp-agent.desktop" "$app_dir/"
 
 command -v update-desktop-database >/dev/null 2>&1 && update-desktop-database "$app_dir" || true
 command -v gtk-update-icon-cache >/dev/null 2>&1 && gtk-update-icon-cache -tf "$icon_root" || true
-echo "installed: $app_dir/warpagent.desktop + hicolor icons"
+echo "installed: $app_dir/warp-agent.desktop + hicolor icons"

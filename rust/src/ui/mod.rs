@@ -1,8 +1,6 @@
 //! ui module: shared helpers + the main window.
 
 pub mod diff;
-pub mod highlight;
-pub mod input;
 pub mod markdown;
 pub mod settings;
 pub mod tile;

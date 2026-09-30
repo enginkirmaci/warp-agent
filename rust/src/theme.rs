@@ -2,7 +2,7 @@
 //! amber, deliberately no blue. Font/icon size tokens ride one factor so the
 //! settings text-size variant rescales the whole UI.
 
-use gpui::{hsla, rgba, Hsla, Rgba};
+use gpui::{hsla, rgba, App, Hsla, Rgba};
 
 /// const-friendly rgba: gpui's `rgba()` is not const in this rev.
 const fn c(hex: u32) -> Rgba {
@@ -14,6 +14,49 @@ const fn c(hex: u32) -> Rgba {
     }
 }
 
+// ---- gpui-kit theme mapping ------------------------------------------------
+
+/// Map the WarpAgent palette onto gpui-kit's shadcn-style theme tokens so kit
+/// components (Input/Textarea/TextView/popovers) render in our colors.
+/// Call once after [`gpui_kit::init`], before opening windows.
+pub fn apply_kit_theme(cx: &mut App) {
+    use gpui_kit::component::{Theme, ThemeMode};
+
+    Theme::update(cx, |t| {
+        t.mode = ThemeMode::Dark;
+        t.background = WINDOW_CHROME.into();
+        t.foreground = TEXT.into();
+        t.primary = GREEN_ACCENT.accent.into();
+        t.primary_foreground = SURFACE.into();
+        t.secondary = CHIP.into();
+        t.secondary_foreground = TEXT.into();
+        t.muted = INPUT.into();
+        t.muted_foreground = TEXT_MUTED.into();
+        t.accent = HOVER;
+        t.accent_foreground = TEXT.into();
+        t.danger = DANGER.into();
+        t.danger_foreground = TEXT.into();
+        t.border = HAIRLINE.into();
+        t.input = INPUT.into();
+        t.ring = GREEN_ACCENT.accent.into();
+        t.selection = SELECTION.into();
+        t.caret = TEXT.into();
+        t.link = GREEN_ACCENT.accent.into();
+        t.popover = SETTINGS_CARD.into();
+        t.popover_foreground = TEXT.into();
+        t.sidebar = WINDOW_CHROME.into();
+        t.sidebar_foreground = TEXT.into();
+        t.sidebar_border = HAIRLINE.into();
+
+        // our tiles/cards sit on 8–12px corners
+        t.radius = gpui::px(8.);
+        t.radius_lg = gpui::px(12.);
+
+        t.font_family = gpui::SharedString::from("Inter");
+        t.mono_font_family = gpui::SharedString::from(CODE_FONT);
+    });
+}
+
 // ---- surfaces ------------------------------------------------------------
 
 pub const SURFACE: Rgba = c(0x121212FF); // main-area card + tiles
@@ -22,6 +65,7 @@ pub const WINDOW_CHROME: Rgba = c(0x1E1E1EFF); // titlebar, sidebar, ring around
 pub const SETTINGS_BG: Rgba = c(0x202020FF); // settings sheet
 pub const SETTINGS_CARD: Rgba = c(0x1A1A1AFF);
 pub const INPUT: Rgba = c(0x2A2A2AFF);
+pub const SELECTION: Rgba = c(0x4AC26540); // accent green, 25% — text selection in fields
 pub const HAIRLINE: Rgba = c(0x3E3E3EFF);
 pub const TILE_HEADER_SEPARATOR: Rgba = c(0x333333FF);
 pub const CHIP: Rgba = c(0x343434FF);
@@ -92,9 +136,10 @@ pub fn normalize_accent(accent: Option<&str>) -> &'static AccentPreset {
         .unwrap_or(&ACCENT_PRESETS[0])
 }
 
-/// rgb hex (0xRRGGBB) → fully opaque Rgba.
+/// rgb hex (0xRRGGBB) → fully opaque Rgba. gpui's rgba() takes 0xRRGGBBAA,
+/// so the alpha goes in the LOW byte — OR-ing it high scrambles the channels.
 pub fn rgba_u32(rgb: u32) -> Rgba {
-    rgba(rgb | 0xFF000000)
+    rgba((rgb << 8) | 0xFF)
 }
 
 /// The live accent family; swapped by the settings page.
@@ -109,10 +154,10 @@ pub struct AccentColors {
 impl AccentColors {
     pub fn for_preset(preset: &AccentPreset) -> Self {
         Self {
-            accent: c(preset.accent | 0xFF000000),
-            dim: rgba(preset.dim | 0xFF000000),
-            on: rgba(preset.on | 0xFF000000),
-            success_dim: rgba(preset.success_dim | 0xFF000000),
+            accent: c((preset.accent << 8) | 0xFF),
+            dim: c((preset.dim << 8) | 0xFF),
+            on: c((preset.on << 8) | 0xFF),
+            success_dim: c((preset.success_dim << 8) | 0xFF),
         }
     }
 }

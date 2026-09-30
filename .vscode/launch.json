@@ -1,0 +1,14 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Rust: warp-agent (debug)",
+            "type": "lldb",
+            "request": "launch",
+            "program": "${workspaceFolder}/rust/target/debug/warp-agent",
+            "args": [],
+            "cwd": "${workspaceFolder}/rust",
+            "preLaunchTask": "cargo build (warp-agent)"
+        }
+    ]
+}

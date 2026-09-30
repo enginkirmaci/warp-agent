@@ -4,15 +4,21 @@
 use crate::store::{ChatItem, QuestionEntry, Store, ToolItem};
 use crate::theme;
 use crate::ui::diff::render_diff;
-use crate::ui::input::TextField;
 use crate::ui::markdown::render_markdown;
 use gpui::prelude::*;
 use gpui::{
-    div, img, px, App, AnimationExt, ClickEvent, Context, Entity, Hsla, ImageFormat, MouseButton,
-    Pixels, Render, ScrollHandle, SharedString, TextAlign, Window,
+    div, img, px, actions, App, AnimationExt, Context, Entity, Focusable, ImageFormat,
+    MouseButton, Pixels, Render, ScrollHandle, SharedString, Window,
+};
+use gpui_kit::component::input::{
+    Input, InputEvent, InputState, MoveDown, MoveUp, Textarea, TextareaState,
 };
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+
+// composer-only key overrides, bound in the "Input" context after
+// gpui_kit::init so the later binding wins over the editor's own up/down
+actions!(warp_agent, [ComposerUp, ComposerDown, ComposerCycleAgent]);
 
 pub fn decode_png_render(png: &[u8]) -> Option<Arc<gpui::RenderImage>> {
     let decoded = image::load_from_memory(png).ok()?;
@@ -45,24 +51,29 @@ pub struct TileView {
     expanded: HashSet<String>, // fold state by item id
     picker: Option<PickerKind>,
     menu: Option<ContextMenu>,
-    composer: Entity<TextField>,
-    question_inputs: HashMap<String, Entity<TextField>>,
+    composer: Entity<TextareaState>,
+    question_inputs: HashMap<String, Entity<InputState>>,
     last_composer_text: String,
     flyout_open: bool,
     last_spring_seen: bool,
 }
 
 impl TileView {
-    pub fn new(store: Entity<Store>, key: String, cx: &mut Context<Self>) -> Self {
-        let composer_focus = cx.focus_handle();
-        let composer = cx.new(|_| TextField::multiline("Ask opencode…", composer_focus));
-        let this = cx.weak_entity();
+    pub fn new(store: Entity<Store>, key: String, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        // kit textarea: submit_on_enter gives Warp-style Enter=send, Shift+Enter=newline
+        let composer = cx.new(|cx| {
+            TextareaState::new(window, cx)
+                .placeholder("Ask opencode…")
+                .submit_on_enter(true)
+                .auto_grow(2, 9)
+        });
+
         let store_handle = store.clone();
-        let key_for_composer = key.clone();
-        composer.update(cx, |field, _| {
-            field.hooks.on_change = Some(Box::new(move |_, cx, text| {
-                let text = text.to_string();
-                let key = key_for_composer.clone();
+        let key_for_change = key.clone();
+        cx.subscribe(&composer, move |_, field, event: &InputEvent, cx| {
+            if matches!(event, InputEvent::Change) {
+                let text = field.read(cx).value().to_string();
+                let key = key_for_change.clone();
                 store_handle.update(cx, move |s, _| {
                     if let Some(tile) = s.tile_by_key_mut(&key) {
                         if tile.input != text {
@@ -71,11 +82,15 @@ impl TileView {
                         }
                     }
                 });
-            }));
-            let store_handle = store.clone();
-            let key_for_send = key.clone();
-            let this = this.clone();
-            field.hooks.on_send = Some(Box::new(move |_, cx| {
+            }
+        })
+        .detach();
+
+        let this = cx.weak_entity();
+        let store_handle = store.clone();
+        let key_for_send = key.clone();
+        cx.subscribe(&composer, move |_, _, event: &InputEvent, cx| {
+            if let InputEvent::PressEnter { shift: false, .. } = event {
                 let key = key_for_send.clone();
                 store_handle.update(cx, move |s, cx| s.send_from_tile(&key, cx));
                 if let Some(this) = this.upgrade() {
@@ -85,42 +100,10 @@ impl TileView {
                         cx.notify();
                     });
                 }
-            }));
-            let store_handle = store.clone();
-            let key_for_history = key.clone();
-            field.hooks.on_history = Some(Box::new(move |_, cx, up| {
-                let key = key_for_history.clone();
-                let mut handled = false;
-                store_handle.update(cx, |s, _| {
-                    handled = s.cycle_prompt_history(&key, up);
-                });
-                handled
-            }));
-            let store_handle = store.clone();
-            let key_for_agent = key.clone();
-            field.hooks.on_cycle_agent = Some(Box::new(move |_, cx| {
-                let key = key_for_agent.clone();
-                store_handle.update(cx, move |s, _| s.cycle_agent(&key));
-            }));
-            let store_handle = store.clone();
-            let key_for_paste = key.clone();
-            field.hooks.on_paste = Some(Box::new(move |_, cx| {
-                let key = key_for_paste.clone();
-                let mut attached_image = false;
-                if let Some(item) = cx.read_from_clipboard() {
-                    let image = item.entries().iter().find_map(|entry| match entry {
-                        gpui::ClipboardEntry::Image(image) => Some(image),
-                        _ => None,
-                    });
-                    if let Some(image) = image {
-                        let png = image.bytes.clone();
-                        store_handle.update(cx, move |s, _| s.attach_image(&key, png));
-                        attached_image = true;
-                    }
-                }
-                attached_image
-            }));
-        });
+            }
+        })
+        .detach();
+
         Self {
             key,
             store,
@@ -230,7 +213,7 @@ impl TileView {
             ChatItem::AssistantText { text, meta_label, created_ms, .. } => {
                 let time = crate::store::message_time_label(*created_ms);
                 let meta = meta_label.clone();
-                let markdown = render_markdown(text, fonts, accent, window, Self::hash(item_id) as usize);
+                let markdown = render_markdown(text);
                 div()
                     .w_full()
                     .flex()
@@ -277,7 +260,10 @@ impl TileView {
                     .when(open, |d| {
                         d.child(
                             div()
-                                .id("fold-thinking")
+                                .id(gpui::ElementId::NamedInteger(
+                                    "fold-thinking".into(),
+                                    TileView::hash(item_id),
+                                ))
                                 .rounded_lg()
                                 .bg(theme::DIFF_BG)
                                 .p_2()
@@ -558,6 +544,9 @@ impl TileView {
                     this.expanded.remove(&key);
                 } else {
                     this.expanded.insert(key.clone());
+                    // the body grows below the header — stop pinning to the tail
+                    // or the expanded content lands above the viewport
+                    this.pinned = false;
                 }
                 cx.notify();
             }))
@@ -658,21 +647,21 @@ impl TileView {
                                             let store = store.clone();
                                             let id = id.clone();
                                             move |cx| {
-                                                store.update(cx, |s, _| s.respond_permission(&id, "once", false));
+                                                store.update(cx, |s, cx| s.respond_permission(&id, "once", false, cx));
                                             }
                                         }))
                                         .child(self.pill_button("Always", false, accent, {
                                             let store = store.clone();
                                             let id = id.clone();
                                             move |cx| {
-                                                store.update(cx, |s, _| s.respond_permission(&id, "always", false));
+                                                store.update(cx, |s, cx| s.respond_permission(&id, "always", false, cx));
                                             }
                                         }))
                                         .child(self.pill_button("Deny", false, accent, {
                                             let store = store.clone();
                                             let id = id.clone();
                                             move |cx| {
-                                                store.update(cx, |s, _| s.respond_permission(&id, "reject", false));
+                                                store.update(cx, |s, cx| s.respond_permission(&id, "reject", false, cx));
                                             }
                                         }))
                                         .when(!auto_text.is_empty(), |d| {
@@ -780,7 +769,7 @@ impl TileView {
             );
         }
         for (qi, entry) in question.questions.iter().enumerate() {
-            card = card.child(self.render_question_entry(self.key.clone(), item_id, question, qi, entry, fonts, accent, cx));
+            card = card.child(self.render_question_entry(self.key.clone(), item_id, question, qi, entry, fonts, accent, window, cx));
         }
         if pending {
             let id = question.id.clone();
@@ -875,25 +864,28 @@ impl TileView {
         entry: &QuestionEntry,
         fonts: theme::FontTokens,
         accent: gpui::Rgba,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let input_key = format!("{}#{qi}", question.id);
-        // custom-answer text field, created lazily and wired to the store
+        // custom-answer field, created lazily and wired to the store
         if let std::collections::hash_map::Entry::Vacant(slot) = self.question_inputs.entry(input_key.clone()) {
-            let mut field = TextField::single_line("custom answer…", cx.focus_handle());
-            field.text_color = theme::TEXT.into();
             let store = self.store.clone();
             let qid = question.id.clone();
             let this_key = self.key.clone();
-            field.hooks.on_change = Some(Box::new(move |_, cx, text| {
-                let text = text.to_string();
-                let this_key = this_key.clone();
-                let qid = qid.clone();
-                store.update(cx, move |s, _| {
-                    s.set_question_custom(&this_key, &qid, qi, text);
-                });
-            }));
-            slot.insert(cx.new(|_| field));
+            let field = cx.new(|cx| InputState::new(window, cx).placeholder("custom answer…"));
+            cx.subscribe(&field, move |_, field, event: &InputEvent, cx| {
+                if matches!(event, InputEvent::Change) {
+                    let text = field.read(cx).value().to_string();
+                    let this_key = this_key.clone();
+                    let qid = qid.clone();
+                    store.update(cx, move |s, cx| {
+                        s.set_question_custom(&this_key, &qid, qi, text, cx);
+                    });
+                }
+            })
+            .detach();
+            slot.insert(field);
         }
         let field = self.question_inputs.get(&input_key).cloned().unwrap();
         let entry_locked = entry.locked;
@@ -943,8 +935,8 @@ impl TileView {
                             let store = store.clone();
                             let qid = qid.clone();
                             move |_, _, cx| {
-                                store.update(cx, |s, _| {
-                                    s.toggle_question_option(&this_key2, &qid, qi, oi, is_multi);
+                                store.update(cx, |s, cx| {
+                                    s.toggle_question_option(&this_key2, &qid, qi, oi, is_multi, cx);
                                 });
                             }
                         })
@@ -1010,7 +1002,7 @@ impl TileView {
             );
         }
         if !entry_locked {
-            column = column.child(div().px_1().child(field.clone()));
+            column = column.child(div().px_1().child(Input::new(&field)));
         }
         column.into_any_element()
     }
@@ -1117,9 +1109,9 @@ impl Render for TileView {
         let px_size = |v: f32| px(v);
 
         // external input changes (history, edit-queued) sync into the field
-        if snap.input != self.last_composer_text && self.composer.read(cx).text != snap.input {
+        if snap.input != self.last_composer_text && self.composer.read(cx).value().as_ref() != snap.input {
             let text = snap.input.clone();
-            self.composer.update(cx, |field, _| field.set_text(text));
+            self.composer.update(cx, |field, cx| field.set_value(text, window, cx));
         }
         self.last_composer_text = snap.input.clone();
 
@@ -1149,11 +1141,18 @@ impl Render for TileView {
             .min_h_0()
             .overflow_y_scroll()
             .track_scroll(&self.scroll.clone())
-            .on_scroll_wheel(cx.listener(|this, _, _, cx| {
+            .on_scroll_wheel(cx.listener(|this, event: &gpui::ScrollWheelEvent, window, cx| {
                 let offset = this.scroll.offset();
                 let max = this.scroll.max_offset();
                 let at_bottom = offset.y >= max.y - px(1.);
                 this.pinned = at_bottom;
+                // apply the wheel here: the native overflow handler doesn't move
+                // this handle in this gpui rev, leaving the transcript unscrollable
+                let delta = event.delta.pixel_delta(window.line_height()).y;
+                if delta != px(0.) {
+                    let y = (offset.y + delta).clamp(px(0.), max.y);
+                    this.scroll.set_offset(gpui::point(offset.x, y));
+                }
                 cx.notify();
             }))
             .p_1()
@@ -1312,7 +1311,7 @@ impl Render for TileView {
 
         // ---- bottom row ----
         let allow_on = snap.allow_on;
-        let composer_focus_is = self.composer.read(cx).focus.is_focused(window);
+        let composer_focus_is = self.composer.read(cx).focus_handle(cx).is_focused(window);
         let mut pills = div().flex().items_center().gap_1();
         if snap.has_agents {
             pills = pills.child(
@@ -1829,6 +1828,8 @@ impl Render for TileView {
         }
 
         // context menu overlay
+        let tile_entity = cx.entity();
+        let menu_owner_key = self.key.clone();
         let mut menu_el = div();
         if let Some(menu) = self.menu.clone() {
             let label = match &menu {
@@ -1838,7 +1839,25 @@ impl Render for TileView {
             };
             let store_handle = self.store.clone();
             let menu_clone = menu.clone();
-            menu_el = div().absolute().bottom(px(96.)).left(px(160.)).child(
+            // click-elsewhere catcher closes the menu (the row's own click
+            // still wins: gpui fires mouse-down into the catcher, the menu
+            // unmounts next frame, after the row's on_click has run)
+            let close_entity = tile_entity.clone();
+            menu_el = div()
+                .absolute()
+                .inset_0()
+                .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+                    close_entity.update(cx, |tv, cx| {
+                        tv.menu = None;
+                        cx.notify();
+                    });
+                })
+                .child(
+                div()
+                    .absolute()
+                    .bottom(px(96.))
+                    .left(px(160.))
+                    .child(
                 div()
                     .rounded_lg()
                     .border_1()
@@ -1864,7 +1883,8 @@ impl Render for TileView {
                                     }
                                     ContextMenu::EditInput(text) => {
                                         let text = text.clone();
-                                        let key = store_handle.read(cx).focused_tile.clone().unwrap_or_default();
+                                        // the tile that showed the menu, not wherever focus happens to be
+                                        let key = menu_owner_key.clone();
                                         store_handle.update(cx, move |s, _| {
                                             if let Some(tile) = s.tile_by_key_mut(&key) {
                                                 tile.input = text.clone();
@@ -1881,9 +1901,14 @@ impl Render for TileView {
                                         cx.write_to_clipboard(gpui::ClipboardItem::new_image(&image));
                                     }
                                 }
+                                tile_entity.update(cx, |tv, cx| {
+                                    tv.menu = None;
+                                    cx.notify();
+                                });
                             })
                             .child(label),
                     ),
+            ),
             );
         }
 
@@ -1893,6 +1918,8 @@ impl Render for TileView {
             .id(gpui::ElementId::NamedInteger("tile".into(), TileView::hash(&self.key)))
             .relative()
             .size_full()
+            // let the grid track shrink below long-word min-content
+            .min_w_0()
             .flex()
             .flex_col()
             .rounded_xl()
@@ -1901,6 +1928,41 @@ impl Render for TileView {
             .when(!snap.is_focused, |d| d.border_color(theme::HAIRLINE))
             .bg(theme::CARD)
             .overflow_hidden()
+            // composer-only key overrides (bound over the kit's "Input" context):
+            // forward up/down to the editor, and when the caret cannot move
+            // anymore cycle the prompt history instead — Warp-style
+            .on_action(cx.listener(|this, _: &ComposerUp, window, cx| {
+                let state = this.composer.clone();
+                if !state.read(cx).focus_handle(cx).is_focused(window) {
+                    return;
+                }
+                let before = state.read(cx).cursor();
+                let focus = state.read(cx).focus_handle(cx).clone();
+                focus.dispatch_action(&MoveUp, window, cx);
+                let moved = state.read(cx).cursor() != before;
+                if !moved {
+                    let key = this.key.clone();
+                    this.store.update(cx, |s, _| s.cycle_prompt_history(&key, true));
+                }
+            }))
+            .on_action(cx.listener(|this, _: &ComposerDown, window, cx| {
+                let state = this.composer.clone();
+                if !state.read(cx).focus_handle(cx).is_focused(window) {
+                    return;
+                }
+                let before = state.read(cx).cursor();
+                let focus = state.read(cx).focus_handle(cx).clone();
+                focus.dispatch_action(&MoveDown, window, cx);
+                let moved = state.read(cx).cursor() != before;
+                if !moved {
+                    let key = this.key.clone();
+                    this.store.update(cx, |s, _| s.cycle_prompt_history(&key, false));
+                }
+            }))
+            .on_action(cx.listener(|this, _: &ComposerCycleAgent, _window, cx| {
+                let key = this.key.clone();
+                this.store.update(cx, |s, _| s.cycle_agent(&key));
+            }))
             .on_mouse_down(MouseButton::Left, {
                 let store = self.store.clone();
                 let key = self.key.clone();
@@ -1951,12 +2013,36 @@ impl Render for TileView {
                     .on_mouse_down(MouseButton::Left, {
                         let composer = self.composer.clone();
                         move |_, window, cx| {
-                            let handle = composer.read(cx).focus.clone();
+                            let handle = composer.read(cx).focus_handle(cx).clone();
                             window.focus(&handle, cx);
                         }
                     })
                     .child(attachments_el)
-                    .child(div().flex_1().min_h_0().child(composer))
+                    .child(
+                        div().flex_1().min_h_0().child(
+                            // chrome-less inside: the composer frame (border/bg)
+                            // is ours, the textarea only edits.
+                            // image paste → attachment instead of text insertion
+                            Textarea::new(&composer).appearance(false).bordered(false).on_paste({
+                                let store = self.store.clone();
+                                let key = self.key.clone();
+                                move |item: &gpui::ClipboardItem, _, cx| {
+                                    let image = item.entries().iter().find_map(|entry| match entry {
+                                        gpui::ClipboardEntry::Image(image) => Some(image),
+                                        _ => None,
+                                    });
+                                    if let Some(image) = image {
+                                        let png = image.bytes.clone();
+                                        let key = key.clone();
+                                        store.update(cx, move |s, _| s.attach_image(&key, png));
+                                        true
+                                    } else {
+                                        false
+                                    }
+                                }
+                            }),
+                        ),
+                    )
                     .child(bottom_row),
             )
             .child(flyout)

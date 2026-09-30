@@ -94,7 +94,9 @@ pub fn init_font_scale(store: &Entity<Store>, cx: &mut App) {
                     for line in reader.lines().map_while(Result::ok) {
                         if let Some(factor) = parse_factor(&line) {
                             if let Some(tx) = FACTOR_TX.get() {
-                                let _ = tx.send(factor);
+                                // sync thread: send_blocking; plain send() would
+                                // just create and drop a future
+                                let _ = tx.send_blocking(factor);
                             }
                         }
                     }

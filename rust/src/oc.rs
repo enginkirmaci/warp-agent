@@ -490,7 +490,12 @@ fn truncate(s: &str, max: usize) -> String {
     if s.len() <= max {
         s.to_string()
     } else {
-        format!("{}…", &s[..max])
+        // byte budgets must land on a char boundary or multibyte text panics
+        let mut cut = max;
+        while cut > 0 && !s.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        format!("{}…", &s[..cut])
     }
 }
 
@@ -577,6 +582,8 @@ pub enum NetCommand {
 
 pub enum ApiRequest {
     ListSessions,
+    ListModels,
+    ListAgents,
     GetMessages { session_id: String },
     CreateSession { title: String },
     RenameSession { session_id: String, title: String },
@@ -652,28 +659,30 @@ async fn net_main(command_rx: async_channel::Receiver<NetCommand>, event_tx: asy
                 // sequential spawn keeps one workspace's failed start from racing others
                 match start_workspace(&mut workspaces, &ws_key, &executable, &folder, &event_tx).await {
                     Ok(()) => {
-                        let _ = event_tx.send(UiEvent::ServerStarted { ws_key, result: Ok(()) });
+                        // async_channel::send is a future — dropping it without
+                        // awaiting silently discards the event
+                        let _ = event_tx.send(UiEvent::ServerStarted { ws_key: ws_key.clone(), result: Ok(()) }).await;
                     }
                     Err(err) => {
                         workspaces.remove(&ws_key);
                         let _ = event_tx.send(UiEvent::ServerStarted {
                             ws_key,
                             result: Err(anyhow!("{err}")),
-                        });
+                        }).await;
                     }
                 }
             }
             NetCommand::StopServer { ws_key } => {
                 if let Some(ws) = workspaces.get_mut(&ws_key) {
                     if let Some(stop) = ws.event_stop.take() {
-                        let _ = stop.send(());
+                        let _ = stop.try_send(());
                     }
                     if let Some(process) = ws.process.as_mut() {
                         process.stop();
                     }
                 }
                 workspaces.remove(&ws_key);
-                let _ = event_tx.send(UiEvent::ServerStopped { ws_key });
+                let _ = event_tx.send(UiEvent::ServerStopped { ws_key }).await;
             }
             NetCommand::Request { ws_key, request } => {
                 let Some(api) = workspaces.get(&ws_key).map(|ws| ws.api.base_url.clone()) else {
@@ -683,11 +692,19 @@ async fn net_main(command_rx: async_channel::Receiver<NetCommand>, event_tx: asy
                 let event_tx = event_tx.clone();
                 tokio::spawn(async move {
                     let event = run_request(&client, ws_key, request).await;
-                    let _ = event_tx.send(event);
+                    let _ = event_tx.send(event).await;
                 });
             }
             NetCommand::SendMessage { ws_key, session_id, text, model, variant, agent, attachments } => {
                 let Some(api) = workspaces.get(&ws_key).map(|ws| ws.api.base_url.clone()) else {
+                    // don't drop silently — the tile would sit "running" forever
+                    let _ = event_tx
+                        .send(UiEvent::MessageSendFailed {
+                            ws_key: ws_key.clone(),
+                            session_id: session_id.clone(),
+                            error: "this chat's workspace server is not running".into(),
+                        })
+                        .await;
                     continue;
                 };
                 let client = ApiClient::new(&api);
@@ -697,7 +714,7 @@ async fn net_main(command_rx: async_channel::Receiver<NetCommand>, event_tx: asy
                         .send_message(&session_id, &text, model.as_deref(), variant.as_deref(), agent.as_deref(), &attachments)
                         .await;
                     if let Err(err) = result {
-                        let _ = event_tx.send(UiEvent::MessageSendFailed { ws_key, session_id, error: format!("{err:#}") });
+                        let _ = event_tx.send(UiEvent::MessageSendFailed { ws_key, session_id, error: format!("{err:#}") }).await;
                     }
                 });
             }
@@ -730,7 +747,8 @@ async fn start_workspace(
         folder,
         port,
         Box::new(move |line| {
-            let _ = log_tx.send(UiEvent::Log { ws_key: key.clone(), line });
+            // sync closure: send_blocking; unbounded channel so it never blocks
+            let _ = log_tx.send_blocking(UiEvent::Log { ws_key: key.clone(), line });
         }),
     )
     .await?;
@@ -746,7 +764,8 @@ async fn start_workspace(
         let _ = pump_client
             .stream_events(
                 |event| {
-                    let _ = pump_tx.send(UiEvent::Event { ws_key: pump_key.clone(), event });
+                    // sync callback: send_blocking; unbounded channel so it never blocks
+                    let _ = pump_tx.send_blocking(UiEvent::Event { ws_key: pump_key.clone(), event });
                 },
                 stop_rx,
             )
@@ -765,6 +784,14 @@ async fn run_request(client: &ApiClient, ws_key: String, request: ApiRequest) ->
         ApiRequest::ListSessions => UiEvent::SessionsLoaded {
             ws_key,
             result: client.list_sessions().await,
+        },
+        ApiRequest::ListModels => UiEvent::ModelsLoaded {
+            ws_key,
+            result: client.get_models().await,
+        },
+        ApiRequest::ListAgents => UiEvent::AgentsLoaded {
+            ws_key,
+            result: client.get_agents().await,
         },
         ApiRequest::GetMessages { session_id } => UiEvent::MessagesLoaded {
             ws_key,

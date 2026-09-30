@@ -889,7 +889,12 @@ fn describe_part(state: &serde_json::Value, name: &str) -> String {
     } else if text.len() <= 4000 {
         text
     } else {
-        format!("{}\n… (truncated)", &text[..4000])
+        // cut on a char boundary — byte 4000 can split a multibyte char
+        let mut cut = 4000;
+        while cut > 0 && !text.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        format!("{}\n… (truncated)", &text[..cut])
     }
 }
 
@@ -1371,6 +1376,17 @@ impl Store {
         self.ui.active_workspace = self.selected_workspace.clone();
         self.ui.auto_allow_always = Some(self.auto_allow);
         self.persist_tiles();
+        // persist_tiles (and most mutations) write the runtime WorkspaceItems;
+        // ui.workspaces is the mirror that actually gets serialized, so copy
+        // the persisted fields back before saving
+        for ws in &mut self.ui.workspaces {
+            if let Some(item) = self.workspaces.iter().find(|i| i.folder_path() == ws.path) {
+                ws.sessions = item.state.sessions.clone();
+                ws.active_session = item.state.active_session.clone();
+                ws.open_sessions = item.state.open_sessions.clone();
+                ws.collapsed = item.state.collapsed;
+            }
+        }
         self.ui.save();
     }
 
@@ -1526,7 +1542,13 @@ impl Store {
         self.title_by_session
             .get(session_id)
             .cloned()
-            .unwrap_or_else(|| format!("agent {}", &session_id[..session_id.len().min(8)]))
+            .unwrap_or_else(|| {
+                let mut cut = session_id.len().min(8);
+                while cut > 0 && !session_id.is_char_boundary(cut) {
+                    cut -= 1;
+                }
+                format!("agent {}", &session_id[..cut])
+            })
     }
 
     fn is_app_session(&self, session_id: &str) -> bool {
@@ -1678,7 +1700,8 @@ impl Store {
             self.net.send(NetCommand::StopServer { ws_key: path });
         }
         self.runtimes.clear();
-        self.ui.save();
+        // full save_state (not ui.save) so open tiles mirror into ui.workspaces
+        self.save_state();
         self.settings.save();
     }
 
@@ -1701,7 +1724,8 @@ impl Store {
         if let Some(ws) = self.selected_workspace() {
             let path = ws.folder_path().to_string();
             self.net.send(NetCommand::Request { ws_key: path.clone(), request: ApiRequest::ListSessions });
-            self.net.send(NetCommand::Request { ws_key: path, request: ApiRequest::ListSessions });
+            self.net.send(NetCommand::Request { ws_key: path.clone(), request: ApiRequest::ListModels });
+            self.net.send(NetCommand::Request { ws_key: path, request: ApiRequest::ListAgents });
         }
         let _ = cx;
     }
@@ -1744,6 +1768,9 @@ impl Store {
                         self.is_server_running = true;
                     }
                     self.net.send(NetCommand::Request { ws_key: ws_key.clone(), request: ApiRequest::ListSessions });
+                    // model/agent pickers feed off every running server
+                    self.net.send(NetCommand::Request { ws_key: ws_key.clone(), request: ApiRequest::ListModels });
+                    self.net.send(NetCommand::Request { ws_key: ws_key.clone(), request: ApiRequest::ListAgents });
                     if is_selected {
                         let wanted = self
                             .selected_workspace()
@@ -1795,10 +1822,10 @@ impl Store {
                         return;
                     }
                     let title = self.title_for(&session_id);
-                    let key = {
-                        let tile = self.create_tile();
-                        tile.key.clone()
-                    };
+                    // mint a key directly — create_tile() would push a phantom
+                    // draft tile into open_tiles
+                    let key = format!("t{}", self.next_tile_key);
+                    self.next_tile_key += 1;
                     let mut tile = ChatTile::new(key.clone(), self.seed_model(), self.seed_agent(), self.seed_variant());
                     tile.session_id = Some(session_id.clone());
                     tile.title = title;
@@ -1809,6 +1836,8 @@ impl Store {
                     }
                     self.tile_by_session.insert(session_id.clone(), key.clone());
                     self.open_tiles.push(tile);
+                    // a tile just opened: the restore banner has served its purpose
+                    self.show_restore_prompt = false;
                     self.flush_pending_permissions(&session_id, cx);
                     self.flush_pending_questions(&session_id, cx);
                     self.pull_pending_questions(&ws_key, &session_id);
@@ -1829,8 +1858,13 @@ impl Store {
             },
             UiEvent::SessionCreated { ws_key, result } => match result {
                 Ok(info) => {
-                    // the draft tile that requested creation, tracked by pending_sends
-                    let Some((draft_key, text, attachments)) = self.pending_sends.pop() else { return };
+                    // the draft tile that requested creation, tracked by pending_sends.
+                    // FIFO: creates can be in flight from several drafts at once and
+                    // replies carry no correlation id
+                    let Some((draft_key, text, attachments)) = self.pending_sends.first().cloned() else {
+                        return;
+                    };
+                    self.pending_sends.remove(0);
                     self.workspace_by_session.insert(info.id.clone(), ws_key.clone());
                     self.title_by_session.insert(info.id.clone(), info.title.clone());
                     self.tile_by_session.insert(info.id.clone(), draft_key.clone());
@@ -1863,7 +1897,13 @@ impl Store {
                     self.send_core(&info.id, text, attachments, cx);
                 }
                 Err(err) => {
+                    // drop the matching queued send or a later create would
+                    // adopt it and fire the stale text into the new session
+                    if !self.pending_sends.is_empty() {
+                        self.pending_sends.remove(0);
+                    }
                     self.announce(&format!("Could not create a session: {err:#}"), true, cx);
+                    cx.notify();
                 }
             },
             UiEvent::SessionRenamed { session_id, result, .. } => match result {
@@ -2050,6 +2090,7 @@ impl Store {
             ws.set_expanded(true); // the new chat belongs in a visible sidebar section
         }
         let untouched_last = self.open_tiles.last().map(|t| t.is_untouched()).unwrap_or(false);
+        self.show_restore_prompt = false; // a tile is about to be on screen
         if untouched_last {
             let key = self.open_tiles.last().unwrap().key.clone();
             self.focus_tile(&key, cx);
@@ -2389,7 +2430,7 @@ impl Store {
     pub fn stop_running(&mut self, session_id: &str, cx: &mut Context<Self>) {
         let Some(ws_key) = self.effective_workspace_path(session_id) else { return };
         self.net.send(NetCommand::Request { ws_key, request: ApiRequest::Abort { session_id: session_id.to_string() } });
-        let _ = cx;
+        cx.notify();
     }
 
     fn auto_title(&mut self, session_id: &str, text: &str) {
@@ -2401,7 +2442,7 @@ impl Store {
             tile.auto_title_pending = false;
         }
         let title = derive_title(text);
-        let ws_key = self.effective_workspace_path(session_id).unwrap();
+        let Some(ws_key) = self.effective_workspace_path(session_id) else { return };
         self.net.send(NetCommand::Request {
             ws_key,
             request: ApiRequest::RenameSession { session_id: session_id.to_string(), title },
@@ -2560,19 +2601,14 @@ impl Store {
         }
         // an idle fires at the end of every turn; when nothing visible changed,
         // skip the full rebuild + disk save (the common case while chatting)
-        let mut unchanged = self.sessions.len() == mine.len();
-        for (i, s) in mine.iter().enumerate() {
-            let cur = &self.sessions[i];
-            if cur.id != s.id
-                || cur.title != s.title
-                || cur.updated_ms != s.updated_ms
-                || cur.is_pinned != pins.contains_key(&s.id)
-                || cur.is_running != self.running_by_session.contains(&s.id)
-            {
-                unchanged = false;
-                break;
-            }
-        }
+        let unchanged = self.sessions.len() == mine.len()
+            && self.sessions.iter().zip(mine.iter()).all(|(cur, s)| {
+                cur.id == s.id
+                    && cur.title == s.title
+                    && cur.updated_ms == s.updated_ms
+                    && cur.is_pinned == pins.contains_key(&s.id)
+                    && cur.is_running == self.running_by_session.contains(&s.id)
+            });
         if unchanged {
             return;
         }
@@ -2799,6 +2835,8 @@ impl Store {
 
     /// Refills the grid from a workspace's saved open chats; sessions already tiled are skipped.
     fn restore_open_tiles(&mut self, ws_key: &str, wanted: Vec<String>, cx: &mut Context<Self>) {
+        // tiles are (re)opening: the restore banner has served its purpose
+        self.show_restore_prompt = false;
         let selected = self.selected_workspace.as_deref() == Some(ws_key);
         let mut added = 0;
         for id in wanted {
@@ -2832,8 +2870,14 @@ impl Store {
 
     fn flush_pending_permissions(&mut self, session_id: &str, cx: &mut Context<Self>) {
         if let Some(pending) = self.pending_by_session.remove(session_id) {
+            // snapshot remaining countdowns first (items move under a &mut self borrow)
+            let lefts: Vec<Option<i64>> = pending.iter().map(|i| self.countdowns.get(&i.id).copied()).collect();
             if let Some(tile) = self.tile_for_session_mut(session_id) {
-                for item in pending {
+                for (mut item, left) in pending.into_iter().zip(lefts) {
+                    // the countdown ran while the card was parked — show what's left
+                    if let Some(left) = left {
+                        item.auto_countdown = Some(left);
+                    }
                     tile.items.push(ChatItem::Permission(item));
                 }
             }
@@ -3049,6 +3093,7 @@ impl Store {
         if !self.runtimes.contains_key(ws_path) {
             self.start_workspace(ws_path, cx);
             self.pending_opens.push((ws_path.to_string(), session_id.to_string()));
+            cx.notify();
             return;
         }
         self.net.send(NetCommand::Request {
@@ -3257,9 +3302,15 @@ impl Store {
             return;
         }
         if self.auto_allow {
-            let range = self.auto_allow_range();
-            let seconds = range.0 + (rand_0_to(range.1 - range.0));
-            self.countdowns.insert(id.clone(), seconds);
+            if self.settings.auto_allow_instant {
+                // "allow immediately": answer on the next tick instead of
+                // drawing a random wait
+                self.countdowns.insert(id.clone(), 0);
+            } else {
+                let range = self.auto_allow_range();
+                let seconds = range.0 + (rand_0_to(range.1 - range.0));
+                self.countdowns.insert(id.clone(), seconds);
+            }
         }
         let auto_allow = self.auto_allow;
         if let Some(tile_key) = self.tile_by_session.get(&owner).cloned() {
@@ -3312,7 +3363,7 @@ impl Store {
         for id in due {
             // only still-pending items fire
             if self.find_permission(&id).map(|p| p.is_pending()).unwrap_or(false) && self.auto_allow {
-                self.respond_permission(&id, "always", true);
+                self.respond_permission(&id, "always", true, cx);
             }
         }
         // refresh the visible countdown labels
@@ -3348,7 +3399,7 @@ impl Store {
         None
     }
 
-    pub fn respond_permission(&mut self, permission_id: &str, response: &str, is_auto: bool) {
+    pub fn respond_permission(&mut self, permission_id: &str, response: &str, is_auto: bool, cx: &mut Context<Self>) {
         // close the buttons immediately so a slow reply cannot be clicked twice
         let mut session_id = None;
         let mut is_v2 = false;
@@ -3381,6 +3432,12 @@ impl Store {
             self.resolve_permission(permission_id, "server unavailable".to_string(), is_auto);
             return;
         };
+        // a stopped/failed workspace would swallow the request silently and the
+        // card would sit at "sending…" forever
+        if !self.runtimes.contains_key(&ws_key) {
+            self.resolve_permission(permission_id, "server unavailable".to_string(), is_auto);
+            return;
+        }
         let response = response.to_string();
         let request = if is_v2 {
             ApiRequest::ReplyV2 { request_id: permission_id.to_string(), response }
@@ -3392,6 +3449,8 @@ impl Store {
             }
         };
         self.net.send(NetCommand::Request { ws_key, request });
+        // the card flipped to "sending…" — repaint now, not on the next event
+        cx.notify();
     }
 
     fn resolve_permission(&mut self, permission_id: &str, label: String, is_auto: bool) {
@@ -3613,7 +3672,15 @@ impl Store {
     // ---- question interaction ----
 
     /// Toggles a question option: single-select clears siblings, multi keeps them.
-    pub fn toggle_question_option(&mut self, tile_key: &str, question_id: &str, qi: usize, oi: usize, multiple: bool) {
+    pub fn toggle_question_option(
+        &mut self,
+        tile_key: &str,
+        question_id: &str,
+        qi: usize,
+        oi: usize,
+        multiple: bool,
+        cx: &mut Context<Self>,
+    ) {
         let Some(tile) = self.tile_by_key_mut(tile_key) else { return };
         for item in &mut tile.items {
             if let ChatItem::Question(q) = item {
@@ -3630,9 +3697,10 @@ impl Store {
                 }
             }
         }
+        cx.notify();
     }
 
-    pub fn set_question_custom(&mut self, tile_key: &str, question_id: &str, qi: usize, text: String) {
+    pub fn set_question_custom(&mut self, tile_key: &str, question_id: &str, qi: usize, text: String, cx: &mut Context<Self>) {
         let Some(tile) = self.tile_by_key_mut(tile_key) else { return };
         for item in &mut tile.items {
             if let ChatItem::Question(q) = item {
@@ -3643,6 +3711,7 @@ impl Store {
                 }
             }
         }
+        cx.notify();
     }
 
     // ---- attachments ----
@@ -3848,7 +3917,16 @@ fn read_error(data: &serde_json::Value) -> String {
         } else {
             format!("Error: {message}")
         };
-        return if text.len() > 600 { format!("{}…", &text[..600]) } else { text };
+        return if text.len() > 600 {
+            // cut on a char boundary — byte 600 can split a multibyte char
+            let mut cut = 600;
+            while cut > 0 && !text.is_char_boundary(cut) {
+                cut -= 1;
+            }
+            format!("{}…", &text[..cut])
+        } else {
+            text
+        };
     }
     "Session error.".into()
 }

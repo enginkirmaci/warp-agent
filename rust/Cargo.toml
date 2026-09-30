@@ -9,8 +9,25 @@ name = "warp-agent"
 path = "src/main.rs"
 
 [dependencies]
-gpui = { git = "https://github.com/zed-industries/zed" }
-gpui_platform = { git = "https://github.com/zed-industries/zed", features = ["wayland", "x11"] }
+# gpui-pre: crates.io snapshots of zed's gpui, pinned to the exact rev
+# gpui-kit 0.7 is built against (=zed@1a28cff). Bump together with gpui-kit.
+gpui = { package = "gpui-pre", version = "=0.3.7" }
+gpui_platform = { package = "gpui-pre-platform", version = "=0.3.7", features = ["wayland", "x11"] }
+gpui-kit = { version = "0.7", features = [
+    # tree-sitter grammars for chat code-block highlighting
+    "tree-sitter-bash",
+    "tree-sitter-c",
+    "tree-sitter-cpp",
+    "tree-sitter-css",
+    "tree-sitter-go",
+    "tree-sitter-html",
+    "tree-sitter-python",
+    "tree-sitter-rust",
+    "tree-sitter-toml",
+    "tree-sitter-tsx",
+    "tree-sitter-typescript",
+    "tree-sitter-yaml",
+] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "time", "net", "io-util", "sync"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 serde = { version = "1", features = ["derive"] }
@@ -18,6 +35,7 @@ serde_json = "1"
 async-channel = "2"
 futures-util = "0.3"
 smallvec = "1"
+unicode-segmentation = "1"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp"] }
 anyhow = "1"
 rand = "0.9"

@@ -1,6 +1,6 @@
 # WarpAgent — Rust + GPUI
 
-A full port of the Avalonia WarpAgent client to Rust and [GPUI](https://github.com/zed-industries/zed) (Zed's UI framework). Same feature surface, same `~/.warp-agent` state files (settings.json / ui.json are read and written interchangeably with the C# build), same opencode REST + SSE surface (verified against opencode 1.18.31).
+WarpAgent on Rust + [GPUI](https://github.com/zed-industries/zed) (Zed's UI framework) — the Avalonia prototype ported line-for-line, now the only client. Same feature surface, same `~/.warp-agent` state files, same opencode REST + SSE surface (verified against opencode 1.18.32).
 
 ## Run
 
@@ -27,9 +27,10 @@ First build fetches GPUI from the zed git repo and compiles for a few minutes. N
 | `src/services.rs` | TerminalLauncher + SystemFontScale | `Open in opencode` terminal probe (alacritty→…), gsettings text-scale follower |
 | `src/settings.rs`, `src/paths.rs`, `src/logging.rs` | AppSettings/UiState/AppPaths/AppLogging | Same files, same defaults, legacy migration |
 
-## Known gaps vs the C# build
+## Known gaps
 
 - Hover tooltips are not rendered (the ShowToolTips setting is stored; balloons are a follow-up).
+- Hover tooltips are not rendered; the transcript is not virtualized.
 - The composer input has no text selection yet (no select-all/copy inside the field; message copy via right-click menus works).
 - IME composition is not wired (dead-key/CJK input in the composer falls back to plain key events).
 - Transcript is not virtualized (the C# one wasn't either).

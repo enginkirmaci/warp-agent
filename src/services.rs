@@ -38,6 +38,7 @@ pub fn launch_in_terminal(folder: &str, executable: &str) -> Result<(), String> 
     Err("No terminal emulator found on PATH.".into())
 }
 
+#[cfg(unix)]
 fn resolve_on_path(name: &str) -> Option<std::path::PathBuf> {
     let path_env = std::env::var_os("PATH")?;
     use std::os::unix::fs::PermissionsExt;
@@ -46,6 +47,23 @@ fn resolve_on_path(name: &str) -> Option<std::path::PathBuf> {
         if let Ok(metadata) = std::fs::metadata(&full) {
             if metadata.is_file() && metadata.permissions().mode() & 0o111 != 0 {
                 return Some(full);
+            }
+        }
+    }
+    None
+}
+
+/// Windows has no exec bit; executables are found by their PATHEXT suffix.
+#[cfg(windows)]
+fn resolve_on_path(name: &str) -> Option<std::path::PathBuf> {
+    let path_env = std::env::var_os("PATH")?;
+    let exts = std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".into());
+    for dir in std::env::split_paths(&path_env) {
+        let mut candidates = vec![dir.join(name)];
+        candidates.extend(exts.split(';').map(|ext| dir.join(format!("{name}{ext}"))));
+        for candidate in candidates {
+            if candidate.is_file() {
+                return Some(candidate);
             }
         }
     }

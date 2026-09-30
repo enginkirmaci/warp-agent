@@ -25,7 +25,7 @@ pub fn render_diff(text: &str, font_detail: f32, window: &mut Window) -> AnyElem
     }
     let base_style = window.text_style();
     let mut style = base_style.clone();
-    style.font_family = theme::CODE_FONT.into();
+    style.font_family = theme::code_font().into();
     style.font_size = AbsoluteLength::Pixels(px(font_detail));
 
     let mut combined = String::new();

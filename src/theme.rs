@@ -14,6 +14,50 @@ const fn c(hex: u32) -> Rgba {
     }
 }
 
+// ---- font resolution -------------------------------------------------------
+// The brand families (Inter, DejaVu Sans Mono) are not installed everywhere;
+// naming a missing family makes gpui fall back per text run and skips the
+// kit's own probe (an explicitly-set family is used as-is). Resolve once at
+// startup against the real font list so window, kit and code blocks agree.
+
+const UI_FONT_CANDIDATES: &[&str] = &["Inter", "Adwaita Sans", "Segoe UI", "SF Pro Text", "Cantarell", "DejaVu Sans"];
+const CODE_FONT_CANDIDATES: &[&str] = &["DejaVu Sans Mono", "Noto Sans Mono", "JetBrainsMono Nerd Font", "Liberation Mono", "Cascadia Mono", "Menlo", "Consolas", "Monaco"];
+/// Virtual family gpui always resolves; the last resort for both stacks.
+const SYSTEM_FONT: &str = ".SystemUIFont";
+
+static UI_FONT_RESOLVED: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+static CODE_FONT_RESOLVED: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// Pick the first installed family per stack; call once at startup, before
+/// any text is laid out.
+pub fn resolve_fonts(cx: &App) {
+    let installed = cx.text_system().all_font_names();
+    let pick = |candidates: &[&str]| {
+        candidates
+            .iter()
+            .find(|c| installed.iter().any(|name| name == *c))
+            .map(|c| c.to_string())
+            .unwrap_or_else(|| SYSTEM_FONT.to_string())
+    };
+    let _ = UI_FONT_RESOLVED.set(pick(UI_FONT_CANDIDATES));
+    let _ = CODE_FONT_RESOLVED.set(pick(CODE_FONT_CANDIDATES));
+    tracing::info!(
+        "UI font {:?}, code font {:?}",
+        ui_font(),
+        code_font()
+    );
+}
+
+/// The UI family to lay everything out in.
+pub fn ui_font() -> &'static str {
+    UI_FONT_RESOLVED.get().map(|s| s.as_str()).unwrap_or(FONT_UI)
+}
+
+/// The mono family for code chips, details folds and diffs.
+pub fn code_font() -> &'static str {
+    CODE_FONT_RESOLVED.get().map(|s| s.as_str()).unwrap_or(CODE_FONT)
+}
+
 // ---- gpui-kit theme mapping ------------------------------------------------
 
 /// Map the WarpAgent palette onto gpui-kit's shadcn-style theme tokens so kit
@@ -22,6 +66,7 @@ const fn c(hex: u32) -> Rgba {
 pub fn apply_kit_theme(cx: &mut App) {
     use gpui_kit::component::{Theme, ThemeMode};
 
+    resolve_fonts(cx);
     Theme::update(cx, |t| {
         t.mode = ThemeMode::Dark;
         t.background = WINDOW_CHROME.into();
@@ -52,8 +97,8 @@ pub fn apply_kit_theme(cx: &mut App) {
         t.radius = gpui::px(8.);
         t.radius_lg = gpui::px(12.);
 
-        t.font_family = gpui::SharedString::from("Inter");
-        t.mono_font_family = gpui::SharedString::from(CODE_FONT);
+        t.font_family = gpui::SharedString::from(ui_font());
+        t.mono_font_family = gpui::SharedString::from(code_font());
     });
 }
 

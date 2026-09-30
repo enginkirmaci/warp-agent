@@ -8,7 +8,6 @@ permission / question cards, and per-chat message queues.
 ## Run
 
 ```sh
-cd rust
 cargo run            # debug build
 cargo run --release  # release build (LTO, stripped)
 ```
@@ -17,14 +16,16 @@ First build fetches GPUI from the zed git repo and takes a while. Needs the
 usual Wayland/Vulkan dev packages. State (settings.json, ui.json, logs, the
 built-in General workspace) lives in `~/.warp-agent`.
 
-## Desktop entry
+## Package
 
-```sh
-packaging/linux/install.sh
-```
-
-Installs `warp-agent.desktop` + hicolor icons so the launcher shows the app;
-`Exec` points at `rust/target/debug/warp-agent`.
+- Linux: `packaging/linux/install.sh` installs the desktop entry + hicolor
+  icons so the launcher shows the app; `Exec` points at
+  `target/debug/warp-agent`.
+- Windows (build on a Windows box — GPUI has no Linux→Windows cross build):
+  `packaging/windows/build.ps1` produces a portable zip under
+  `packaging/windows/out`; `-Installer` also compiles the Inno Setup setup.exe.
+  The app icon is embedded into the exe by `build.rs` from
+  `packaging/windows/warp-agent.ico`.
 
 ## Features
 
@@ -60,15 +61,26 @@ Installs `warp-agent.desktop` + hicolor icons so the launcher shows the app;
 
 ## Layout
 
-```
-rust/            the app
-  src/store/     all app logic (single Store entity)
-  src/oc.rs      opencode spawn/attach + REST/SSE on a dedicated tokio thread
-  src/ui/        GPUI views: window, tile, markdown, diff, input, settings
-  src/theme.rs   palette, accent presets, font tokens
-  assets/        icons + spark logo (embedded)
-packaging/linux/ desktop entry + icon install script
-```
+| Module | Ported from | Notes |
+|---|---|---|
+| `src/store/mod.rs` | MainViewModel + ChatTileViewModel + ChatItems | All app logic: workspaces (one `opencode serve` each), the shared tile grid, transcripts, queue w/ Steer/Edit/Remove, permission asks + auto-allow countdowns (lunch/off-hours ranges), `question` tool cards, subagent tracking, prompt history, restore banner |
+| `src/oc.rs` | OpenCodeServer + OpenCodeApiClient | Serve spawn/attach, OPENCODE_CONFIG_CONTENT ask-forcing, free-port pick, 25 s health wait; REST + SSE on a dedicated tokio thread talking to the UI via channels |
+| `src/theme.rs` | App.xaml resources | The whole palette, accent presets (green/amber/salmon/4 grays), font/icon size tokens with compact/normal/large × system factor |
+| `src/ui/markdown.rs` | MarkdownViewerKit.Avalonia **(replaced)** | Own renderer: headings, bold/italic, inline code, fenced code with syntax highlighting + copy button, lists, links (clickable), tables, quotes, rules |
+| `src/ui/highlight.rs` | MarkdownTextBlock highlighter | Keyword/string/comment/number passes per language family |
+| `src/ui/diff.rs` | DiffTextBlock | GitHub-style unified diff: line-number gutter, add/del tints, hunk separators |
+| `src/ui/input.rs` | — (gpui has no editor) | Multi-line composer input: wrapping, caret, click-to-position, Up/Down history hooks, Enter/Shift+Enter, Ctrl+V image paste hook |
+| `src/ui/tile.rs` | ChatTile.axaml(+cs) | Transcript item cards (user/assistant/reasoning/tool/image/permission/question/note), tasks+agents flyout, model/variant/agent pickers, queue rows, attachments |
+| `src/ui/window.rs` | MainWindow.axaml(+cs) | Titlebar (drag/zoom/close/toggle), workspace + chat tree with context menus, drag-resizable sidebar, settings page, restore banner, error overlay |
+| `src/services.rs` | TerminalLauncher + SystemFontScale | `Open in opencode` terminal probe (alacritty→…), gsettings text-scale follower |
+| `src/settings.rs`, `src/paths.rs`, `src/logging.rs` | AppSettings/UiState/AppPaths/AppLogging | Same files, same defaults, legacy migration |
+| `assets/` | — | Icons + spark logo (embedded) |
 
-See `rust/README.md` for the module map and known gaps. Verified against
-opencode 1.18.32.
+Verified against opencode 1.18.32.
+
+## Known gaps
+
+- Hover tooltips are not rendered (the ShowToolTips setting is stored; balloons are a follow-up).
+- The transcript is not virtualized (the C# one wasn't either).
+- The composer input has no text selection yet (no select-all/copy inside the field; message copy via right-click menus works).
+- IME composition is not wired (dead-key/CJK input in the composer falls back to plain key events).

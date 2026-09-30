@@ -180,7 +180,7 @@ impl Render for WarpWindow {
             .flex_col()
             .bg(theme::WINDOW_CHROME)
             .text_color(theme::TEXT)
-            .font_family("Inter")
+            .font_family(theme::ui_font())
             .child(self.render_titlebar(cx))
             .child(content);
 
@@ -367,7 +367,7 @@ impl WarpWindow {
                             .text_size(px(fonts.font_small))
                             .italic()
                             .text_color(theme::TEXT_MUTED)
-                            .opacity(0.5)
+                            .opacity(0.7)
                             .child("No chats yet"),
                     );
                 }
@@ -793,7 +793,7 @@ impl WarpWindow {
             .unwrap_or_else(|| div().into_any_element())
     }
 
-    fn small_button(&self, label: &str, on_click: impl Fn(&mut App) + 'static) -> gpui::AnyElement {
+    fn small_button(&self, label: &str, fonts: &theme::FontTokens, on_click: impl Fn(&mut App) + 'static) -> gpui::AnyElement {
         div()
             .id(gpui::ElementId::NamedInteger("sbtn".into(), TileView::hash(label)))
             .px_3()
@@ -802,7 +802,7 @@ impl WarpWindow {
             .rounded_lg()
             .border_1()
             .border_color(theme::HAIRLINE)
-            .text_size(px(12.5))
+            .text_size(px(fonts.font_body))
             .text_color(theme::TEXT)
             .cursor_pointer()
             .hover(|s| s.bg(theme::HOVER))
@@ -872,7 +872,7 @@ impl WarpWindow {
                 .flex()
                 .items_center()
                 .justify_center()
-                .child(crate::ui::icon("icons/check.svg", px(9.), theme::SURFACE))
+                .child(crate::ui::icon("icons/check.svg", px(fonts.icon_nano), theme::SURFACE))
                 .into_any_element()
         } else {
             div().size(px(14.)).rounded_sm().border_1().border_color(theme::TEXT_MUTED).into_any_element()
@@ -1006,15 +1006,15 @@ impl WarpWindow {
                         .flex_col()
                         .items_center()
                         .justify_center()
-                        .child(div().mb_4().child(crate::ui::icon("icons/spark.svg", px(56.), theme::TEXT)))
-                        .child(
-                            div()
-                                .text_size(px(fonts.font_small))
-                                .italic()
-                                .text_color(theme::TEXT_MUTED)
-                                .opacity(0.5)
-                                .child(hint),
-                        ),
+                            .child(div().mb_4().child(crate::ui::icon("icons/spark.svg", px(56.), theme::TEXT)))
+                            .child(
+                                div()
+                                    .text_size(px(fonts.font_small))
+                                    .italic()
+                                    .text_color(theme::TEXT_MUTED)
+                                    .opacity(0.7)
+                                    .child(hint),
+                            ),
                 );
             }
         }
@@ -1047,13 +1047,13 @@ impl WarpWindow {
                             .text_color(theme::TEXT)
                             .child(SharedString::from(restore_text.clone())),
                     )
-                    .child(self.small_button("Restore", {
+                    .child(self.small_button("Restore", &fonts, {
                         let store = store_handle.clone();
                         move |cx| {
                             store.update(cx, |s, cx| s.restore_previous_session(cx));
                         }
                     }))
-                    .child(self.small_button("Ignore", {
+                    .child(self.small_button("Ignore", &fonts, {
                         let store = store_handle.clone();
                         move |cx| {
                             store.update(cx, |s, cx| s.dismiss_restore_prompt(cx));
@@ -1111,7 +1111,7 @@ impl WarpWindow {
                                 .text_color(theme::TEXT)
                                 .child("Settings"),
                         )
-                        .child(self.small_button("Back", {
+                        .child(self.small_button("Back", &fonts, {
                             move |cx| {
                                 close_store.update(cx, |s, _| s.is_settings_open = false);
                             }
@@ -1230,7 +1230,7 @@ impl WarpWindow {
                                 }),
                         ),
                 )
-                .child(self.small_button("Save", {
+                .child(self.small_button("Save", &fonts, {
                     let fields = self.settings_fields.clone();
                     let buffers = self.settings_buffers.clone();
                     move |cx| {
@@ -1338,7 +1338,7 @@ impl WarpWindow {
                             .max_h(px(220.))
                             .overflow_y_scroll()
                             .text_size(px(fonts.font_detail))
-                            .font_family(theme::CODE_FONT)
+                            .font_family(theme::code_font())
                             .text_color(theme::TEXT)
                             .opacity(0.75)
                             .child(SharedString::from(details.clone())),
@@ -1356,14 +1356,14 @@ impl WarpWindow {
                             .flex()
                             .justify_end()
                             .gap_2()
-                            .child(self.small_button("Copy details", {
+                            .child(self.small_button("Copy details", &fonts, {
                                 let store = store_handle.clone();
                                 move |cx| {
                                     let text = store.read(cx).error_copy_text();
                                     cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
                                 }
                             }))
-                            .child(self.small_button("Continue", {
+                            .child(self.small_button("Continue", &fonts, {
                                 let store = store_handle.clone();
                                 move |cx| {
                                     store.update(cx, |s, _| s.close_error_report());

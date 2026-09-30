@@ -1,6 +1,9 @@
 # Rust build artifacts
-/rust/target/
+/target/
 **/*.rs.bk
+
+# Windows packaging output
+/packaging/windows/out/
 
 # ZCode workspace
 .zcode/

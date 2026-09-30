@@ -1,4 +1,6 @@
 //! WarpAgent — a tile-grid chat client for opencode serve, on GPUI.
+// no console window behind the packaged Windows exe; debug builds keep it for logs
+#![cfg_attr(all(target_os = "windows", not(debug_assertions)), windows_subsystem = "windows")]
 
 mod assets;
 mod logging;

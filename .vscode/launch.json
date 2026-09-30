@@ -5,9 +5,9 @@
             "name": "Rust: warp-agent (debug)",
             "type": "lldb",
             "request": "launch",
-            "program": "${workspaceFolder}/rust/target/debug/warp-agent",
+            "program": "${workspaceFolder}/target/debug/warp-agent",
             "args": [],
-            "cwd": "${workspaceFolder}/rust",
+            "cwd": "${workspaceFolder}",
             "preLaunchTask": "cargo build (warp-agent)"
         }
     ]

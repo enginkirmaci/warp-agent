@@ -2,7 +2,7 @@
 Type=Application
 Name=Warp Agent
 Comment=Chat client over opencode serve
-Exec=$HOME/Developments/warp-agent/rust/target/debug/warp-agent
+Exec=$HOME/Developments/warp-agent/target/debug/warp-agent
 Icon=warpagent
 Terminal=false
 Categories=Development;

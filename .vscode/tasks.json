@@ -6,7 +6,7 @@
             "type": "shell",
             "command": "cargo",
             "args": ["build"],
-            "options": { "cwd": "${workspaceFolder}/rust" },
+            "options": { "cwd": "${workspaceFolder}" },
             "group": { "kind": "build", "isDefault": true },
             "problemMatcher": "$rustc"
         }

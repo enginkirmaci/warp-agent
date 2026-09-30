@@ -55,11 +55,12 @@ fn dirs_home() -> PathBuf {
 }
 
 fn dirs_home_opt() -> Option<PathBuf> {
-    // XDG user dirs; no external home-dir crate needed
+    // $HOME on unix; Windows only defines USERPROFILE
     std::env::var_os("HOME")
         .filter(|h| !h.is_empty())
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .filter(|h| !h.is_empty())
         .map(PathBuf::from)
-        .or_else(|| None)
 }
 
 pub fn ensure_dir(path: &PathBuf) -> io::Result<()> {

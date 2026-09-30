@@ -7,7 +7,7 @@ use crate::ui::diff::render_diff;
 use crate::ui::markdown::render_markdown;
 use gpui::prelude::*;
 use gpui::{
-    div, img, px, actions, App, AnimationExt, Context, Entity, Focusable, ImageFormat,
+    canvas, div, img, px, actions, App, AnimationExt, Context, Entity, Focusable, ImageFormat,
     MouseButton, Pixels, Render, ScrollHandle, SharedString, Window,
 };
 use gpui_kit::component::input::{
@@ -50,12 +50,23 @@ pub struct TileView {
     last_max: Pixels,
     expanded: HashSet<String>, // fold state by item id
     picker: Option<PickerKind>,
-    menu: Option<ContextMenu>,
+    menu: Option<TileMenu>,
+    /// window-space bounds of the tile root, captured each paint; converts
+    /// click positions into tile-local menu coordinates
+    origin: std::rc::Rc<std::cell::Cell<(f32, f32, f32, f32)>>,
     composer: Entity<TextareaState>,
     question_inputs: HashMap<String, Entity<InputState>>,
     last_composer_text: String,
     flyout_open: bool,
     last_spring_seen: bool,
+}
+
+/// A context menu request: what to do plus the tile-local anchor point.
+#[derive(Clone)]
+struct TileMenu {
+    kind: ContextMenu,
+    x: f32,
+    y: f32,
 }
 
 impl TileView {
@@ -113,12 +124,21 @@ impl TileView {
             expanded: HashSet::new(),
             picker: None,
             menu: None,
+            origin: std::rc::Rc::new(std::cell::Cell::new((0., 0., 0., 0.))),
             composer,
             question_inputs: HashMap::new(),
             last_composer_text: String::new(),
             flyout_open: false,
             last_spring_seen: false,
         }
+    }
+
+    /// Window click position → tile-local menu anchor, kept inside the tile.
+    fn menu_anchor(&self, event: &gpui::MouseDownEvent) -> (f32, f32) {
+        let (ox, oy, w, h) = self.origin.get();
+        let x = (event.position.x.as_f32() - ox).clamp(8., (w - 185.).max(8.));
+        let y = (event.position.y.as_f32() - oy).clamp(8., (h - 64.).max(8.));
+        (x, y)
     }
 
     /// File attach via the platform picker; files over 512 KB are skipped like the C# app.
@@ -185,8 +205,9 @@ impl TileView {
                             .px_3()
                             .on_mouse_down(MouseButton::Right, {
                                 let menu_text = text.clone();
-                                cx.listener(move |this, _, _, _| {
-                                    this.menu = Some(ContextMenu::Copy(menu_text.clone()));
+                                cx.listener(move |this, event: &gpui::MouseDownEvent, _, _| {
+                                    let (x, y) = this.menu_anchor(event);
+                                    this.menu = Some(TileMenu { kind: ContextMenu::Copy(menu_text.clone()), x, y });
                                 })
                             })
                             .flex()
@@ -307,10 +328,15 @@ impl TileView {
                             .flex_col()
                             .gap_1()
                             .on_mouse_down(MouseButton::Right, {
-                                cx.listener(move |this, _, _, _| {
-                                    this.menu = Some(ContextMenu::CopyImage {
-                                        file_name: menu_name.clone(),
-                                        png: menu_png.clone(),
+                                cx.listener(move |this, event: &gpui::MouseDownEvent, _, _| {
+                                    let (x, y) = this.menu_anchor(event);
+                                    this.menu = Some(TileMenu {
+                                        kind: ContextMenu::CopyImage {
+                                            file_name: menu_name.clone(),
+                                            png: menu_png.clone(),
+                                        },
+                                        x,
+                                        y,
                                     });
                                 })
                             })
@@ -439,7 +465,7 @@ impl TileView {
                             .py_0p5()
                             .bg(theme::CHIP)
                             .text_size(px(fonts.font_xsmall))
-                            .font_family(theme::CODE_FONT)
+                            .font_family(theme::code_font())
                             .text_color(theme::TEXT)
                             .child(SharedString::from(tool.tool.clone())),
                     )
@@ -506,7 +532,7 @@ impl TileView {
                                 .max_h(px(260.))
                                 .overflow_y_scroll()
                                 .text_size(px(fonts.font_detail))
-                                .font_family(theme::CODE_FONT)
+                                .font_family(theme::code_font())
                                 .text_color(theme::TEXT)
                                 .opacity(0.75)
                                 .child(SharedString::from(details)),
@@ -553,7 +579,7 @@ impl TileView {
             .child(
                 crate::ui::icon(
                     if open { "icons/chevron-down.svg" } else { "icons/chevron-right.svg" },
-                    px(11.),
+                    px(fonts.icon_xsmall),
                     theme::TEXT_MUTED,
                 ),
             )
@@ -626,7 +652,7 @@ impl TileView {
                             .child(
                                 div()
                                     .text_size(px(fonts.font_detail))
-                                    .font_family(theme::CODE_FONT)
+                                    .font_family(theme::code_font())
                                     .text_color(theme::TEXT)
                                     .opacity(0.9)
                                     .child(SharedString::from(perm.detail.clone())),
@@ -643,21 +669,21 @@ impl TileView {
                                         .flex()
                                         .items_center()
                                         .gap_2()
-                                        .child(self.pill_button("Allow", true, accent, {
+                                        .child(self.pill_button("Allow", true, fonts, accent, {
                                             let store = store.clone();
                                             let id = id.clone();
                                             move |cx| {
                                                 store.update(cx, |s, cx| s.respond_permission(&id, "once", false, cx));
                                             }
                                         }))
-                                        .child(self.pill_button("Always", false, accent, {
+                                        .child(self.pill_button("Always", false, fonts, accent, {
                                             let store = store.clone();
                                             let id = id.clone();
                                             move |cx| {
                                                 store.update(cx, |s, cx| s.respond_permission(&id, "always", false, cx));
                                             }
                                         }))
-                                        .child(self.pill_button("Deny", false, accent, {
+                                        .child(self.pill_button("Deny", false, fonts, accent, {
                                             let store = store.clone();
                                             let id = id.clone();
                                             move |cx| {
@@ -710,6 +736,7 @@ impl TileView {
         &self,
         label: &str,
         filled: bool,
+        fonts: theme::FontTokens,
         accent: gpui::Rgba,
         on_click: impl Fn(&mut App) + 'static,
     ) -> gpui::AnyElement {
@@ -723,7 +750,7 @@ impl TileView {
             .px_3()
             .py_1()
             .rounded_md()
-            .text_size(px(12.))
+            .text_size(px(fonts.font_body))
             .font_weight(gpui::FontWeight::SEMIBOLD)
             .bg(bg)
             .text_color(fg)
@@ -787,7 +814,7 @@ impl TileView {
                             .px_3()
                             .py_1()
                             .rounded_md()
-                            .text_size(px(12.))
+                            .text_size(px(fonts.font_body))
                             .bg(accent)
                             .text_color(theme::ON_ACCENT)
                             .font_weight(gpui::FontWeight::SEMIBOLD)
@@ -953,7 +980,7 @@ impl TileView {
                                     .flex()
                                     .items_center()
                                     .justify_center()
-                                    .child(crate::ui::icon("icons/check.svg", px(9.), theme::SURFACE))
+                                    .child(crate::ui::icon("icons/check.svg", px(fonts.icon_nano), theme::SURFACE))
                                     .into_any_element()
                             } else {
                                 div()
@@ -1330,7 +1357,13 @@ impl Render for TileView {
                         this.picker = if matches!(this.picker, Some(PickerKind::Agent)) { None } else { Some(PickerKind::Agent) };
                         cx.notify();
                     }))
-                    .child(div().text_size(px_size(fonts.font_small)).child(SharedString::from(snap.selected_agent.clone())))
+                    .child(div().text_size(px_size(fonts.font_small)).child(SharedString::from(
+                        if snap.selected_agent.is_empty() {
+                            crate::store::DEFAULT_AGENT_ENTRY.to_string()
+                        } else {
+                            snap.selected_agent.clone()
+                        },
+                    )))
                     .child(crate::ui::icon("icons/chevron-down.svg", px_size(fonts.icon_tiny), theme::TEXT_MUTED)),
             );
         }
@@ -1351,7 +1384,13 @@ impl Render for TileView {
                         this.picker = if matches!(this.picker, Some(PickerKind::Model)) { None } else { Some(PickerKind::Model) };
                         cx.notify();
                     }))
-                    .child(div().text_size(px_size(fonts.font_small)).child(SharedString::from(snap.selected_model_short.clone())))
+                    .child(div().text_size(px_size(fonts.font_small)).child(SharedString::from(
+                        if snap.selected_model_short.is_empty() {
+                            crate::store::DEFAULT_MODEL_ENTRY.to_string()
+                        } else {
+                            snap.selected_model_short.clone()
+                        },
+                    )))
                     .child(crate::ui::icon("icons/chevron-down.svg", px_size(fonts.icon_tiny), theme::TEXT_MUTED)),
             )
             .child(
@@ -1474,48 +1513,37 @@ impl Render for TileView {
         let close_key = self.key.clone();
 
         let mut header_right = div().flex().items_center().gap_1p5();
-        header_right = header_right
-            .child(
-                div()
-                    .max_w(px(220.))
-                    .text_size(px_size(fonts.font_micro))
-                    .text_color(theme::TEXT_MUTED)
-                    .opacity(0.5)
-                    .truncate()
-                    .child(SharedString::from(snap.model.clone())),
-            )
-            .child(
-                div()
-                    .text_size(px_size(fonts.font_micro))
-                    .text_color(theme::TEXT_MUTED)
-                    .opacity(0.3)
-                    .child("·"),
-            )
-            .child(
-                div()
-                    .max_w(px(120.))
-                    .text_size(px_size(fonts.font_micro))
-                    .text_color(theme::TEXT_MUTED)
-                    .opacity(0.5)
-                    .truncate()
-                    .child(SharedString::from(snap.variant.clone())),
-            );
+        // meta readout: model · variant · context, with separators only between
+        // values that are actually present
+        let mut meta: Vec<(SharedString, f32)> = Vec::new();
+        if !snap.model.is_empty() {
+            meta.push((SharedString::from(snap.model.clone()), 220.));
+        }
+        if !snap.variant.is_empty() {
+            meta.push((SharedString::from(snap.variant.clone()), 120.));
+        }
         if snap.has_ctx {
-            header_right = header_right
-                .child(
+            meta.push((SharedString::from(snap.ctx.clone()), 160.));
+        }
+        for (i, (text, max_w)) in meta.iter().enumerate() {
+            if i > 0 {
+                header_right = header_right.child(
                     div()
                         .text_size(px_size(fonts.font_micro))
                         .text_color(theme::TEXT_MUTED)
                         .opacity(0.3)
                         .child("·"),
-                )
-                .child(
-                    div()
-                        .text_size(px_size(fonts.font_micro))
-                        .text_color(theme::TEXT_MUTED)
-                        .opacity(0.5)
-                        .child(SharedString::from(snap.ctx.clone())),
                 );
+            }
+            header_right = header_right.child(
+                div()
+                    .max_w(px(*max_w))
+                    .text_size(px_size(fonts.font_micro))
+                    .text_color(theme::TEXT_MUTED)
+                    .opacity(0.5)
+                    .truncate()
+                    .child(text.clone()),
+            );
         }
         if snap.has_tasks_or_agents {
             header_right = header_right.child(
@@ -1832,13 +1860,13 @@ impl Render for TileView {
         let menu_owner_key = self.key.clone();
         let mut menu_el = div();
         if let Some(menu) = self.menu.clone() {
-            let label = match &menu {
+            let label = match &menu.kind {
                 ContextMenu::Copy(_) => "Copy",
                 ContextMenu::EditInput(_) => "Edit in input",
                 ContextMenu::CopyImage { .. } => "Copy image",
             };
             let store_handle = self.store.clone();
-            let menu_clone = menu.clone();
+            let menu_clone = menu.kind.clone();
             // click-elsewhere catcher closes the menu (the row's own click
             // still wins: gpui fires mouse-down into the catcher, the menu
             // unmounts next frame, after the row's on_click has run)
@@ -1855,8 +1883,8 @@ impl Render for TileView {
                 .child(
                 div()
                     .absolute()
-                    .bottom(px(96.))
-                    .left(px(160.))
+                    .left(px(menu.x))
+                    .top(px(menu.y))
                     .child(
                 div()
                     .rounded_lg()
@@ -1969,6 +1997,25 @@ impl Render for TileView {
                 move |_, _, cx| {
                     store.update(cx, |s, cx| s.focus_tile(&key, cx));
                 }
+            })
+            // paint-phase capture of the tile's window bounds, so right-click
+            // positions can be turned into tile-local context-menu anchors
+            // (same paint-listener pattern as the sidebar splitter)
+            .child({
+                let origin = self.origin.clone();
+                canvas(
+                    |_, _, _| {},
+                    move |bounds, _, _, _| {
+                        origin.set((
+                            bounds.origin.x.as_f32(),
+                            bounds.origin.y.as_f32(),
+                            bounds.size.width.as_f32(),
+                            bounds.size.height.as_f32(),
+                        ));
+                    },
+                )
+                .absolute()
+                .size_full()
             })
             .child(header)
             .child(div().h(px(1.)).mt_1p5().mx_2p5().bg(theme::TILE_HEADER_SEPARATOR))

@@ -841,21 +841,12 @@ pub fn read_token_total(info: &serde_json::Value) -> i64 {
     sum("input") + sum("output") + sum("reasoning") + cache_read + cache_write
 }
 
-/// Compact per-message detail line: model, token flow, cost.
+/// Compact per-message detail line: token flow, cost.
 pub fn build_meta(info: &serde_json::Value) -> Option<String> {
     if !info.is_object() {
         return None;
     }
     let mut parts: Vec<String> = Vec::new();
-    let model_id = info.get("modelID").and_then(serde_json::Value::as_str).unwrap_or("");
-    let provider_id = info.get("providerID").and_then(serde_json::Value::as_str).unwrap_or("");
-    if !model_id.is_empty() {
-        parts.push(if provider_id.is_empty() {
-            model_id.to_string()
-        } else {
-            format!("{provider_id}/{model_id}")
-        });
-    }
     if let Some(tokens) = info.get("tokens").and_then(serde_json::Value::as_object) {
         let input = tokens.get("input").and_then(serde_json::Value::as_i64).unwrap_or(0);
         let output = tokens.get("output").and_then(serde_json::Value::as_i64).unwrap_or(0);

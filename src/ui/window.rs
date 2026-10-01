@@ -211,14 +211,17 @@ impl Render for WarpWindow {
                         .child(action.label()),
                 );
             }
-            root = root.child(
-                div()
-                    .absolute()
-                    .inset_0()
-                    .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
-                        this.menu = None;
-                        cx.notify();
-                    }))
+        root = root.child(
+            div()
+                .id("menu-catcher")
+                .absolute()
+                .inset_0()
+                // dismiss on full click, not mouse-down: a down-handler here
+                // unmounts the menu rows before their on_click (mouse-up) runs
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.menu = None;
+                    cx.notify();
+                }))
                     .child(
                         div()
                             .absolute()
@@ -566,6 +569,8 @@ impl WarpWindow {
                                             _ => (40.0, 60.0),
                                         };
                                         let _ = menu_tx2.send_blocking(MenuState { x, y, rows });
+                                        // menu paints on the next store-driven repaint — same nudge as right-click
+                                        menu_store2.update(cx, |_, _| {});
                                     })
                                     .child(crate::ui::icon("icons/kebab.svg", px(fonts.icon_body), theme::TEXT_MUTED)),
                             )

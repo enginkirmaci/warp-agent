@@ -3,7 +3,7 @@
 //! port of MainViewModel + ChatTileViewModel + the ChatItems model.
 
 use crate::oc::{self, ApiRequest, NetCommand, SessionInfo, StoredMessage, UiEvent};
-use crate::settings::{AppSettings, UiState, WorkspaceState, DEFAULT_EXECUTABLE};
+use crate::settings::{AppSettings, PromptTemplate, UiState, WorkspaceState, DEFAULT_EXECUTABLE};
 use crate::theme::{self, AccentColors, FontTokens};
 use chrono::{Local, TimeZone, Timelike};
 use gpui::prelude::*;
@@ -445,6 +445,39 @@ impl ChatTile {
     pub fn reset_history(&mut self) {
         self.history_index = 0;
         self.history_draft.clear();
+    }
+
+    /// How many user messages this tile itself has sent — the ↑/↓ recall source.
+    pub fn sent_prompt_count(&self) -> usize {
+        self.items.iter().filter(|i| matches!(i.as_ref(), ChatItem::UserMessage { .. })).count()
+    }
+
+    /// The `steps_from_end`-th sent user message of this tile (0 = newest).
+    /// Empty when out of range.
+    pub fn peek_sent_prompt(&self, steps_from_end: usize) -> String {
+        let mut seen = 0usize;
+        for item in self.items.iter().rev() {
+            if let ChatItem::UserMessage { text, .. } = item.as_ref() {
+                if seen == steps_from_end {
+                    return text.clone();
+                }
+                seen += 1;
+            }
+        }
+        String::new()
+    }
+
+    /// A sent user message's text by its item key (menu → fork target). Empty
+    /// when the row is gone — the caller treats that as a stale menu click.
+    fn peek_sent_prompt_key(&self, key: usize) -> String {
+        for item in &self.items {
+            if let ChatItem::UserMessage { key: k, text, .. } = item.as_ref() {
+                if *k == key {
+                    return text.clone();
+                }
+            }
+        }
+        String::new()
     }
 
     pub fn has_messages(&self) -> bool {
@@ -1102,6 +1135,32 @@ pub fn derive_title(text: &str) -> String {
     }
 }
 
+/// The fork seed: the transcript up to and including the chosen user message
+/// (`stop_key`) flattened to a plain-text block for the new session's
+/// composer. User lines keep their text, assistant replies get a role tag;
+/// reasoning/tools stay out — the block is context for a manual send, not a
+/// replay.
+fn fork_transcript(tile: &ChatTile, stop_key: usize, source_title: &str) -> String {
+    let mut out = format!("— forked from {source_title} —\n");
+    for item in &tile.items {
+        match item.as_ref() {
+            ChatItem::UserMessage { key, text, .. } => {
+                out.push_str("\nYou: ");
+                out.push_str(text);
+                if *key == stop_key {
+                    return out;
+                }
+            }
+            ChatItem::AssistantText { text, .. } => {
+                out.push_str("\nAssistant: ");
+                out.push_str(text);
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
 // ---- sidebar models ------------------------------------------------------
 
 #[derive(Clone)]
@@ -1187,6 +1246,12 @@ impl SessionItem {
 
 struct WorkspaceRuntime {
     events_running: bool,
+    /// live state of the workspace's event pump: drives the tile
+    /// "reconnecting" pill and the amber gauge leg
+    stream_status: oc::StreamStatus,
+    /// latest /global/health answer; None until the first poll lands
+    /// (salmon gauge leg while Some(false))
+    healthy: Option<bool>,
 }
 
 #[derive(Clone)]
@@ -1467,6 +1532,38 @@ impl Store {
         self.ui.save();
     }
 
+    // ---- prompt library (ui.json "Prompts") ----
+
+    /// Insert or update a prompt template; the library is client-side state,
+    /// so every mutation rewrites ui.json immediately. `replace` names the
+    /// entry being edited (rename-safe); None appends. The name is normalized
+    /// (whitespace and `/` stripped) and must be unique — a rename onto an
+    /// existing name replaces that entry instead of duplicating it.
+    pub fn save_prompt(&mut self, replace: Option<&str>, name: &str, body: &str, cx: &mut Context<Self>) {
+        let name = PromptTemplate::normalize_name(name);
+        if name.is_empty() || body.trim().is_empty() {
+            return;
+        }
+        if replace != Some(name.as_str()) {
+            self.ui.prompts.retain(|t| t.name != name);
+        }
+        match replace.and_then(|original| self.ui.prompts.iter_mut().find(|t| t.name == original)) {
+            Some(existing) => {
+                existing.name = name;
+                existing.body = body.trim_end().to_string();
+            }
+            None => self.ui.prompts.push(PromptTemplate { name, body: body.trim_end().to_string() }),
+        }
+        self.ui.save();
+        cx.notify();
+    }
+
+    pub fn delete_prompt(&mut self, name: &str, cx: &mut Context<Self>) {
+        self.ui.prompts.retain(|t| t.name != name);
+        self.ui.save();
+        cx.notify();
+    }
+
     // ---- lookups ----
 
     pub fn selected_workspace(&self) -> Option<&WorkspaceItem> {
@@ -1504,6 +1601,28 @@ impl Store {
         self.effective_workspace_path(session_id)
             .map(|p| self.runtimes.contains_key(&p))
             .unwrap_or(false)
+    }
+
+    /// Whether this session's workspace event stream is currently reconnecting.
+    /// A session without a workspace (fresh draft) falls back to the selected
+    /// workspace; a stopped workspace has no runtime and never reads true.
+    pub fn stream_reconnecting(&self, session_id: Option<&str>) -> bool {
+        let path = session_id
+            .and_then(|id| self.effective_workspace_path(id))
+            .or_else(|| self.selected_workspace.clone());
+        path.and_then(|p| self.runtimes.get(&p))
+            .map(|rt| rt.stream_status == oc::StreamStatus::Reconnecting)
+            .unwrap_or(false)
+    }
+
+    /// Gauge inputs over every running workspace; any reconnecting server
+    /// outranks a merely unhealthy one (checked first at the call site).
+    pub fn any_stream_reconnecting(&self) -> bool {
+        self.runtimes.values().any(|rt| rt.stream_status == oc::StreamStatus::Reconnecting)
+    }
+
+    pub fn any_stream_unhealthy(&self) -> bool {
+        self.runtimes.values().any(|rt| rt.healthy == Some(false))
     }
 
     pub fn is_busy(&self, session_id: &str) -> bool {
@@ -1793,7 +1912,11 @@ impl Store {
             }
             UiEvent::ServerStarted { ws_key, result } => match result {
                 Ok(()) => {
-                    self.runtimes.insert(ws_key.clone(), WorkspaceRuntime { events_running: true });
+                    // status starts Connected to match the pump's first attach
+                    self.runtimes.insert(
+                        ws_key.clone(),
+                        WorkspaceRuntime { events_running: true, stream_status: oc::StreamStatus::Connected, healthy: None },
+                    );
                     if let Some(ws) = self.workspace_by_path_mut(&ws_key) {
                         ws.is_running = true;
                     }
@@ -1842,6 +1965,34 @@ impl Store {
             UiEvent::ServerStopped { .. } => {}
             UiEvent::Event { ws_key, event } => {
                 self.handle_stream_event(&ws_key, &event, cx);
+            }
+            UiEvent::StreamStatus { ws_key, status } => {
+                // transitions only — the backoff ladder waits silently
+                if let Some(runtime) = self.runtimes.get_mut(&ws_key) {
+                    if runtime.stream_status != status {
+                        runtime.stream_status = status;
+                        match status {
+                            oc::StreamStatus::Connected => {
+                                // the server is back: its sessions may have
+                                // changed (restart) while the stream was down
+                                self.net.send(NetCommand::Request { ws_key: ws_key.clone(), request: ApiRequest::ListSessions });
+                                self.announce("Event stream reconnected.", false, cx);
+                            }
+                            oc::StreamStatus::Reconnecting => {
+                                self.announce("Connection lost — reconnecting…", true, cx);
+                            }
+                        }
+                        cx.notify();
+                    }
+                }
+            }
+            UiEvent::HealthChanged { ws_key, healthy } => {
+                if let Some(runtime) = self.runtimes.get_mut(&ws_key) {
+                    if runtime.healthy != healthy {
+                        runtime.healthy = healthy;
+                        cx.notify();
+                    }
+                }
             }
             UiEvent::SessionsLoaded { ws_key, result } => match result {
                 Ok(sessions) => self.apply_session_list(&ws_key, sessions, cx),
@@ -1942,6 +2093,53 @@ impl Store {
                         self.pending_sends.remove(0);
                     }
                     self.announce(&format!("Could not create a session: {err:#}"), true, cx);
+                    cx.notify();
+                }
+            },
+            UiEvent::ForkSessionCreated { ws_key, context, result } => match result {
+                Ok(info) => {
+                    // wire the new session in like SessionCreated does, minus the
+                    // pending_send continuation — a fork never auto-sends, and the
+                    // correlated event means no FIFO adoption of draft sends
+                    self.workspace_by_session.insert(info.id.clone(), ws_key.clone());
+                    self.title_by_session.insert(info.id.clone(), info.title.clone());
+                    // mint a key directly — create_tile() would push a phantom
+                    // draft tile into open_tiles (same as MessagesLoaded)
+                    let key = format!("t{}", self.next_tile_key);
+                    self.next_tile_key += 1;
+                    let mut tile = ChatTile::new(key.clone(), self.seed_model(), self.seed_agent(), self.seed_variant());
+                    tile.apply_variant_list(&self.variants_by_model);
+                    tile.session_id = Some(info.id.clone());
+                    tile.title = info.title.clone();
+                    tile.auto_title_pending = false; // the fork-point title stands
+                    tile.input = context;
+                    if let Some(ws) = self.workspace_by_path_mut(&ws_key) {
+                        ws.set_expanded(true); // the forked chat belongs in a visible sidebar section
+                        ws.state.sessions.insert(0, info.id.clone());
+                    }
+                    self.tile_by_session.insert(info.id.clone(), key.clone());
+                    self.open_tiles.push(tile);
+                    self.sessions.insert(
+                        0,
+                        SessionItem {
+                            id: info.id.clone(),
+                            title: info.title.clone(),
+                            updated_ms: info.updated_ms,
+                            is_pinned: false,
+                            is_selected: false,
+                            is_running: false,
+                            is_editing: false,
+                            draft_title: String::new(),
+                        },
+                    );
+                    self.show_restore_prompt = false; // a tile is about to be on screen
+                    self.sync_workspace_chats(cx);
+                    self.persist_tiles();
+                    self.save_state();
+                    self.focus_tile(&key, cx);
+                }
+                Err(err) => {
+                    self.announce(&format!("Could not fork: {err:#}"), true, cx);
                     cx.notify();
                 }
             },
@@ -2520,9 +2718,34 @@ impl Store {
         self.prompt_history[self.prompt_history.len() - steps_from_end - 1].clone()
     }
 
+    /// Cycle depth for a tile: its own sent messages when it has any, else the
+    /// global history so a fresh draft still recalls something.
+    fn history_count_for(&self, tile_key: &str) -> usize {
+        let own = self.tile_by_key(tile_key).map(|t| t.sent_prompt_count()).unwrap_or(0);
+        if own > 0 {
+            own
+        } else {
+            self.prompt_history_count()
+        }
+    }
+
+    /// `steps_from_end`-th prompt back for a tile (0 = newest), per the same rule.
+    fn peek_history_for(&self, tile_key: &str, steps_from_end: usize) -> Option<String> {
+        let tile = self.tile_by_key(tile_key)?;
+        if tile.sent_prompt_count() > 0 {
+            return Some(tile.peek_sent_prompt(steps_from_end));
+        }
+        if steps_from_end < self.prompt_history.len() {
+            return Some(self.peek_prompt_history(steps_from_end));
+        }
+        None
+    }
+
     /// Terminal-style Up/Down cycling through previously sent prompts; returns false to let the caret move.
+    /// The source is the tile's OWN sent user messages, most-recent first; only
+    /// a tile with none of its own yet falls back to the global prompt history.
     pub fn cycle_prompt_history(&mut self, tile_key: &str, up: bool) -> bool {
-        let count = self.prompt_history_count();
+        let count = self.history_count_for(tile_key);
         let (current_index, current_input, current_draft) = {
             let Some(tile) = self.tile_by_key(tile_key) else { return false };
             (tile.history_index, tile.input.clone(), tile.history_draft.clone())
@@ -2535,12 +2758,12 @@ impl Store {
                     return false;
                 }
                 new_index = 1;
-                text = self.peek_prompt_history(0);
+                text = self.peek_history_for(tile_key, 0);
             } else if current_index < count {
                 new_index = current_index + 1;
-                text = self.peek_prompt_history(current_index);
+                text = self.peek_history_for(tile_key, current_index);
             } else {
-                text = self.peek_prompt_history(current_index - 1);
+                text = self.peek_history_for(tile_key, current_index - 1);
             }
         } else {
             if current_index == 0 {
@@ -2548,11 +2771,12 @@ impl Store {
             }
             new_index = current_index - 1;
             text = if new_index == 0 {
-                current_draft.clone()
+                Some(current_draft.clone())
             } else {
-                self.peek_prompt_history(new_index - 1)
+                self.peek_history_for(tile_key, new_index - 1)
             };
         }
+        let Some(text) = text else { return false };
         if let Some(tile) = self.tile_by_key_mut(tile_key) {
             if current_index == 0 && up && tile.history_draft.is_empty() {
                 tile.history_draft = current_input;
@@ -2561,6 +2785,59 @@ impl Store {
             tile.set_input_direct(text);
         }
         true
+    }
+
+    /// Loads the tile's most recent sent user message into the composer for
+    /// review (the "↻ last prompt" pill) — no auto-send.
+    pub fn recall_last_prompt(&mut self, tile_key: &str, cx: &mut Context<Self>) {
+        let text = self.tile_by_key(tile_key).map(|t| t.peek_sent_prompt(0)).unwrap_or_default();
+        if text.trim().is_empty() {
+            return;
+        }
+        if let Some(tile) = self.tile_by_key_mut(tile_key) {
+            tile.set_input_direct(text);
+        }
+        cx.notify();
+    }
+
+    /// Re-prompt: sends a previous user message's text again in this chat by
+    /// staging it into the composer first, so the queue rules, prompt-history
+    /// record and "done in Xs" note all ride the regular send path.
+    pub fn reprompt(&mut self, tile_key: &str, text: &str, cx: &mut Context<Self>) {
+        if text.trim().is_empty() {
+            return;
+        }
+        if let Some(tile) = self.tile_by_key_mut(tile_key) {
+            tile.input = text.to_string();
+            tile.reset_history();
+        }
+        self.send_from_tile(tile_key, cx);
+    }
+
+    /// Fork from here: create a NEW session in the same workspace and open it
+    /// as a tile whose composer holds the transcript up to and including the
+    /// chosen user message (`stop_key`) as a quoted context block. The serve
+    /// API has no parts-append endpoint — its only message POST starts a model
+    /// turn — so the seed waits in the composer for the user to send manually.
+    pub fn fork_from_message(&mut self, tile_key: &str, stop_key: usize, cx: &mut Context<Self>) {
+        let Some(tile) = self.tile_by_key(tile_key) else { return };
+        let Some(session_id) = tile.session_id.clone() else { return };
+        let Some(ws_key) = self.effective_workspace_path(&session_id) else { return };
+        if !self.runtimes.contains_key(&ws_key) {
+            self.tile_note(tile_key, "This chat's workspace server is stopped — start it to fork.", true, cx);
+            return;
+        }
+        let stop_text = tile.peek_sent_prompt_key(stop_key);
+        if stop_text.trim().is_empty() {
+            return;
+        }
+        let title = derive_title(&stop_text);
+        let context = fork_transcript(tile, stop_key, &self.title_for(&session_id));
+        self.net.send(NetCommand::Request {
+            ws_key,
+            request: ApiRequest::CreateForkSession { title, context },
+        });
+        let _ = cx;
     }
 
     /// Shift+Tab in the composer: next entry in the agent list, wrapping;
@@ -3112,6 +3389,17 @@ impl Store {
             .unwrap_or_else(|| session_id.to_string());
         let Some(path) = self.workspace_by_session.get(&target).cloned() else { return };
         self.open_session_into_grid(&path, &target, cx);
+    }
+
+    /// Opens a subagent child chat into the grid: focuses its tile when one is
+    /// already open, otherwise loads it through its parent's workspace server.
+    pub fn open_subagent_session(&mut self, session_id: &str, cx: &mut Context<Self>) {
+        if let Some(tile_key) = self.tile_by_session.get(session_id).cloned() {
+            self.focus_tile(&tile_key, cx);
+            return;
+        }
+        let Some(path) = self.effective_workspace_path(session_id) else { return };
+        self.open_session_into_grid(&path, session_id, cx);
     }
 
     /// Opens the clicked sidebar chat: focuses its tile when one exists, otherwise

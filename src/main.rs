@@ -35,6 +35,16 @@ fn main() {
                 gpui::KeyBinding::new("up", ui::tile::ComposerUp, Some("Input")),
                 gpui::KeyBinding::new("down", ui::tile::ComposerDown, Some("Input")),
                 gpui::KeyBinding::new("shift-tab", ui::tile::ComposerCycleAgent, Some("Input")),
+                // slash-menu keys: the extra "Composer" context (set on the
+                // composer frame) scopes these to the composer — with the
+                // context present they match at the same depth as the plain
+                // "Input" bindings above and win as the later registration,
+                // while every other input keeps the stock editor
+                // up/down/enter/escape behavior
+                gpui::KeyBinding::new("up", ui::tile::ComposerSlashUp, Some("Composer Input")),
+                gpui::KeyBinding::new("down", ui::tile::ComposerSlashDown, Some("Composer Input")),
+                gpui::KeyBinding::new("enter", ui::tile::ComposerSlashEnter, Some("Composer Input")),
+                gpui::KeyBinding::new("escape", ui::tile::ComposerSlashEscape, Some("Composer Input")),
             ]);
 
             let (_net_handle, net_sender, event_rx) = oc::spawn_net_thread();

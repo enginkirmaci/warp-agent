@@ -95,10 +95,84 @@ impl AppSettings {
     }
 }
 
+/// A saved prompt snippet for the composer's slash menu: typing `/` + `name`
+/// offers `body` for insertion. `name` never carries the leading `/`; `body`
+/// may contain `{{placeholder}}` tokens (any identifier inside the braces).
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct PromptTemplate {
+    #[serde(rename = "Name")]
+    pub name: String,
+    #[serde(rename = "Body")]
+    pub body: String,
+}
+
+impl PromptTemplate {
+    /// Settings-side name rule: trimmed, with whitespace and `/` stripped
+    /// anywhere ("my cool/prompt" saves as "mycoolprompt") — names are typed
+    /// after a `/`, so neither character can appear.
+    pub fn normalize_name(raw: &str) -> String {
+        raw.chars().filter(|c| !c.is_whitespace() && *c != '/').collect()
+    }
+
+    /// Unique `{{identifier}}` tokens in order of first appearance; an empty
+    /// or unclosed brace pair is ignored.
+    pub fn placeholders(&self) -> Vec<String> {
+        let mut found: Vec<String> = Vec::new();
+        let mut rest = self.body.as_str();
+        while let Some(start) = rest.find("{{") {
+            let after = &rest[start + 2..];
+            match after.find("}}") {
+                Some(end) => {
+                    let name = after[..end].trim();
+                    if !name.is_empty() && !found.iter().any(|f| f == name) {
+                        found.push(name.to_string());
+                    }
+                    rest = &after[end + 2..];
+                }
+                None => break,
+            }
+        }
+        found
+    }
+
+    /// Substitutes `{{name}}` tokens with `values`. A token with no (or only
+    /// blank) input stays in the text so the gap stays visible in the composer.
+    pub fn compose(&self, values: &std::collections::HashMap<String, String>) -> String {
+        let mut out = String::with_capacity(self.body.len());
+        let mut rest = self.body.as_str();
+        while let Some(start) = rest.find("{{") {
+            out.push_str(&rest[..start]);
+            let after = &rest[start + 2..];
+            match after.find("}}") {
+                Some(end) => {
+                    let name = after[..end].trim();
+                    let value = values.get(name).map(|v| v.trim()).unwrap_or("");
+                    if value.is_empty() {
+                        out.push_str(&rest[start..start + 2 + end + 2]);
+                    } else {
+                        out.push_str(value);
+                    }
+                    rest = &after[end + 2..];
+                }
+                None => {
+                    out.push_str("{{");
+                    rest = after;
+                }
+            }
+        }
+        out.push_str(rest);
+        out
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 pub struct UiState {
     #[serde(rename = "Pins", default)]
     pub pins: std::collections::HashMap<String, bool>,
+    /// Saved prompt snippets (slash menu); client-side state like drafts,
+    /// rewritten on every library mutation.
+    #[serde(rename = "Prompts", default)]
+    pub prompts: Vec<PromptTemplate>,
     #[serde(rename = "Workspaces", default)]
     pub workspaces: Vec<WorkspaceState>,
     #[serde(rename = "ActiveWorkspace", default)]

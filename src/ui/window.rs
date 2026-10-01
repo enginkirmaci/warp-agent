@@ -1,9 +1,10 @@
 //! The main window: titlebar, resizable sidebar with workspace/chat trees, the
 //! shared tile grid, the settings page and the restore banner.
 
+use crate::settings::PromptTemplate;
 use crate::store::{Store, WorkspaceItem};
 use crate::theme;
-use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
 use crate::ui::settings::SettingsBuffers;
 use crate::ui::tile::TileView;
 use gpui::prelude::*;
@@ -97,6 +98,14 @@ pub struct WarpWindow {
     settings_model_filter: String,
     /// session being renamed + its edit field
     rename: Option<(String, Entity<InputState>)>,
+    /// prompt-library editor: None = closed, Some(replace) = open where
+    /// replace is the entry being renamed (None = adding a new one)
+    prompt_edit: Option<Option<String>>,
+    /// the editor's name/body fields, created when the editor opens
+    prompt_name_field: Option<Entity<InputState>>,
+    prompt_body_field: Option<Entity<TextareaState>>,
+    /// last validation error in the prompt editor, shown inline
+    prompt_error: Option<String>,
     /// active sidebar resize: (start pointer x, start sidebar width); shared with
     /// the paint-phase listener registration because window.on_mouse_event may
     /// only be called during paint in this gpui rev
@@ -121,6 +130,10 @@ impl WarpWindow {
             settings_model_open: false,
             settings_model_filter: String::new(),
             rename: None,
+            prompt_edit: None,
+            prompt_name_field: None,
+            prompt_body_field: None,
+            prompt_error: None,
             splitter_drag: std::rc::Rc::new(std::cell::Cell::new(None)),
         }
     }
@@ -250,10 +263,11 @@ impl Render for WarpWindow {
 }
 
 /// Windows-style window-state glyph for the titlebar zoom button: a single
-/// square while windowed, overlapping squares (restore) while maximized.
-fn zoom_icon(maximized: bool) -> gpui::AnyElement {
+/// square while windowed, overlapping squares (restore) while maximized. The
+/// stroke doubles as the server-health gauge: its color follows the running
+/// workspaces (amber reconnecting, salmon unhealthy, neutral otherwise).
+fn zoom_icon(maximized: bool, color: gpui::Rgba) -> gpui::AnyElement {
     let stroke = 1.0_f32;
-    let color = theme::TEXT_MUTED;
     let s = 8.0_f32;
     // one Bounds per painted edge: [x, y, w, h] in the 12x12 icon box
     let mut edges: Vec<(f32, f32, f32, f32)> = Vec::new();
@@ -331,6 +345,18 @@ impl WarpWindow {
             let store = self.store.read(cx);
             (store.fonts, store.sidebar_visible)
         };
+        // gauge color: reconnecting beats unhealthy beats the neutral chrome;
+        // healthy and unknown both stay muted, like the plain window glyph
+        let gauge_color = {
+            let store = self.store.read(cx);
+            if store.any_stream_reconnecting() {
+                theme::WARN
+            } else if store.any_stream_unhealthy() {
+                theme::DANGER
+            } else {
+                theme::TEXT_MUTED
+            }
+        };
         let store_handle = self.store.clone();
         div()
             .h(px(38.))
@@ -390,7 +416,7 @@ impl WarpWindow {
                         // re-render so the maximize/restore glyph keeps up
                         cx.notify();
                     }))
-                    .child(zoom_icon(window.is_maximized())),
+                    .child(zoom_icon(window.is_maximized(), gauge_color)),
             )
             .child(
                 div()
@@ -1263,7 +1289,7 @@ impl WarpWindow {
 
         let settings_open = self.store.read(cx).is_settings_open;
         if settings_open {
-            main = main.child(self.render_settings(cx));
+            main = main.child(self.render_settings(window, cx));
         }
 
         main.into_any_element()
@@ -1271,17 +1297,20 @@ impl WarpWindow {
 
     // ---- settings page ----
 
-    fn render_settings(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
+    fn render_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
         let fonts = self.store.read(cx).fonts;
         let buffers = self.settings_buffers.clone();
         let close_store = self.store.clone();
         let save_store = self.store.clone();
+        // the prompt editor's fields live only while the editor is open
+        self.sync_prompt_fields(window, cx);
         // built before the page chain: the builder borrows cx mutably below
         let model_dropdown = if self.settings_model_open {
             Some(self.settings_model_dropdown(&fonts, cx))
         } else {
             None
         };
+        let prompts_card = self.render_prompts_card(&fonts, cx);
 
         let mut page = div()
             .id("settings-page")
@@ -1455,6 +1484,8 @@ impl WarpWindow {
                                 }),
                         ),
                 )
+                .child(self.settings_section("Prompts", &fonts))
+                .child(prompts_card)
                 .child(self.small_button("Save", &fonts, {
                     let fields = self.settings_fields.clone();
                     let buffers = self.settings_buffers.clone();
@@ -1483,6 +1514,258 @@ impl WarpWindow {
                 })),
         );
         page.into_any_element()
+    }
+
+    // ---- prompt library editor ----
+
+    /// Opens the editor: `replace` is the prompt name being edited (None adds
+    /// a new one). Fields are rebuilt so a switch mid-edit starts fresh.
+    fn open_prompt_editor(&mut self, replace: Option<String>) {
+        self.prompt_edit = Some(replace);
+        self.prompt_name_field = None;
+        self.prompt_body_field = None;
+        self.prompt_error = None;
+    }
+
+    /// Field lifecycle for the prompt editor, mirroring sync_rename_field:
+    /// entities are created when the editor opens (prefilled when editing)
+    /// and dropped when it closes.
+    fn sync_prompt_fields(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.prompt_edit.is_none() {
+            self.prompt_name_field = None;
+            self.prompt_body_field = None;
+            return;
+        }
+        if self.prompt_name_field.is_some() && self.prompt_body_field.is_some() {
+            return;
+        }
+        let name = cx.new(|cx| InputState::new(window, cx).placeholder("name (no spaces or /)"));
+        let body = cx.new(|cx| {
+            TextareaState::new(window, cx)
+                .placeholder("prompt text — {{placeholders}} become fill-in fields")
+                .auto_grow(2, 6)
+        });
+        if let Some(Some(original)) = &self.prompt_edit {
+            let existing = self
+                .store
+                .read(cx)
+                .ui
+                .prompts
+                .iter()
+                .find(|t| t.name == *original)
+                .cloned();
+            if let Some(t) = existing {
+                name.update(cx, |f, cx| f.set_value(t.name.as_str(), window, cx));
+                body.update(cx, |f, cx| f.set_value(t.body.as_str(), window, cx));
+            }
+        }
+        self.prompt_name_field = Some(name);
+        self.prompt_body_field = Some(body);
+    }
+
+    /// The Prompts card: the saved list with per-row edit/delete, then the
+    /// add/edit form. Saves validate name (non-empty, unique after
+    /// normalization) and body (non-empty) with inline hints.
+    fn render_prompts_card(&mut self, fonts: &theme::FontTokens, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let accent = self.store.read(cx).accent.accent;
+        let prompts = self.store.read(cx).ui.prompts.clone();
+        let mut rows: Vec<gpui::AnyElement> = Vec::new();
+        rows.push(
+            self.settings_hint(
+                "Type / at the start of a composer to pick one. {{placeholders}} become fill-in fields.",
+                fonts,
+            )
+            .into_any_element(),
+        );
+        if prompts.is_empty() && self.prompt_edit.is_none() {
+            rows.push(
+                div()
+                    .text_size(px(fonts.font_small))
+                    .italic()
+                    .text_color(theme::TEXT_MUTED)
+                    .opacity(0.7)
+                    .child("No saved prompts yet.")
+                    .into_any_element(),
+            );
+        }
+        for prompt in &prompts {
+            let preview = prompt.body.lines().next().unwrap_or("").to_string();
+            let name_click = prompt.name.clone();
+            let name_del = prompt.name.clone();
+            rows.push(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2p5()
+                    .py_1()
+                    .child(
+                        div()
+                            .flex_shrink_0()
+                            .text_size(px(fonts.font_body))
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_color(accent)
+                            .child(SharedString::from(format!("/{}", prompt.name))),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_size(px(fonts.font_small))
+                            .text_color(theme::TEXT_MUTED)
+                            .truncate()
+                            .child(SharedString::from(preview)),
+                    )
+                    .child(
+                        div()
+                            .id(gpui::ElementId::NamedInteger("prompt-edit".into(), TileView::hash(&name_click)))
+                            .cursor_pointer()
+                            .p_1()
+                            .rounded_sm()
+                            .hover(|s| s.bg(theme::HOVER))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.open_prompt_editor(Some(name_click.clone()));
+                                cx.notify();
+                            }))
+                            .child(crate::ui::icon("icons/edit.svg", px(fonts.icon_small), theme::TEXT_MUTED)),
+                    )
+                    .child(
+                        div()
+                            .id(gpui::ElementId::NamedInteger("prompt-del".into(), TileView::hash(&name_del)))
+                            .cursor_pointer()
+                            .p_1()
+                            .rounded_sm()
+                            .hover(|s| s.bg(theme::HOVER))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                let name = name_del.clone();
+                                this.store.update(cx, |s, cx| s.delete_prompt(&name, cx));
+                                cx.notify();
+                            }))
+                            .child(crate::ui::icon("icons/trash.svg", px(fonts.icon_small), theme::TEXT_MUTED)),
+                    )
+                    .into_any_element(),
+            );
+        }
+
+        // the add/edit form, or the button that opens it
+        match (&self.prompt_edit, self.prompt_name_field.clone(), self.prompt_body_field.clone()) {
+            (Some(replace), Some(name_field), Some(body_field)) => {
+                let is_name_hint = div()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2p5()
+                            .child(self.settings_label("Name", fonts))
+                            .child(div().flex_1().min_w_0().child(Input::new(&name_field))),
+                    )
+                    .child(self.settings_hint("Spaces and / are removed from names; it must be unique.", fonts))
+                    .into_any_element();
+                let body_row = div()
+                    .flex()
+                    .items_start()
+                    .gap_2p5()
+                    .child(self.settings_label("Body", fonts))
+                    .child(div().flex_1().min_w_0().child(Textarea::new(&body_field).appearance(false).bordered(false)))
+                    .into_any_element();
+                rows.push(div().h(px(1.)).bg(theme::HAIRLINE).into_any_element());
+                rows.push(div().flex().flex_col().gap_2().child(is_name_hint).child(body_row).into_any_element());
+                if let Some(error) = &self.prompt_error {
+                    rows.push(
+                        div()
+                            .text_size(px(fonts.font_small))
+                            .text_color(theme::DANGER)
+                            .child(error.clone())
+                            .into_any_element(),
+                    );
+                }
+                rows.push(
+                    div()
+                        .flex()
+                        .gap_2()
+                        .child(self.settings_button("Save prompt", fonts, {
+                            let store = self.store.clone();
+                            let replace = replace.clone();
+                            cx.listener(move |this, _, _, cx| {
+                                let name = this
+                                    .prompt_name_field
+                                    .as_ref()
+                                    .map(|f| f.read(cx).value().to_string())
+                                    .unwrap_or_default();
+                                let body = this
+                                    .prompt_body_field
+                                    .as_ref()
+                                    .map(|f| f.read(cx).value().to_string())
+                                    .unwrap_or_default();
+                                let normalized = PromptTemplate::normalize_name(&name);
+                                let error = if normalized.is_empty() {
+                                    Some("Name is required.".to_string())
+                                } else if body.trim().is_empty() {
+                                    Some("Prompt text is required.".to_string())
+                                } else {
+                                    let duplicate = store.read(cx).ui.prompts.iter().any(|t| {
+                                        t.name == normalized && replace.as_deref() != Some(t.name.as_str())
+                                    });
+                                    duplicate.then(|| "A prompt with this name already exists.".to_string())
+                                };
+                                match error {
+                                    Some(error) => {
+                                        this.prompt_error = Some(error);
+                                    }
+                                    None => {
+                                        store.update(cx, |s, cx| s.save_prompt(replace.as_deref(), &name, &body, cx));
+                                        this.prompt_edit = None;
+                                    }
+                                }
+                                cx.notify();
+                            })
+                        }))
+                        .child(self.settings_button("Cancel", fonts, {
+                            cx.listener(move |this, _, _, cx| {
+                                this.prompt_edit = None;
+                                cx.notify();
+                            })
+                        }))
+                        .into_any_element(),
+                );
+            }
+            _ => {
+                rows.push(self.settings_button("Add prompt", fonts, {
+                    cx.listener(move |this, _, _, cx| {
+                        this.open_prompt_editor(None);
+                        cx.notify();
+                    })
+                }));
+            }
+        }
+        self.settings_card(rows)
+    }
+
+    /// small_button for handlers that need WarpWindow state: takes a
+    /// cx.listener closure instead of an App-only one.
+    fn settings_button(
+        &self,
+        label: &str,
+        fonts: &theme::FontTokens,
+        on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App) + 'static,
+    ) -> gpui::AnyElement {
+        div()
+            .id(gpui::ElementId::NamedInteger("pbtn".into(), TileView::hash(label)))
+            .px_3()
+            .py_1()
+            .min_h(px(26.))
+            .rounded_lg()
+            .border_1()
+            .border_color(theme::HAIRLINE)
+            .text_size(px(fonts.font_body))
+            .text_color(theme::TEXT)
+            .cursor_pointer()
+            .hover(|s| s.bg(theme::HOVER))
+            .on_click(on_click)
+            .child(label.to_string())
+            .into_any_element()
     }
 
 }

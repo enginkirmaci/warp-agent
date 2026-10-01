@@ -9,9 +9,22 @@
 use anyhow::{anyhow, Context as _, Result};
 use serde_json::{json, Value};
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Duration;
 
 pub const ASK_CONFIG: &str = r#"{"$schema":"https://opencode.ai/config.json","permission":{"edit":"ask","bash":"ask","webfetch":"ask"}}"#;
+
+// ---- reconnect policy ------------------------------------------------------
+
+/// Backoff ladder start for the event pump's reconnect loop.
+const RECONNECT_INITIAL: Duration = Duration::from_secs(1);
+/// Backoff ladder cap.
+const RECONNECT_MAX: Duration = Duration::from_secs(30);
+/// A connection that survived this long counts as stable: the next drop
+/// restarts the ladder at [`RECONNECT_INITIAL`] instead of continuing it.
+const RECONNECT_RESET_AFTER: Duration = Duration::from_secs(60);
+/// /global/health poll period feeding the health gauge.
+const HEALTH_POLL_INTERVAL: Duration = Duration::from_secs(10);
 
 // ---- data types ----------------------------------------------------------
 
@@ -104,6 +117,10 @@ impl ServerProcess {
             .stderr(std::process::Stdio::piped())
             .kill_on_drop(true);
         command.env_remove("ELECTRON_RUN_AS_NODE");
+        // GUI app: without this flag Windows opens a visible console window
+        // for the console-subsystem child process
+        #[cfg(windows)]
+        command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
 
         let mut child = command
             .spawn()
@@ -439,8 +456,16 @@ impl ApiClient {
         Ok(models)
     }
 
-    /// Yields events from the /event SSE stream until it ends.
-    pub async fn stream_events(&self, on_event: impl Fn(Value), stop: async_channel::Receiver<()>) -> Result<()> {
+    /// Yields events from the /event SSE stream until it ends. `on_attached`
+    /// fires once the server accepted the stream (response status is in) —
+    /// the reconnect pump reports Connected from there, not from a mere
+    /// attempt.
+    pub async fn stream_events(
+        &self,
+        on_event: impl Fn(Value),
+        on_attached: impl Fn(),
+        stop: async_channel::Receiver<()>,
+    ) -> Result<()> {
         use futures_util::StreamExt as _;
         let resp = self
             .http
@@ -448,6 +473,7 @@ impl ApiClient {
             .send()
             .await?;
         let resp = error_for_status(resp).await?;
+        on_attached();
         let mut stream = resp.bytes_stream();
         let mut buffer = Vec::new();
         loop {
@@ -590,6 +616,10 @@ pub enum ApiRequest {
     ListAgents,
     GetMessages { session_id: String },
     CreateSession { title: String },
+    /// Fork: create an empty session for a transcript seed; the context rides
+    /// back on the event because it goes into the new tile's composer, never
+    /// to the model (the serve API cannot append parts without a turn).
+    CreateForkSession { title: String, context: String },
     RenameSession { session_id: String, title: String },
     DeleteSession { session_id: String },
     Abort { session_id: String },
@@ -600,14 +630,26 @@ pub enum ApiRequest {
     RejectQuestion { request_id: String },
 }
 
+/// Live state of a workspace's event pump. Connected is reported on every
+/// successful SSE attach, Reconnecting once per drop of a connected stream.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StreamStatus {
+    Connected,
+    Reconnecting,
+}
+
 /// Everything the UI learns from the network thread arrives as one of these.
 pub enum UiEvent {
     ServerStarted { ws_key: String, result: Result<()> },
     ServerStopped { ws_key: String },
     Event { ws_key: String, event: Value },
+    StreamStatus { ws_key: String, status: StreamStatus },
+    /// Latest /global/health answer; None until the first poll lands.
+    HealthChanged { ws_key: String, healthy: Option<bool> },
     SessionsLoaded { ws_key: String, result: Result<Vec<SessionInfo>> },
     MessagesLoaded { ws_key: String, session_id: String, result: Result<Vec<StoredMessage>> },
     SessionCreated { ws_key: String, result: Result<SessionInfo> },
+    ForkSessionCreated { ws_key: String, context: String, result: Result<SessionInfo> },
     SessionRenamed { ws_key: String, session_id: String, result: Result<SessionInfo> },
     SessionDeleted { ws_key: String, session_id: String, result: Result<()> },
     Aborted { session_id: String, result: Result<()> },
@@ -678,8 +720,10 @@ async fn net_main(command_rx: async_channel::Receiver<NetCommand>, event_tx: asy
             }
             NetCommand::StopServer { ws_key } => {
                 if let Some(ws) = workspaces.get_mut(&ws_key) {
+                    // close (not a single token): every task selecting on this
+                    // channel — event pump and health poll — wakes and exits
                     if let Some(stop) = ws.event_stop.take() {
-                        let _ = stop.try_send(());
+                        stop.close();
                     }
                     if let Some(process) = ws.process.as_mut() {
                         process.stop();
@@ -757,21 +801,103 @@ async fn start_workspace(
     let base_url = process.base_url.clone();
     let api = ApiClient::new(&base_url);
 
-    // event pump
+    // event pump + health poll; both select on the same stop channel, closed
+    // by StopServer to cancel them together
     let (stop_tx, stop_rx) = async_channel::bounded::<()>(1);
     let pump_tx = event_tx.clone();
     let pump_key = ws_key.to_string();
     let pump_client = ApiClient::new(&base_url);
+    let was_connected = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let pump_stop = stop_rx.clone(); // the health poll below keeps the original
     tokio::spawn(async move {
-        let _ = pump_client
-            .stream_events(
-                |event| {
+        use std::sync::atomic::Ordering;
+        let stop_rx = pump_stop;
+        let mut backoff = RECONNECT_INITIAL;
+        loop {
+            // per-attempt cancel channel: shutdown goes through stop_rx (the
+            // select below drops the whole future, closing the SSE response);
+            // this one only satisfies stream_events' own select for the pass
+            let (cancel_tx, cancel_rx) = async_channel::bounded::<()>(1);
+            let started = std::time::Instant::now();
+            let on_event = {
+                let pump_tx = pump_tx.clone();
+                let pump_key = pump_key.clone();
+                move |event: Value| {
                     // sync callback: send_blocking; unbounded channel so it never blocks
                     let _ = pump_tx.send_blocking(UiEvent::Event { ws_key: pump_key.clone(), event });
-                },
-                stop_rx,
-            )
-            .await;
+                }
+            };
+            let on_attached = {
+                let pump_tx = pump_tx.clone();
+                let pump_key = pump_key.clone();
+                let was_connected = was_connected.clone();
+                move || {
+                    was_connected.store(true, Ordering::Release);
+                    let _ = pump_tx
+                        .send_blocking(UiEvent::StreamStatus { ws_key: pump_key.clone(), status: StreamStatus::Connected });
+                }
+            };
+            tokio::select! {
+                _ = stop_rx.recv() => return,
+                result = pump_client.stream_events(on_event, on_attached, cancel_rx) => {
+                    drop(cancel_tx);
+                    if let Err(err) = result {
+                        tracing::warn!("[{pump_key}] event stream dropped: {err:#}");
+                    } else {
+                        tracing::info!("[{pump_key}] event stream ended");
+                    }
+                }
+            }
+            // a connection that lasted a while restarts the ladder; a fast
+            // drop continues it, so flapping servers pace themselves out
+            if started.elapsed() >= RECONNECT_RESET_AFTER {
+                backoff = RECONNECT_INITIAL;
+            }
+            // one Reconnecting per drop — retries inside the gate below stay quiet
+            if was_connected.swap(false, Ordering::AcqRel) {
+                let _ = pump_tx
+                    .send_blocking(UiEvent::StreamStatus { ws_key: pump_key.clone(), status: StreamStatus::Reconnecting });
+            }
+            // paced wait + health gate: the sleep is the pacing mechanism, the
+            // health probe only keeps a still-down server from churning SSE
+            // handshakes at every tick
+            loop {
+                tokio::select! {
+                    _ = stop_rx.recv() => return,
+                    _ = tokio::time::sleep(backoff) => {}
+                }
+                let healthy = tokio::select! {
+                    _ = stop_rx.recv() => return,
+                    healthy = is_healthy(&pump_client.http, &pump_client.base_url) => healthy,
+                };
+                if healthy {
+                    break;
+                }
+                tracing::debug!("[{pump_key}] server still down, next retry in {backoff:?}");
+                backoff = (backoff * 2).min(RECONNECT_MAX);
+            }
+        }
+    });
+
+    // server health poll: /global/health every 10 s feeds the gauge's
+    // "connected but degraded" color; the store dedupes unchanged answers
+    let poll_tx = event_tx.clone();
+    let poll_key = ws_key.to_string();
+    let poll_client = ApiClient::new(&base_url);
+    tokio::spawn(async move {
+        loop {
+            let healthy = tokio::select! {
+                _ = stop_rx.recv() => return,
+                healthy = is_healthy(&poll_client.http, &poll_client.base_url) => healthy,
+            };
+            let _ = poll_tx
+                .send(UiEvent::HealthChanged { ws_key: poll_key.clone(), healthy: Some(healthy) })
+                .await;
+            tokio::select! {
+                _ = stop_rx.recv() => return,
+                _ = tokio::time::sleep(HEALTH_POLL_INTERVAL) => {}
+            }
+        }
     });
 
     workspaces.insert(
@@ -802,6 +928,11 @@ async fn run_request(client: &ApiClient, ws_key: String, request: ApiRequest) ->
         },
         ApiRequest::CreateSession { title } => UiEvent::SessionCreated {
             ws_key,
+            result: client.create_session(&title).await,
+        },
+        ApiRequest::CreateForkSession { title, context } => UiEvent::ForkSessionCreated {
+            ws_key,
+            context,
             result: client.create_session(&title).await,
         },
         ApiRequest::RenameSession { session_id, title } => {

@@ -520,10 +520,7 @@ impl WarpWindow {
     }
 
     fn render_workspace_row(&mut self, ws: &WorkspaceItem, cx: &mut Context<Self>) -> gpui::AnyElement {
-        let (fonts, accent_dim) = {
-            let store = self.store.read(cx);
-            (store.fonts, store.accent.dim)
-        };
+        let fonts = self.store.read(cx).fonts;
         let path = ws.folder_path().to_string();
         let glyph: gpui::AnyElement = if ws.is_general() {
             crate::ui::icon("icons/chat-outline.svg", px(fonts.icon_body), theme::TEXT_MUTED).into_any_element()
@@ -554,7 +551,6 @@ impl WarpWindow {
             .px_2()
             .py_1p5()
             .rounded_lg()
-            .when(ws.is_selected, |d| d.bg(accent_dim))
             .hover(|s| s.bg(theme::HOVER))
             .cursor_pointer()
             .on_click(move |_, _, cx| {
@@ -1174,7 +1170,8 @@ impl WarpWindow {
         let mut main = div()
             .flex_1()
             .min_w_0()
-            .h_full()
+            // no h_full here: the row's stretch must subtract my_2p5 so the
+            // bottom margin isn't clipped past the window edge
             .flex()
             .flex_col()
             .my_2p5()

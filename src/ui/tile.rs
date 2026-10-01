@@ -327,84 +327,85 @@ impl TileView {
                     .child(
                         div()
                             .group("umsg")
+                            .max_w(px(560.))
+                            .rounded_lg()
+                            .bg(theme::BUBBLE_USER)
+                            .p_2()
+                            .px_3()
+                            .on_mouse_down(MouseButton::Right, {
+                                let menu_text = text.clone();
+                                cx.listener(move |this, event: &gpui::MouseDownEvent, _, cx| {
+                                    let (x, y) = this.menu_anchor(event);
+                                    this.menu = Some(TileMenu {
+                                        items: vec![
+                                            ContextMenu::Copy(menu_text.clone()),
+                                            ContextMenu::EditInput(menu_text.clone()),
+                                        ],
+                                        x,
+                                        y,
+                                    });
+                                    cx.notify();
+                                })
+                            })
                             .flex()
-                            .items_start()
-                            .gap_0p5()
+                            .flex_col()
+                            .gap_1()
                             .child(
                                 div()
-                                    .id(gpui::ElementId::NamedInteger(
-                                        "ucopy".into(),
-                                        TileView::hash(item_id),
-                                    ))
-                                    .cursor_pointer()
-                                    .mt_1()
-                                    .p_1()
-                                    .rounded_sm()
-                                    .border_1()
-                                    .border_color(copy_border)
-                                    .bg(theme::BUBBLE_ASSISTANT)
-                                    .opacity(0.)
-                                    .group_hover("umsg", |s| s.opacity(1.))
-                                    .hover(|s| s.bg(theme::HOVER))
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(copy_text.clone()));
-                                        this.copied_flash = Some(flash_key.clone());
-                                        cx.notify();
-                                        let flash_key = flash_key.clone();
-                                        cx.spawn(async move |this, cx| {
-                                            cx.background_executor()
-                                                .timer(std::time::Duration::from_millis(1000))
-                                                .await;
-                                            let _ = this.update(cx, |this, cx| {
-                                                if this.copied_flash.as_deref() == Some(flash_key.as_str()) {
-                                                    this.copied_flash = None;
-                                                    cx.notify();
-                                                }
-                                            });
-                                        })
-                                        .detach();
-                                    }))
-                                    .child(crate::ui::icon(copy_icon_path, px(fonts.icon_small), copy_icon_color)),
+                                    .text_size(px(fonts.font_body_large))
+                                    .text_color(theme::TEXT)
+                                    .child(SharedString::from(text.clone())),
                             )
                             .child(
+                                // copy button shares the time line: pinned left,
+                                // time pushed to the right (mirrors the assistant
+                                // meta line)
                                 div()
-                                    .max_w(px(560.))
-                                    .rounded_lg()
-                                    .bg(theme::BUBBLE_USER)
-                                    .p_2()
-                                    .px_3()
-                                    .on_mouse_down(MouseButton::Right, {
-                                        let menu_text = text.clone();
-                                        cx.listener(move |this, event: &gpui::MouseDownEvent, _, cx| {
-                                            let (x, y) = this.menu_anchor(event);
-                                            this.menu = Some(TileMenu {
-                                                items: vec![
-                                                    ContextMenu::Copy(menu_text.clone()),
-                                                    ContextMenu::EditInput(menu_text.clone()),
-                                                ],
-                                                x,
-                                                y,
-                                            });
-                                            cx.notify();
-                                        })
-                                    })
                                     .flex()
-                                    .flex_col()
+                                    .items_center()
                                     .gap_1()
                                     .child(
                                         div()
-                                            .text_size(px(fonts.font_body_large))
-                                            .text_color(theme::TEXT)
-                                            .child(SharedString::from(text.clone())),
+                                            .id(gpui::ElementId::NamedInteger(
+                                                "ucopy".into(),
+                                                TileView::hash(item_id),
+                                            ))
+                                            .cursor_pointer()
+                                            .p_0p5()
+                                            .rounded_sm()
+                                            .border_1()
+                                            .border_color(copy_border)
+                                            .bg(theme::BUBBLE_USER)
+                                            .opacity(0.)
+                                            .group_hover("umsg", |s| s.opacity(1.))
+                                            .hover(|s| s.bg(theme::HOVER))
+                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                                cx.write_to_clipboard(gpui::ClipboardItem::new_string(copy_text.clone()));
+                                                this.copied_flash = Some(flash_key.clone());
+                                                cx.notify();
+                                                let flash_key = flash_key.clone();
+                                                cx.spawn(async move |this, cx| {
+                                                    cx.background_executor()
+                                                        .timer(std::time::Duration::from_millis(1000))
+                                                        .await;
+                                                    let _ = this.update(cx, |this, cx| {
+                                                        if this.copied_flash.as_deref() == Some(flash_key.as_str()) {
+                                                            this.copied_flash = None;
+                                                            cx.notify();
+                                                        }
+                                                    });
+                                                })
+                                                .detach();
+                                            }))
+                                            .child(crate::ui::icon(copy_icon_path, px(fonts.icon_small), copy_icon_color)),
                                     )
+                                    .child(div().flex_1())
                                     .child(
-                                        div().flex().justify_end().items_center().gap_1().child(
-                                            div()
-                                                .text_size(px(fonts.font_micro))
-                                                .text_color(theme::TEXT_MUTED)
-                                                .opacity(0.55)
-                                                .child(time),
-                                        ),
+                                        div()
+                                            .text_size(px(fonts.font_micro))
+                                            .text_color(theme::TEXT_MUTED)
+                                            .opacity(0.55)
+                                            .child(time),
                                     ),
                             ),
                     )

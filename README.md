@@ -66,12 +66,11 @@ built-in General workspace) lives in `~/.warp-agent`.
 | `src/store/mod.rs` | MainViewModel + ChatTileViewModel + ChatItems | All app logic: workspaces (one `opencode serve` each), the shared tile grid, transcripts, queue w/ Steer/Edit/Remove, permission asks + auto-allow countdowns (lunch/off-hours ranges), `question` tool cards, subagent tracking, prompt history, restore banner |
 | `src/oc.rs` | OpenCodeServer + OpenCodeApiClient | Serve spawn/attach, OPENCODE_CONFIG_CONTENT ask-forcing, free-port pick, 25 s health wait; REST + SSE on a dedicated tokio thread talking to the UI via channels |
 | `src/theme.rs` | App.xaml resources | The whole palette, accent presets (green/amber/salmon/4 grays), font/icon size tokens with compact/normal/large × system factor |
-| `src/ui/markdown.rs` | MarkdownViewerKit.Avalonia **(replaced)** | Own renderer: headings, bold/italic, inline code, fenced code with syntax highlighting + copy button, lists, links (clickable), tables, quotes, rules |
-| `src/ui/highlight.rs` | MarkdownTextBlock highlighter | Keyword/string/comment/number passes per language family |
+| `src/ui/markdown.rs` | MarkdownViewerKit.Avalonia **(replaced)** | gpui-kit TextView markdown: tree-sitter syntax highlighting for fenced code (12 languages, per-block copy button), selectable text, clickable links |
 | `src/ui/diff.rs` | DiffTextBlock | GitHub-style unified diff: line-number gutter, add/del tints, hunk separators |
-| `src/ui/input.rs` | — (gpui has no editor) | Multi-line composer input: wrapping, caret, click-to-position, Up/Down history hooks, Enter/Shift+Enter, Ctrl+V image paste hook |
+| gpui-kit `Textarea` | — (was src/ui/input.rs, deleted) | Multi-line composer input: wrapping, auto-grow, Enter/Shift+Enter submit, Up/Down prompt history, paste-image hook |
 | `src/ui/tile.rs` | ChatTile.axaml(+cs) | Transcript item cards (user/assistant/reasoning/tool/image/permission/question/note), tasks+agents flyout, model/variant/agent pickers, queue rows, attachments |
-| `src/ui/window.rs` | MainWindow.axaml(+cs) | Titlebar (drag/zoom/close/toggle), workspace + chat tree with context menus, drag-resizable sidebar, settings page, restore banner, error overlay |
+| `src/ui/window.rs` | MainWindow.axaml(+cs) | Titlebar (drag/zoom/close/toggle), workspace + chat tree with context menus, drag-resizable sidebar, settings page, restore banner |
 | `src/services.rs` | TerminalLauncher + SystemFontScale | `Open in opencode` terminal probe (alacritty→…), gsettings text-scale follower |
 | `src/settings.rs`, `src/paths.rs`, `src/logging.rs` | AppSettings/UiState/AppPaths/AppLogging | Same files, same defaults, legacy migration |
 | `assets/` | — | Icons + spark logo (embedded) |

@@ -1,5 +1,5 @@
 //! The main window: titlebar, resizable sidebar with workspace/chat trees, the
-//! shared tile grid, the settings page, restore banner and the error overlay.
+//! shared tile grid, the settings page and the restore banner.
 
 use crate::store::{Store, WorkspaceItem};
 use crate::theme;
@@ -35,7 +35,7 @@ impl SideMenuAction {
             SideMenuAction::PinChat(_) => "Pin",
             SideMenuAction::UnpinChat(_) => "Unpin",
             SideMenuAction::RenameChat(_) => "Rename",
-            SideMenuAction::UnlinkChat(_) => "Remove from workspace",
+            SideMenuAction::UnlinkChat(_) => "Remove",
             SideMenuAction::DeleteChat(_) => "Delete",
         }
     }
@@ -90,6 +90,11 @@ pub struct WarpWindow {
     add_folder_receiver: async_channel::Receiver<String>,
     settings_buffers: SettingsBuffers,
     settings_fields: Vec<(&'static str, Entity<InputState>)>,
+    /// settings Model filtered dropdown visibility (opens on field focus)
+    settings_model_open: bool,
+    /// what the Model dropdown filters by: empty on focus (full list), then
+    /// tracks the typed text
+    settings_model_filter: String,
     /// session being renamed + its edit field
     rename: Option<(String, Entity<InputState>)>,
     /// active sidebar resize: (start pointer x, start sidebar width); shared with
@@ -113,6 +118,8 @@ impl WarpWindow {
             add_folder_receiver: folder_rx,
             settings_buffers,
             settings_fields: Vec::new(),
+            settings_model_open: false,
+            settings_model_filter: String::new(),
             rename: None,
             splitter_drag: std::rc::Rc::new(std::cell::Cell::new(None)),
         }
@@ -341,15 +348,6 @@ impl WarpWindow {
             )
             .child(
                 div()
-                    .id("titlebar-drag")
-                    .flex_1()
-                    .h_full()
-                    .on_mouse_down(MouseButton::Left, |_, window, _| {
-                        window.start_window_move();
-                    }),
-            )
-            .child(
-                div()
                     .id("toggle-sidebar")
                     .cursor_pointer()
                     .size(px(26.))
@@ -365,6 +363,15 @@ impl WarpWindow {
                         crate::ui::icon("icons/panel-left.svg", px(fonts.icon_medium), theme::TEXT_MUTED)
                     } else {
                         crate::ui::icon("icons/panel-left-open.svg", px(fonts.icon_medium), theme::TEXT_MUTED)
+                    }),
+            )
+            .child(
+                div()
+                    .id("titlebar-drag")
+                    .flex_1()
+                    .h_full()
+                    .on_mouse_down(MouseButton::Left, |_, window, _| {
+                        window.start_window_move();
                     }),
             )
             .child(
@@ -497,6 +504,8 @@ impl WarpWindow {
                         });
                         this.settings_buffers = SettingsBuffers::from_settings(&this.store.read(cx).settings);
                         this.settings_fields = this.make_settings_fields(window, cx);
+                        this.settings_model_open = false;
+                        this.settings_model_filter.clear();
                         cx.notify();
                     }))
                     .child(crate::ui::icon("icons/cog.svg", px(fonts.icon_medium), theme::TEXT_MUTED))
@@ -701,6 +710,7 @@ impl WarpWindow {
             .hover(|s| s.bg(theme::HOVER))
             .cursor_pointer()
             .on_click(move |_, _, cx| {
+                tracing::info!("chat-row clicked {}", id_click);
                 store_click.update(cx, |s, cx| s.select_session(&id_click, cx));
             })
             .on_mouse_down(MouseButton::Right, move |event: &gpui::MouseDownEvent, _, cx| {
@@ -873,6 +883,27 @@ impl WarpWindow {
                         .placeholder("")
                         .default_value(value)
                 });
+                if key == "model" {
+                    // focus opens the dropdown on the full list, typing
+                    // refilters it, blur (another field took focus) closes it
+                    cx.subscribe(&entity, move |this, field, event: &InputEvent, cx| match event {
+                        InputEvent::Focus => {
+                            this.settings_model_open = true;
+                            this.settings_model_filter.clear();
+                            cx.notify();
+                        }
+                        InputEvent::Blur => {
+                            this.settings_model_open = false;
+                            cx.notify();
+                        }
+                        InputEvent::Change => {
+                            this.settings_model_filter = field.read(cx).value().to_lowercase();
+                            cx.notify();
+                        }
+                        InputEvent::PressEnter { .. } => {}
+                    })
+                    .detach();
+                }
                 (key, entity)
             })
             .collect()
@@ -884,6 +915,84 @@ impl WarpWindow {
             .find(|(k, _)| *k == key)
             .map(|(_, f)| div().flex_1().min_w_0().child(Input::new(f)).into_any_element())
             .unwrap_or_else(|| div().into_any_element())
+    }
+
+    /// Filtered model dropdown under the settings Model field: lists the
+    /// store's known models, narrowed by `settings_model_filter`; picking a
+    /// row fills the field ("(server default)" clears it).
+    fn settings_model_dropdown(&mut self, fonts: &theme::FontTokens, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let filter = self.settings_model_filter.clone();
+        let entries: Vec<String> = {
+            let store = self.store.read(cx);
+            store
+                .models
+                .iter()
+                .filter(|m| filter.is_empty() || m.to_lowercase().contains(&filter))
+                .cloned()
+                .collect()
+        };
+        let field = self
+            .settings_fields
+            .iter()
+            .find(|(k, _)| *k == "model")
+            .map(|(_, f)| f.clone());
+        let mut list = div()
+            .id("model-dd-list")
+            .flex()
+            .flex_col()
+            .max_h(px(220.))
+            .overflow_y_scroll();
+        if entries.is_empty() {
+            list = list.child(
+                div()
+                    .px_2()
+                    .py_1()
+                    .text_size(px(fonts.font_small))
+                    .text_color(theme::TEXT_MUTED)
+                    .opacity(0.6)
+                    .child("No matching model"),
+            );
+        }
+        for entry in entries {
+            let is_sentinel = entry.starts_with('(');
+            let field = field.clone();
+            list = list.child(
+                div()
+                    .id(gpui::ElementId::NamedInteger("model-row".into(), TileView::hash(&entry)))
+                    .px_2()
+                    .py_1()
+                    .rounded_md()
+                    .text_size(px(fonts.font_small))
+                    .text_color(if is_sentinel { theme::TEXT_MUTED } else { theme::TEXT })
+                    .cursor_pointer()
+                    .hover(|s| s.bg(theme::HOVER))
+                    .on_click({
+                        let entry = entry.clone();
+                        cx.listener(move |this, _, window, cx| {
+                            if let Some(field) = &field {
+                                let value: String = if is_sentinel { String::new() } else { entry.clone() };
+                                field.update(cx, |state, cx| state.set_value(value.as_str(), window, cx));
+                            }
+                            this.settings_model_open = false;
+                            cx.notify();
+                        })
+                    })
+                    .child(SharedString::from(entry)),
+            );
+        }
+        div()
+            .ml(px(160.))
+            .child(
+                div()
+                    .rounded_md()
+                    .border_1()
+                    .border_color(theme::HAIRLINE)
+                    .bg(theme::SETTINGS_BG)
+                    .p_1()
+                    .shadow_lg()
+                    .child(list),
+            )
+            .into_any_element()
     }
 
     fn small_button(&self, label: &str, fonts: &theme::FontTokens, on_click: impl Fn(&mut App) + 'static) -> gpui::AnyElement {
@@ -1155,16 +1264,9 @@ impl WarpWindow {
             );
         }
 
-        let (settings_open, error_visible) = {
-            let store = self.store.read(cx);
-            (store.is_settings_open, store.error.is_visible)
-        };
+        let settings_open = self.store.read(cx).is_settings_open;
         if settings_open {
             main = main.child(self.render_settings(cx));
-        }
-
-        if error_visible {
-            main = main.child(self.render_error_overlay(cx));
         }
 
         main.into_any_element()
@@ -1177,6 +1279,12 @@ impl WarpWindow {
         let buffers = self.settings_buffers.clone();
         let close_store = self.store.clone();
         let save_store = self.store.clone();
+        // built before the page chain: the builder borrows cx mutably below
+        let model_dropdown = if self.settings_model_open {
+            Some(self.settings_model_dropdown(&fonts, cx))
+        } else {
+            None
+        };
 
         let mut page = div()
             .id("settings-page")
@@ -1196,19 +1304,26 @@ impl WarpWindow {
                     div()
                         .flex()
                         .items_center()
-                        .justify_between()
+                        .gap_2()
+                        .child(
+                            div()
+                                .id("settings-back")
+                                .cursor_pointer()
+                                .p_1()
+                                .rounded_md()
+                                .hover(|s| s.bg(theme::HOVER))
+                                .on_click(move |_, _, cx| {
+                                    close_store.update(cx, |s, _| s.is_settings_open = false);
+                                })
+                                .child(crate::ui::icon("icons/arrow-left.svg", px(fonts.icon_medium), theme::TEXT_MUTED)),
+                        )
                         .child(
                             div()
                                 .text_size(px(fonts.font_title))
                                 .font_weight(gpui::FontWeight::SEMIBOLD)
                                 .text_color(theme::TEXT)
                                 .child("Settings"),
-                        )
-                        .child(self.small_button("Back", &fonts, {
-                            move |cx| {
-                                close_store.update(cx, |s, _| s.is_settings_open = false);
-                            }
-                        })),
+                        ),
                 )
                 .child(
                     div()
@@ -1227,9 +1342,29 @@ impl WarpWindow {
                                 ]))
                                 .child(self.settings_section("Chat defaults", &fonts))
                                 .child(self.settings_card(vec![
-                                    div().flex().items_center().gap_2p5()
-                                        .child(self.settings_label("Model", &fonts))
-                                        .child(self.settings_field_wrap("model")).into_any_element(),
+                                    div().flex().flex_col().gap_1()
+                                        .child(
+                                            div().flex().items_center().gap_2p5()
+                                                .child(self.settings_label("Model", &fonts))
+                                                .child(self.settings_field_wrap("model"))
+                                                .child(
+                                                    div()
+                                                        .id("model-dd-toggle")
+                                                        .cursor_pointer()
+                                                        .p_1()
+                                                        .rounded_md()
+                                                        .hover(|s| s.bg(theme::HOVER))
+                                                        .on_click(cx.listener(|this, _, _, cx| {
+                                                            this.settings_model_open = !this.settings_model_open;
+                                                            this.settings_model_filter.clear();
+                                                            cx.notify();
+                                                        }))
+                                                        .child(crate::ui::icon("icons/chevron-down.svg", px(fonts.icon_small), theme::TEXT_MUTED)),
+                                                )
+                                                .into_any_element(),
+                                        )
+                                        .when_some(model_dropdown, |col, el| col.child(el))
+                                        .into_any_element(),
                                     div().flex().items_center().gap_2p5()
                                         .child(self.settings_label("Variant", &fonts))
                                         .child(self.settings_field_wrap("variant")).into_any_element(),
@@ -1353,117 +1488,4 @@ impl WarpWindow {
         page.into_any_element()
     }
 
-    // ---- error overlay ----
-
-    fn render_error_overlay(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
-        let fonts = self.store.read(cx).fonts;
-        let (source, is_fatal, message, details, has_more, more_label) = {
-            let store = self.store.read(cx);
-            let e = &store.error;
-            (e.source.clone(), e.is_fatal, e.error_message.clone(), e.error_details.clone(), e.has_more(), e.more_label())
-        };
-        let store_handle = self.store.clone();
-        div()
-            .absolute()
-            .inset_0()
-            .bg(theme::OVERLAY_SCRIM)
-            .flex()
-            .items_center()
-            .justify_center()
-            .child(
-                div()
-                    .max_w(px(560.))
-                    .rounded_xl()
-                    .border_1()
-                    .border_color(theme::HAIRLINE)
-                    .bg(theme::CARD)
-                    .p_4()
-                    .flex()
-                    .flex_col()
-                    .gap_3()
-                    .child(
-                        div()
-                            .flex()
-                            .items_start()
-                            .gap_2p5()
-                            .child(crate::ui::icon("icons/warn.svg", px(fonts.icon_large), theme::DANGER))
-                            .child(
-                                div()
-                                    .flex()
-                                    .flex_col()
-                                    .gap_0p5()
-                                    .flex_1()
-                                    .child(
-                                        div()
-                                            .text_size(px(fonts.font_body_large))
-                                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                                            .text_color(theme::TEXT)
-                                            .child("Something went wrong"),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_size(px(fonts.font_xsmall))
-                                            .text_color(theme::TEXT_MUTED)
-                                            .child(SharedString::from(source.clone())),
-                                    ),
-                            ),
-                    )
-                    .when(is_fatal, |d| {
-                        d.child(
-                            div()
-                                .text_size(px(fonts.font_xsmall))
-                                .text_color(theme::DANGER)
-                                .child("This error is fatal — the app closes when you continue."),
-                        )
-                    })
-                    .child(
-                        div()
-                            .text_size(px(fonts.font_body))
-                            .text_color(theme::TEXT)
-                            .child(SharedString::from(message.clone())),
-                    )
-                    .child(
-                        div()
-                            .id("error-details")
-                            .rounded_lg()
-                            .bg(theme::DIFF_BG)
-                            .p_2p5()
-                            .max_h(px(220.))
-                            .overflow_y_scroll()
-                            .text_size(px(fonts.font_detail))
-                            .font_family(theme::code_font())
-                            .text_color(theme::TEXT)
-                            .opacity(0.75)
-                            .child(SharedString::from(details.clone())),
-                    )
-                    .when(has_more, |d| {
-                        d.child(
-                            div()
-                                .text_size(px(fonts.font_xsmall))
-                                .text_color(theme::TEXT_MUTED)
-                                .child(SharedString::from(more_label.clone())),
-                        )
-                    })
-                    .child(
-                        div()
-                            .flex()
-                            .justify_end()
-                            .gap_2()
-                            .child(self.small_button("Copy details", &fonts, {
-                                let store = store_handle.clone();
-                                move |cx| {
-                                    let text = store.read(cx).error_copy_text();
-                                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
-                                }
-                            }))
-                            .child(self.small_button("Continue", &fonts, {
-                                let store = store_handle.clone();
-                                move |cx| {
-                                    store.update(cx, |s, _| s.close_error_report());
-                                }
-                            })),
-                    ),
-            )
-            .into_any_element()
-    }
 }

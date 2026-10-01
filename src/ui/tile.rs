@@ -46,6 +46,10 @@ pub struct TileView {
     pub key: String,
     store: Entity<Store>,
     scroll: ScrollHandle,
+    /// wheel animation target; None when the scroll is at rest
+    scroll_target: Option<Pixels>,
+    /// whether the smooth-scroll animation loop is running
+    scroll_anim: bool,
     pinned: bool,
     last_max: Pixels,
     expanded: HashSet<String>, // fold state by item id
@@ -59,12 +63,14 @@ pub struct TileView {
     last_composer_text: String,
     flyout_open: bool,
     last_spring_seen: bool,
+    /// item id whose copy button is flashing its "copied" state right now
+    copied_flash: Option<String>,
 }
 
-/// A context menu request: what to do plus the tile-local anchor point.
+/// A context menu request: the actions to offer plus the tile-local anchor point.
 #[derive(Clone)]
 struct TileMenu {
-    kind: ContextMenu,
+    items: Vec<ContextMenu>,
     x: f32,
     y: f32,
 }
@@ -123,12 +129,22 @@ fn context_ring(frac: f32) -> gpui::AnyElement {
 
 impl TileView {
     pub fn new(store: Entity<Store>, key: String, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        // kit textarea: submit_on_enter gives Warp-style Enter=send, Shift+Enter=newline
+        // kit textarea: submit_on_enter gives Warp-style Enter=send, Shift+Enter=newline;
+        // a persisted draft (ui.json) is restored straight into the field
+        let initial = store
+            .read(cx)
+            .tile_by_key(&key)
+            .map(|t| t.input.clone())
+            .unwrap_or_default();
         let composer = cx.new(|cx| {
-            TextareaState::new(window, cx)
+            let mut state = TextareaState::new(window, cx)
                 .placeholder("Ask opencode…")
                 .submit_on_enter(true)
-                .auto_grow(2, 9)
+                .auto_grow(2, 9);
+            if !initial.is_empty() {
+                state.set_value(initial.as_str(), window, cx);
+            }
+            state
         });
 
         let store_handle = store.clone();
@@ -160,6 +176,7 @@ impl TileView {
                 let key = key_for_send.clone();
                 store_handle.update(cx, move |s, cx| s.send_from_tile(&key, cx));
                 this.pinned = true;
+                this.scroll_target = None;
                 this.scroll.scroll_to_bottom();
                 cx.notify();
             }
@@ -170,6 +187,8 @@ impl TileView {
             key,
             store,
             scroll: ScrollHandle::new(),
+            scroll_target: None,
+            scroll_anim: false,
             pinned: true,
             last_max: px(0.),
             expanded: HashSet::new(),
@@ -181,6 +200,7 @@ impl TileView {
             last_composer_text: String::new(),
             flyout_open: false,
             last_spring_seen: false,
+            copied_flash: None,
         }
     }
 
@@ -230,6 +250,53 @@ impl TileView {
         store.tile_by_key(&self.key)
     }
 
+    /// Glides the transcript toward `target_y` with exponential smoothing
+    /// (~60 fps steps). Safe to call per wheel event: the target updates and
+    /// a single animation loop drives the handle until it settles.
+    fn animate_scroll_to(&mut self, target_y: Pixels, cx: &mut Context<Self>) {
+        self.scroll_target = Some(target_y);
+        if self.scroll_anim {
+            return;
+        }
+        self.scroll_anim = true;
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(16))
+                    .await;
+                let settled = this.update(cx, |this, cx| {
+                    let Some(target) = this.scroll_target else {
+                        this.scroll_anim = false;
+                        return true;
+                    };
+                    let max = this.scroll.max_offset();
+                    let target_y = target.min(max.y);
+                    let offset = this.scroll.offset();
+                    // gpui stores the handle offset negative-down (0 at top,
+                    // -max at bottom); scroll_target counts distance scrolled
+                    let current = -offset.y;
+                    let diff = target_y - current;
+                    if diff.abs() < px(1.) {
+                        this.scroll.set_offset(gpui::point(offset.x, -target_y));
+                        this.scroll_target = None;
+                        this.scroll_anim = false;
+                        this.pinned = target_y >= max.y - px(1.);
+                    } else {
+                        this.scroll
+                            .set_offset(gpui::point(offset.x, -(current + diff * 0.35)));
+                    }
+                    cx.notify();
+                    this.scroll_anim
+                });
+                let Ok(settled) = settled else { break };
+                if settled {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
     fn render_item(
         &mut self,
         item_id: &str,
@@ -244,6 +311,13 @@ impl TileView {
                 let text = text.clone();
                 let time = crate::store::message_time_label(*created_ms);
                 let copy_text = text.clone();
+                let flash_key = item_id.to_string();
+                let flashed = self.copied_flash.as_deref() == Some(item_id);
+                let (copy_icon_path, copy_icon_color, copy_border) = if flashed {
+                    ("icons/check.svg", accent, accent)
+                } else {
+                    ("icons/copy.svg", theme::TEXT_MUTED, theme::HAIRLINE)
+                };
                 div()
                     .w_full()
                     .flex()
@@ -264,13 +338,31 @@ impl TileView {
                                     .mt_1()
                                     .p_1()
                                     .rounded_sm()
+                                    .border_1()
+                                    .border_color(copy_border)
+                                    .bg(theme::BUBBLE_ASSISTANT)
                                     .opacity(0.)
                                     .group_hover("umsg", |s| s.opacity(1.))
                                     .hover(|s| s.bg(theme::HOVER))
-                                    .on_click(move |_, _, cx| {
+                                    .on_click(cx.listener(move |this, _, _, cx| {
                                         cx.write_to_clipboard(gpui::ClipboardItem::new_string(copy_text.clone()));
-                                    })
-                                    .child(crate::ui::icon("icons/copy.svg", px(fonts.icon_small), theme::TEXT_MUTED)),
+                                        this.copied_flash = Some(flash_key.clone());
+                                        cx.notify();
+                                        let flash_key = flash_key.clone();
+                                        cx.spawn(async move |this, cx| {
+                                            cx.background_executor()
+                                                .timer(std::time::Duration::from_millis(1000))
+                                                .await;
+                                            let _ = this.update(cx, |this, cx| {
+                                                if this.copied_flash.as_deref() == Some(flash_key.as_str()) {
+                                                    this.copied_flash = None;
+                                                    cx.notify();
+                                                }
+                                            });
+                                        })
+                                        .detach();
+                                    }))
+                                    .child(crate::ui::icon(copy_icon_path, px(fonts.icon_small), copy_icon_color)),
                             )
                             .child(
                                 div()
@@ -283,7 +375,14 @@ impl TileView {
                                         let menu_text = text.clone();
                                         cx.listener(move |this, event: &gpui::MouseDownEvent, _, cx| {
                                             let (x, y) = this.menu_anchor(event);
-                                            this.menu = Some(TileMenu { kind: ContextMenu::Copy(menu_text.clone()), x, y });
+                                            this.menu = Some(TileMenu {
+                                                items: vec![
+                                                    ContextMenu::Copy(menu_text.clone()),
+                                                    ContextMenu::EditInput(menu_text.clone()),
+                                                ],
+                                                x,
+                                                y,
+                                            });
                                             cx.notify();
                                         })
                                     })
@@ -313,7 +412,14 @@ impl TileView {
                 let time = crate::store::message_time_label(*created_ms);
                 let meta = meta_label.clone();
                 let copy_text = text.clone();
-                let markdown = render_markdown(text);
+                let flash_key = item_id.to_string();
+                let flashed = self.copied_flash.as_deref() == Some(item_id);
+                let (copy_icon_path, copy_icon_color, copy_border) = if flashed {
+                    ("icons/check.svg", accent, accent)
+                } else {
+                    ("icons/copy.svg", theme::TEXT_MUTED, theme::HAIRLINE)
+                };
+                let markdown = render_markdown(text, fonts.icon_small);
                 div()
                     .w_full()
                     .flex()
@@ -333,30 +439,48 @@ impl TileView {
                             .gap_1()
                             .child(markdown)
                             .child(
-                                div().flex().child(
-                                div()
-                                    .id(gpui::ElementId::NamedInteger(
-                                        "acopy".into(),
-                                        TileView::hash(item_id),
-                                    ))
-                                    .cursor_pointer()
-                                    .p_0p5()
-                                    .rounded_sm()
-                                    .opacity(0.)
-                                    .group_hover("amsg", |s| s.opacity(1.))
-                                    .hover(|s| s.bg(theme::HOVER))
-                                    .on_click(move |_, _, cx| {
-                                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(copy_text.clone()));
-                                    })
-                                    .child(crate::ui::icon("icons/copy.svg", px(fonts.icon_small), theme::TEXT_MUTED)),
-                                ),
-                            )
-                            .child(
+                                // copy button shares the meta line: pinned left,
+                                // token flow + time pushed to the right
                                 div()
                                     .flex()
-                                    .justify_end()
                                     .items_center()
                                     .gap_1()
+                                    .child(
+                                        div()
+                                            .id(gpui::ElementId::NamedInteger(
+                                                "acopy".into(),
+                                                TileView::hash(item_id),
+                                            ))
+                                            .cursor_pointer()
+                                            .p_0p5()
+                                            .rounded_sm()
+                                            .border_1()
+                                            .border_color(copy_border)
+                                            .bg(theme::BUBBLE_ASSISTANT)
+                                            .opacity(0.)
+                                            .group_hover("amsg", |s| s.opacity(1.))
+                                            .hover(|s| s.bg(theme::HOVER))
+                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                                cx.write_to_clipboard(gpui::ClipboardItem::new_string(copy_text.clone()));
+                                                this.copied_flash = Some(flash_key.clone());
+                                                cx.notify();
+                                                let flash_key = flash_key.clone();
+                                                cx.spawn(async move |this, cx| {
+                                                    cx.background_executor()
+                                                        .timer(std::time::Duration::from_millis(1000))
+                                                        .await;
+                                                    let _ = this.update(cx, |this, cx| {
+                                                        if this.copied_flash.as_deref() == Some(flash_key.as_str()) {
+                                                            this.copied_flash = None;
+                                                            cx.notify();
+                                                        }
+                                                    });
+                                                })
+                                                .detach();
+                                            }))
+                                            .child(crate::ui::icon(copy_icon_path, px(fonts.icon_small), copy_icon_color)),
+                                    )
+                                    .child(div().flex_1())
                                     .child(div().text_size(px(fonts.font_micro)).text_color(theme::TEXT_MUTED).opacity(0.7).child(meta))
                                     .child(
                                         div()
@@ -430,10 +554,10 @@ impl TileView {
                                 cx.listener(move |this, event: &gpui::MouseDownEvent, _, cx| {
                                     let (x, y) = this.menu_anchor(event);
                                     this.menu = Some(TileMenu {
-                                        kind: ContextMenu::CopyImage {
+                                        items: vec![ContextMenu::CopyImage {
                                             file_name: menu_name.clone(),
                                             png: menu_png.clone(),
-                                        },
+                                        }],
                                         x,
                                         y,
                                     });
@@ -1155,7 +1279,6 @@ impl Render for TileView {
             is_connected: bool,
             is_focused: bool,
             title: String,
-            variant: String,
             ctx: String,
             ctx_frac: f32,
             has_ctx: bool,
@@ -1201,7 +1324,6 @@ impl Render for TileView {
                     .unwrap_or(store.is_server_running),
                 is_focused: tile.is_focused,
                 title: tile.title.clone(),
-                variant: tile.selected_variant.clone().unwrap_or_default(),
                 ctx: tile.context_text.clone().unwrap_or_default(),
                 ctx_frac: tile.context_frac,
                 has_ctx: tile.has_context(),
@@ -1255,6 +1377,7 @@ impl Render for TileView {
         // transcript auto-scroll: keep pinned while content grows
         let max_now = self.scroll.max_offset().y;
         if self.pinned && max_now > self.last_max + px(0.5) && max_now > px(0.) {
+            self.scroll_target = None;
             self.scroll.scroll_to_bottom();
         }
         if max_now != self.last_max {
@@ -1266,19 +1389,22 @@ impl Render for TileView {
             .id("transcript")
             .flex_1()
             .min_h_0()
-            .overflow_y_scroll()
+            .overflow_hidden()
             .track_scroll(&self.scroll.clone())
-            .on_scroll_wheel(cx.listener(|this, event: &gpui::ScrollWheelEvent, _window, cx| {
-                let offset = this.scroll.offset();
+            .on_scroll_wheel(cx.listener(|this, event: &gpui::ScrollWheelEvent, window, cx| {
+                // the wheel no longer scrolls natively (overflow_hidden keeps
+                // the handle-driven offset) — deltas accumulate into a target
+                // and a 60 fps animation glides the handle there
+                let delta = event.delta.pixel_delta(window.line_height()).y;
+                if delta == px(0.) {
+                    return;
+                }
                 let max = this.scroll.max_offset();
-                let at_bottom = offset.y >= max.y - px(1.);
-                this.pinned = at_bottom;
-                // gpui-pre 0.3.7's native overflow handler scrolls the tracked
-                // handle itself (the old zed-git rev didn't, which is why this
-                // listener used to apply the delta manually — that now doubles
-                // every notch). Only pinned bookkeeping remains here.
-                let _ = event;
-                cx.notify();
+                let base = this.scroll_target.unwrap_or_else(|| -this.scroll.offset().y);
+                // wheel deltas are positive-up; the target counts down
+                let target = (base - delta).clamp(px(0.), max.y);
+                this.pinned = target >= max.y - px(1.);
+                this.animate_scroll_to(target, cx);
             }))
             .p_1()
             .flex()
@@ -1611,19 +1737,7 @@ impl Render for TileView {
         let close_key = self.key.clone();
 
         let mut header_right = div().flex().items_center().gap_1p5();
-        // meta readout: variant · context, with a usage ring beside the
-        // context readout
-        if !snap.variant.is_empty() {
-            header_right = header_right.child(
-                div()
-                    .max_w(px(120.))
-                    .text_size(px_size(fonts.font_micro))
-                    .text_color(theme::TEXT_MUTED)
-                    .opacity(0.5)
-                    .truncate()
-                    .child(SharedString::from(snap.variant.clone())),
-            );
-        }
+        // context usage ring + numeric readout (no "Ctx" label)
         if snap.has_ctx {
             header_right = header_right.child(
                 div()
@@ -1957,17 +2071,73 @@ impl Render for TileView {
         let menu_owner_key = self.key.clone();
         let mut menu_el: gpui::AnyElement = div().into_any_element();
         if let Some(menu) = self.menu.clone() {
-            let label = match &menu.kind {
-                ContextMenu::Copy(_) => "Copy",
-                ContextMenu::EditInput(_) => "Edit in input",
-                ContextMenu::CopyImage { .. } => "Copy image",
-            };
             let store_handle = self.store.clone();
-            let menu_clone = menu.kind.clone();
+            let composer_handle = self.composer.clone();
             // click-elsewhere catcher closes the menu. Must close on full click,
             // not mouse-down: a down-handler unmounts the menu rows before
             // their on_click (mouse-up) can run, so actions never fire.
             let close_entity = tile_entity.clone();
+            let mut rows = div().flex().flex_col();
+            for (ix, item) in menu.items.iter().enumerate() {
+                let label = match item {
+                    ContextMenu::Copy(_) => "Copy",
+                    ContextMenu::EditInput(_) => "Edit in input",
+                    ContextMenu::CopyImage { .. } => "Copy image",
+                };
+                let store_handle = store_handle.clone();
+                let tile_entity = tile_entity.clone();
+                let menu_owner_key = menu_owner_key.clone();
+                let composer_handle = composer_handle.clone();
+                let item = item.clone();
+                rows = rows.child(
+                    div()
+                        .id(gpui::ElementId::NamedInteger("menu-row".into(), ix as u64))
+                        .px_2()
+                        .py_1()
+                        .rounded_md()
+                        .text_size(px_size(fonts.font_small))
+                        .text_color(theme::TEXT)
+                        .cursor_pointer()
+                        .hover(|s| s.bg(theme::HOVER))
+                        .on_click(move |_, window, cx| {
+                            match &item {
+                                ContextMenu::Copy(text) => {
+                                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(text.clone()));
+                                }
+                                ContextMenu::EditInput(text) => {
+                                    let text = text.clone();
+                                    // the tile that showed the menu, not wherever focus happens to be
+                                    let key = menu_owner_key.clone();
+                                    let composer = composer_handle.clone();
+                                    store_handle.update(cx, {
+                                        let text = text.clone();
+                                        move |s, _| {
+                                            if let Some(tile) = s.tile_by_key_mut(&key) {
+                                                tile.input = text;
+                                                tile.reset_history();
+                                            }
+                                        }
+                                    });
+                                    // set_value emits no Change, so the store copy above stands
+                                    composer.update(cx, |field, cx| field.set_value(text, window, cx));
+                                }
+                                ContextMenu::CopyImage { file_name: _, png } => {
+                                    let image = gpui::Image {
+                                        format: ImageFormat::Png,
+                                        bytes: png.clone(),
+                                        id: 0,
+                                    };
+                                    cx.write_to_clipboard(gpui::ClipboardItem::new_image(&image));
+                                }
+                            }
+                            tile_entity.update(cx, |tv, cx| {
+                                tv.menu = None;
+                                cx.notify();
+                            });
+                        })
+                        .child(label),
+                );
+            }
             menu_el = div()
                 .id("menu-catcher")
                 .absolute()
@@ -1992,49 +2162,8 @@ impl Render for TileView {
                     .p_1()
                     .shadow_lg()
                     .min_w(px(160.))
-                    .child(
-                        div()
-                            .id("menu-row")
-                            .px_2()
-                            .py_1()
-                            .rounded_md()
-                            .text_size(px_size(fonts.font_small))
-                            .text_color(theme::TEXT)
-                            .cursor_pointer()
-                            .hover(|s| s.bg(theme::HOVER))
-                            .on_click(move |_, _, cx| {
-                                match &menu_clone {
-                                    ContextMenu::Copy(text) => {
-                                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(text.clone()));
-                                    }
-                                    ContextMenu::EditInput(text) => {
-                                        let text = text.clone();
-                                        // the tile that showed the menu, not wherever focus happens to be
-                                        let key = menu_owner_key.clone();
-                                        store_handle.update(cx, move |s, _| {
-                                            if let Some(tile) = s.tile_by_key_mut(&key) {
-                                                tile.input = text.clone();
-                                                tile.reset_history();
-                                            }
-                                        });
-                                    }
-                                    ContextMenu::CopyImage { file_name: _, png } => {
-                                        let image = gpui::Image {
-                                            format: ImageFormat::Png,
-                                            bytes: png.clone(),
-                                            id: 0,
-                                        };
-                                        cx.write_to_clipboard(gpui::ClipboardItem::new_image(&image));
-                                    }
-                                }
-                                tile_entity.update(cx, |tv, cx| {
-                                    tv.menu = None;
-                                    cx.notify();
-                                });
-                            })
-                            .child(label),
-                    ),
-                ),
+                    .child(rows),
+            ),
             )
             .into_any_element();
         }
@@ -2134,8 +2263,8 @@ impl Render for TileView {
                         .cursor_pointer()
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.pinned = true;
-                            this.scroll.scroll_to_bottom();
-                            cx.notify();
+                            let target = this.scroll.max_offset().y;
+                            this.animate_scroll_to(target, cx);
                         }))
                         .child(crate::ui::icon("icons/arrow-down.svg", px_size(fonts.icon_small), theme::TEXT)),
                 )
@@ -2156,6 +2285,17 @@ impl Render for TileView {
                     .flex()
                     .flex_col()
                     .gap_1p5()
+                    // files dragged from the file manager land here as attachments
+                    .drag_over::<gpui::ExternalPaths>(move |style, _, _, _| style.border_color(accent))
+                    .on_drop({
+                        let store = self.store.clone();
+                        let key = self.key.clone();
+                        move |paths: &gpui::ExternalPaths, _, cx| {
+                            let paths: Vec<std::path::PathBuf> = paths.paths().to_vec();
+                            let key = key.clone();
+                            store.update(cx, move |s, cx| s.attach_paths(&key, &paths, cx));
+                        }
+                    })
                     .on_mouse_down(MouseButton::Left, {
                         let composer = self.composer.clone();
                         move |_, window, cx| {

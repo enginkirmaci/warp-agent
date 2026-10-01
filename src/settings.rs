@@ -117,6 +117,11 @@ pub struct UiState {
     pub sidebar_width: Option<f64>,
     #[serde(rename = "SidebarVisible", default)]
     pub sidebar_visible: Option<bool>,
+    /// Unsent composer text per open chat, keyed by session id; restored when
+    /// the chat's tile reopens. Draft-only tiles (no session yet) are not
+    /// persisted — the app still never launches with a phantom draft.
+    #[serde(rename = "Drafts", default)]
+    pub drafts: std::collections::HashMap<String, String>,
 }
 
 impl UiState {

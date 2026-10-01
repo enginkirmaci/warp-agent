@@ -489,13 +489,13 @@ impl ChatTile {
             None
         } else if self.context_limit > 0 {
             Some(format!(
-                "Ctx {}% · {} / {}",
+                "{}% · {} / {}",
                 format_percent(total as f64 * 100.0 / self.context_limit as f64),
                 format_tokens(total),
                 format_tokens(self.context_limit)
             ))
         } else {
-            Some(format!("Ctx {} tok", format_tokens(total)))
+            Some(format!("{} tok", format_tokens(total)))
         };
     }
 
@@ -1129,42 +1129,6 @@ impl SessionItem {
     }
 }
 
-// ---- misc VMs -------------------------------------------------------------
-
-pub struct ErrorOverlayState {
-    pub is_visible: bool,
-    pub source: String,
-    pub is_fatal: bool,
-    pub error_type: String,
-    pub error_message: String,
-    pub error_details: String,
-    pub more_count: usize,
-    queue: Vec<(String, String, String)>, // (source, type, formatted message+details)
-}
-
-impl ErrorOverlayState {
-    fn new() -> Self {
-        Self {
-            is_visible: false,
-            source: String::new(),
-            is_fatal: false,
-            error_type: String::new(),
-            error_message: String::new(),
-            error_details: String::new(),
-            more_count: 0,
-            queue: Vec::new(),
-        }
-    }
-
-    pub fn has_more(&self) -> bool {
-        self.more_count > 0
-    }
-
-    pub fn more_label(&self) -> String {
-        format!("+{} more waiting", self.more_count)
-    }
-}
-
 // ---- the store -----------------------------------------------------------
 
 struct WorkspaceRuntime {
@@ -1200,7 +1164,6 @@ pub struct Store {
     pub is_settings_open: bool,
     pub show_restore_prompt: bool,
     pub restore_prompt_text: String,
-    pub error: ErrorOverlayState,
 
     pub sidebar_shown_width: f32,
     pub sidebar_visible: bool,
@@ -1278,7 +1241,6 @@ impl Store {
             is_settings_open: false,
             show_restore_prompt: false,
             restore_prompt_text: String::new(),
-            error: ErrorOverlayState::new(),
             sidebar_shown_width: ui
                 .sidebar_width
                 .unwrap_or(theme::SIDEBAR_DEFAULT_WIDTH as f64)
@@ -1375,6 +1337,7 @@ impl Store {
         self.ui.active_workspace = self.selected_workspace.clone();
         self.ui.auto_allow_always = Some(self.auto_allow);
         self.persist_tiles();
+        self.persist_drafts();
         // persist_tiles (and most mutations) write the runtime WorkspaceItems;
         // ui.workspaces is the mirror that actually gets serialized, so copy
         // the persisted fields back before saving
@@ -1387,6 +1350,24 @@ impl Store {
             }
         }
         self.ui.save();
+    }
+
+    /// Merge open tiles' composer text over the saved draft map. Closing a
+    /// tile keeps its draft (the chat lives on in the sidebar); drafts for
+    /// sessions that no longer exist anywhere are dropped.
+    fn persist_drafts(&mut self) {
+        for tile in &self.open_tiles {
+            let Some(sid) = &tile.session_id else { continue };
+            if tile.input.trim().is_empty() {
+                self.ui.drafts.remove(sid);
+            } else {
+                self.ui.drafts.insert(sid.clone(), tile.input.clone());
+            }
+        }
+        self.ui.drafts.retain(|sid, _| {
+            self.tile_by_session.contains_key(sid)
+                || self.workspaces.iter().any(|w| w.state.sessions.contains(sid))
+        });
     }
 
     fn persist_tiles(&mut self) {
@@ -1828,6 +1809,10 @@ impl Store {
                     let mut tile = ChatTile::new(key.clone(), self.seed_model(), self.seed_agent(), self.seed_variant());
                     tile.session_id = Some(session_id.clone());
                     tile.title = title;
+                    // restore the unsent composer draft, if one was saved
+                    if let Some(draft) = self.ui.drafts.get(&session_id) {
+                        tile.input = draft.clone();
+                    }
                     {
                         let mut next_key = self.next_key;
                         tile.restore(&messages, self, &mut next_key);
@@ -2240,6 +2225,10 @@ impl Store {
         let Some(tile) = self.tile_by_key(tile_key) else { return };
         let is_busy = tile.is_busy(self);
         let session_id = tile.session_id.clone();
+        if let Some(sid) = &session_id {
+            // the composer text is going out; a saved draft would resurrect it
+            self.ui.drafts.remove(sid);
+        }
 
         if is_busy {
             // park the message on this chat; it is sent when that chat goes idle
@@ -2648,11 +2637,9 @@ impl Store {
     }
 
     pub fn sort_sessions(&mut self) {
-        let pins = &self.ui.pins;
         self.sessions.sort_by_key(|s| {
             std::cmp::Reverse((s.is_pinned, s.updated_ms))
         });
-        let _ = pins;
     }
 
     fn sync_workspace_chats(&mut self, cx: &mut Context<Self>) {
@@ -2662,7 +2649,7 @@ impl Store {
             ws.chats = chats;
         }
         self.update_sidebar_selection();
-        let _ = cx;
+        cx.notify();
     }
 
     pub fn update_sidebar_selection(&mut self) {
@@ -2836,7 +2823,6 @@ impl Store {
     fn restore_open_tiles(&mut self, ws_key: &str, wanted: Vec<String>, cx: &mut Context<Self>) {
         // tiles are (re)opening: the restore banner has served its purpose
         self.show_restore_prompt = false;
-        let selected = self.selected_workspace.as_deref() == Some(ws_key);
         let mut added = 0;
         for id in wanted {
             let known = self.workspaces.iter().find(|w| w.folder_path() == ws_key).map(|w| w.state.sessions.contains(&id)).unwrap_or(false);
@@ -2852,7 +2838,6 @@ impl Store {
         if added == 0 {
             self.prune_untouched_drafts(cx);
         }
-        let _ = selected;
         cx.notify();
     }
 
@@ -3072,6 +3057,7 @@ impl Store {
     /// loads it from its own workspace's server — without switching the selected
     /// workspace, so chats of different workspaces share one grid.
     pub fn select_session(&mut self, session_id: &str, cx: &mut Context<Self>) {
+        tracing::info!("select_session {}", session_id);
         if self.focused_tile.as_deref().and_then(|k| self.tile_by_key(k)).and_then(|t| t.session_id.clone()).as_deref() == Some(session_id) {
             return;
         }
@@ -3737,6 +3723,31 @@ impl Store {
         }
     }
 
+    /// Files dragged onto the composer from the file manager; mirrors the
+    /// picker path (directories skipped, over-512 KB announced and skipped).
+    pub fn attach_paths(&mut self, tile_key: &str, paths: &[std::path::PathBuf], cx: &mut Context<Self>) {
+        for path in paths {
+            if path.is_dir() {
+                continue;
+            }
+            let name = path
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| path.display().to_string());
+            let Ok(data) = std::fs::read(path) else {
+                self.tile_note(tile_key, &format!("{name} could not be read — skipped."), true, cx);
+                continue;
+            };
+            if data.len() > 512 * 1024 {
+                self.tile_note(tile_key, &format!("{name} is over 512 KB — skipped."), true, cx);
+                continue;
+            }
+            let mime = crate::ui::mime_for_path(&name);
+            self.attach_file(tile_key, name, mime.into(), data);
+        }
+        cx.notify();
+    }
+
     pub fn remove_attachment(&mut self, tile_key: &str, attachment_key: usize, cx: &mut Context<Self>) {
         if let Some(tile) = self.tile_by_key_mut(tile_key) {
             tile.attachments.retain(|a| a.key != attachment_key);
@@ -3773,38 +3784,6 @@ impl Store {
             tile.selected_agent = agent;
         }
         self.persist_composer();
-    }
-
-    // ---- error overlay ----
-
-    pub fn show_error(&mut self, source: &str, error_type: &str, message: &str, details: &str, fatal: bool) {
-        if self.error.is_visible {
-            self.error.queue.push((source.into(), format!("{error_type}: {message}"), details.into()));
-            self.error.more_count = self.error.queue.len();
-            return;
-        }
-        self.error.source = source.into();
-        self.error.is_fatal = fatal;
-        self.error.error_type = error_type.into();
-        self.error.error_message = if message.is_empty() { error_type.into() } else { message.into() };
-        self.error.error_details = details.into();
-        self.error.is_visible = true;
-    }
-
-    pub fn close_error_report(&mut self) {
-        self.error.is_visible = false;
-        if let Some((source, message, details)) = self.error.queue.pop() {
-            self.error.source = source;
-            self.error.error_type = String::new();
-            self.error.error_message = message;
-            self.error.error_details = details;
-            self.error.is_visible = true;
-        }
-        self.error.more_count = self.error.queue.len();
-    }
-
-    pub fn error_copy_text(&self) -> String {
-        format!("WarpAgent error report\nsource: {}\n\n{}\n{}", self.error.source, self.error.error_message, self.error.error_details)
     }
 
     // ---- sidebar geometry ----

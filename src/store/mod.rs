@@ -340,6 +340,8 @@ pub struct ChatTile {
     pub selected_variant: Option<String>,
     pub selected_agent: Option<String>,
     pub context_text: Option<String>,
+    /// fraction of the context window consumed, 0..1 (0 when the limit is unknown)
+    pub context_frac: f32,
     pub auto_title_pending: bool,
     pub items: Vec<ChatItem>,
     pub tile_agents: Vec<RunningAgentItem>,
@@ -377,6 +379,7 @@ impl ChatTile {
             selected_variant,
             selected_agent: seed_agent,
             context_text: None,
+            context_frac: 0.0,
             auto_title_pending: false,
             items: Vec::new(),
             tile_agents: Vec::new(),
@@ -477,6 +480,11 @@ impl ChatTile {
 
     fn update_context_text(&mut self) {
         let total = self.token_order.last().map(|id| self.tokens_by_message[id]).unwrap_or(0);
+        self.context_frac = if total > 0 && self.context_limit > 0 {
+            (total as f32 / self.context_limit as f32).clamp(0., 1.)
+        } else {
+            0.
+        };
         self.context_text = if total <= 0 {
             None
         } else if self.context_limit > 0 {

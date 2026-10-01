@@ -69,6 +69,58 @@ struct TileMenu {
     y: f32,
 }
 
+/// Miniature context-usage gauge: a ring of dots whose arc fills clockwise
+/// from 12 o'clock in proportion to the context window consumed. Green below
+/// 60%, amber below 85%, salmon at the danger line.
+fn context_ring(frac: f32) -> gpui::AnyElement {
+    let frac = frac.clamp(0., 1.);
+    let filled_color = if frac >= 0.85 {
+        theme::DANGER
+    } else if frac >= 0.6 {
+        theme::WARN
+    } else {
+        theme::WORKING
+    };
+    let track_color = theme::TEXT_MUTED;
+    let dot = 2.6_f32;
+    let ring_size = 13.0_f32;
+    let radius = (ring_size - dot) / 2.;
+    let gauge = canvas(
+        move |_, _, _| (),
+        move |bounds, (), window, _| {
+            let segments = 28;
+            let center_x = (bounds.origin.x + bounds.size.width / 2.).as_f32();
+            let center_y = (bounds.origin.y + bounds.size.height / 2.).as_f32();
+            for i in 0..segments {
+                let phase = i as f32 / segments as f32;
+                let theta = phase * std::f32::consts::TAU - std::f32::consts::FRAC_PI_2;
+                let (sin, cos) = theta.sin_cos();
+                let dot_bounds = gpui::Bounds {
+                    origin: gpui::point(
+                        px(center_x + sin * radius - dot / 2.),
+                        px(center_y - cos * radius - dot / 2.),
+                    ),
+                    size: gpui::size(px(dot), px(dot)),
+                };
+                let color = if phase < frac { filled_color } else { track_color };
+                window.paint_quad(gpui::quad(
+                    dot_bounds,
+                    gpui::Corners::all(px(dot / 2.)),
+                    color,
+                    gpui::Edges::all(px(0.)),
+                    gpui::transparent_black(),
+                    gpui::BorderStyle::default(),
+                ));
+            }
+        },
+    );
+    div()
+        .flex_shrink_0()
+        .size(px(ring_size))
+        .child(gauge)
+        .into_any_element()
+}
+
 impl TileView {
     pub fn new(store: Entity<Store>, key: String, window: &mut Window, cx: &mut Context<Self>) -> Self {
         // kit textarea: submit_on_enter gives Warp-style Enter=send, Shift+Enter=newline
@@ -1105,6 +1157,7 @@ impl Render for TileView {
             title: String,
             variant: String,
             ctx: String,
+            ctx_frac: f32,
             has_ctx: bool,
             items: Vec<(String, ChatItem)>,
             queue_keys: Vec<usize>,
@@ -1150,6 +1203,7 @@ impl Render for TileView {
                 title: tile.title.clone(),
                 variant: tile.selected_variant.clone().unwrap_or_default(),
                 ctx: tile.context_text.clone().unwrap_or_default(),
+                ctx_frac: tile.context_frac,
                 has_ctx: tile.has_context(),
                 items: tile.items.iter().map(|i| (i.id(), i.clone())).collect(),
                 queue_keys: tile.queue_rows.clone(),
@@ -1214,18 +1268,16 @@ impl Render for TileView {
             .min_h_0()
             .overflow_y_scroll()
             .track_scroll(&self.scroll.clone())
-            .on_scroll_wheel(cx.listener(|this, event: &gpui::ScrollWheelEvent, window, cx| {
+            .on_scroll_wheel(cx.listener(|this, event: &gpui::ScrollWheelEvent, _window, cx| {
                 let offset = this.scroll.offset();
                 let max = this.scroll.max_offset();
                 let at_bottom = offset.y >= max.y - px(1.);
                 this.pinned = at_bottom;
-                // apply the wheel here: the native overflow handler doesn't move
-                // this handle in this gpui rev, leaving the transcript unscrollable
-                let delta = event.delta.pixel_delta(window.line_height()).y;
-                if delta != px(0.) {
-                    let y = (offset.y + delta).clamp(px(0.), max.y);
-                    this.scroll.set_offset(gpui::point(offset.x, y));
-                }
+                // gpui-pre 0.3.7's native overflow handler scrolls the tracked
+                // handle itself (the old zed-git rev didn't, which is why this
+                // listener used to apply the delta manually — that now doubles
+                // every notch). Only pinned bookkeeping remains here.
+                let _ = event;
                 cx.notify();
             }))
             .p_1()
@@ -1559,33 +1611,35 @@ impl Render for TileView {
         let close_key = self.key.clone();
 
         let mut header_right = div().flex().items_center().gap_1p5();
-        // meta readout: variant · context, with separators only between
-        // values that are actually present
-        let mut meta: Vec<(SharedString, f32)> = Vec::new();
+        // meta readout: variant · context, with a usage ring beside the
+        // context readout
         if !snap.variant.is_empty() {
-            meta.push((SharedString::from(snap.variant.clone()), 120.));
-        }
-        if snap.has_ctx {
-            meta.push((SharedString::from(snap.ctx.clone()), 160.));
-        }
-        for (i, (text, max_w)) in meta.iter().enumerate() {
-            if i > 0 {
-                header_right = header_right.child(
-                    div()
-                        .text_size(px_size(fonts.font_micro))
-                        .text_color(theme::TEXT_MUTED)
-                        .opacity(0.3)
-                        .child("·"),
-                );
-            }
             header_right = header_right.child(
                 div()
-                    .max_w(px(*max_w))
+                    .max_w(px(120.))
                     .text_size(px_size(fonts.font_micro))
                     .text_color(theme::TEXT_MUTED)
                     .opacity(0.5)
                     .truncate()
-                    .child(text.clone()),
+                    .child(SharedString::from(snap.variant.clone())),
+            );
+        }
+        if snap.has_ctx {
+            header_right = header_right.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .child(context_ring(snap.ctx_frac))
+                    .child(
+                        div()
+                            .max_w(px(160.))
+                            .text_size(px_size(fonts.font_micro))
+                            .text_color(theme::TEXT_MUTED)
+                            .opacity(0.5)
+                            .truncate()
+                            .child(SharedString::from(snap.ctx.clone())),
+                    ),
             );
         }
         if snap.has_tasks_or_agents {

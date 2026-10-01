@@ -181,7 +181,7 @@ impl Render for WarpWindow {
             .bg(theme::WINDOW_CHROME)
             .text_color(theme::TEXT)
             .font_family(theme::ui_font())
-            .child(self.render_titlebar(cx))
+            .child(self.render_titlebar(window, cx))
             .child(content);
 
         // context menu overlay
@@ -242,6 +242,52 @@ impl Render for WarpWindow {
     }
 }
 
+/// Windows-style window-state glyph for the titlebar zoom button: a single
+/// square while windowed, overlapping squares (restore) while maximized.
+fn zoom_icon(maximized: bool) -> gpui::AnyElement {
+    let stroke = 1.0_f32;
+    let color = theme::TEXT_MUTED;
+    let s = 8.0_f32;
+    // one Bounds per painted edge: [x, y, w, h] in the 12x12 icon box
+    let mut edges: Vec<(f32, f32, f32, f32)> = Vec::new();
+    if maximized {
+        // back square offset up-right; only its top and right edges peek out
+        edges.push((3., 1., s, stroke));
+        edges.push((3. + s - stroke, 1., stroke, s));
+        // front square offset down-left
+        let (fx, fy) = (1., 3.5);
+        edges.push((fx, fy, s, stroke));
+        edges.push((fx, fy + s - stroke, s, stroke));
+        edges.push((fx, fy, stroke, s));
+        edges.push((fx + s - stroke, fy, stroke, s));
+    } else {
+        let (x, y) = (2., 2.);
+        edges.push((x, y, s, stroke));
+        edges.push((x, y + s - stroke, s, stroke));
+        edges.push((x, y, stroke, s));
+        edges.push((x + s - stroke, y, stroke, s));
+    }
+    let gauge = canvas(
+        move |_, _, _| edges,
+        move |bounds, edges, window, _| {
+            for (ex, ey, ew, eh) in edges {
+                window.paint_quad(gpui::quad(
+                    gpui::Bounds {
+                        origin: gpui::point(bounds.origin.x + px(ex), bounds.origin.y + px(ey)),
+                        size: gpui::size(px(ew), px(eh)),
+                    },
+                    gpui::Corners::all(px(0.)),
+                    color,
+                    gpui::Edges::all(px(0.)),
+                    gpui::transparent_black(),
+                    gpui::BorderStyle::default(),
+                ));
+            }
+        },
+    );
+    div().size(px(12.)).child(gauge).into_any_element()
+}
+
 impl WarpWindow {
     fn sync_rename_field(&mut self, editing: Option<String>, draft: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
         match (editing, &self.rename) {
@@ -273,7 +319,7 @@ impl WarpWindow {
         }
     }
 
-    fn render_titlebar(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
+    fn render_titlebar(&mut self, window: &Window, cx: &mut Context<Self>) -> gpui::AnyElement {
         let (fonts, visible) = {
             let store = self.store.read(cx);
             (store.fonts, store.sidebar_visible)
@@ -331,8 +377,13 @@ impl WarpWindow {
                     .items_center()
                     .justify_center()
                     .hover(|s| s.bg(theme::HOVER))
-                    .on_click(|_, window, _| window.zoom_window())
-                    .child(div().size(px(9.)).rounded_full().border_1().border_color(theme::TEXT_MUTED)),
+                    .on_click(cx.listener(|_, _, window, cx| {
+                        window.zoom_window();
+                        // the compositor toggles asynchronously — nudge a
+                        // re-render so the maximize/restore glyph keeps up
+                        cx.notify();
+                    }))
+                    .child(zoom_icon(window.is_maximized())),
             )
             .child(
                 div()
@@ -486,6 +537,7 @@ impl WarpWindow {
 
         div()
             .id(gpui::ElementId::NamedInteger("ws".into(), TileView::hash(&path)))
+            .relative()
             .group("wsrow")
             .flex()
             .items_center()
@@ -531,27 +583,43 @@ impl WarpWindow {
                     .truncate()
                     .child(SharedString::from(ws.name.clone())),
             )
-            .when(ws.is_running, |d| d.child(div().size(px(6.)).rounded_full().bg(theme::WORKING)))
+            // running dot + chat count pinned to the right edge; hovering the
+            // row fades them out while the kebab/new-chat buttons fade in at
+            // the same spot (both layers overlap, so nothing shifts)
             .child(
                 div()
+                    .absolute()
+                    .right_1()
+                    .top_0()
+                    .bottom_0()
                     .flex()
                     .items_center()
+                    .gap_1p5()
+                    .group_hover("wsrow", |s| s.opacity(0.))
+                    .when(ws.is_running, |d| {
+                        d.child(div().size(px(6.)).rounded_full().bg(theme::WORKING))
+                    })
                     .when(ws.has_chats(), |d| {
                         d.child(
                             div()
-                                .group_hover("wsrow", |s| s.opacity(0.))
                                 .text_size(px(fonts.font_micro))
                                 .text_color(theme::TEXT_MUTED)
                                 .opacity(0.45)
                                 .child(format!("{}", ws.chats.len())),
                         )
-                    })
-                    .child(
-                        div()
-                            .flex()
-                            .gap_0p5()
-                            .opacity(0.)
-                            .group_hover("wsrow", |s| s.opacity(1.))
+                    }),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .right_1()
+                    .top_0()
+                    .bottom_0()
+                    .flex()
+                    .items_center()
+                    .gap_0p5()
+                    .opacity(0.)
+                    .group_hover("wsrow", |s| s.opacity(1.))
                             .child(
                                 div()
                                     .id(gpui::ElementId::NamedInteger("ws-kebab".into(), TileView::hash(&path)))
@@ -586,8 +654,7 @@ impl WarpWindow {
                                     })
                                     .child(crate::ui::icon("icons/chat-outline.svg", px(fonts.icon_body), theme::TEXT_MUTED)),
                             ),
-                    ),
-            )
+                    )
             .into_any_element()
     }
 
@@ -619,11 +686,14 @@ impl WarpWindow {
 
         let mut row = div()
             .id(gpui::ElementId::NamedInteger("chat".into(), TileView::hash(&id)))
+            .relative()
             .group("chatrow")
             .flex()
             .items_center()
+            // no w_full: with the 26px indent, w_full overflowed the sidebar and
+            // clipped the right-pinned time/delete layers; flex-col stretch
+            // already sizes the row to the parent minus the indent
             .ml(px(26.))
-            .w_full()
             .px_2()
             .py_1p5()
             .rounded_lg()
@@ -659,8 +729,17 @@ impl WarpWindow {
                         .truncate()
                         .child(SharedString::from(chat.title.clone())),
                 )
+                // time label pinned right; hovering the row fades it out and
+                // fades the delete button in at the same spot (overlapping
+                // absolute layers, so nothing shifts)
                 .child(
                     div()
+                        .absolute()
+                        .right_1()
+                        .top_0()
+                        .bottom_0()
+                        .flex()
+                        .items_center()
                         .group_hover("chatrow", |s| s.opacity(0.))
                         .text_size(px(fonts.font_micro))
                         .text_color(theme::TEXT_MUTED)
@@ -669,17 +748,26 @@ impl WarpWindow {
                 )
                 .child(
                     div()
-                        .id(gpui::ElementId::NamedInteger("chat-del".into(), TileView::hash(&id)))
-                        .cursor_pointer()
-                        .p_1()
-                        .rounded_sm()
+                        .absolute()
+                        .right_1()
+                        .top_0()
+                        .bottom_0()
+                        .flex()
+                        .items_center()
                         .opacity(0.)
                         .group_hover("chatrow", |s| s.opacity(1.))
-                        .hover(|s| s.bg(theme::HOVER))
-                        .on_click(move |_, _, cx| {
-                            store_del.update(cx, |s, cx| s.delete_session(&id_del, cx));
-                        })
-                        .child(crate::ui::icon("icons/trash.svg", px(fonts.icon_xsmall), theme::TEXT_MUTED)),
+                        .child(
+                            div()
+                                .id(gpui::ElementId::NamedInteger("chat-del".into(), TileView::hash(&id)))
+                                .cursor_pointer()
+                                .p_1()
+                                .rounded_sm()
+                                .hover(|s| s.bg(theme::HOVER))
+                                .on_click(move |_, _, cx| {
+                                    store_del.update(cx, |s, cx| s.delete_session(&id_del, cx));
+                                })
+                                .child(crate::ui::icon("icons/trash.svg", px(fonts.icon_xsmall), theme::TEXT_MUTED)),
+                        ),
                 );
         }
         row.into_any_element()

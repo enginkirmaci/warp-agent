@@ -286,7 +286,9 @@ impl TileView {
                             .set_offset(gpui::point(offset.x, -(current + diff * 0.35)));
                     }
                     cx.notify();
-                    this.scroll_anim
+                    // the loop keeps gliding while the animation flag is set;
+                    // it reads as "settled" only once it has been cleared
+                    !this.scroll_anim
                 });
                 let Ok(settled) = settled else { break };
                 if settled {

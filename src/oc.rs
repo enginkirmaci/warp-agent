@@ -181,6 +181,10 @@ pub fn find_free_port() -> Result<u16> {
 
 // ---- REST + SSE client ---------------------------------------------------
 
+// Clone shares the connection pool (reqwest::Client is an Arc inside) — the
+// command loop clones the workspace's client per request instead of building
+// a fresh pool + TLS config per request.
+#[derive(Clone)]
 pub struct ApiClient {
     http: reqwest::Client,
     pub base_url: String,
@@ -290,7 +294,7 @@ impl ApiClient {
         model: Option<&str>,
         variant: Option<&str>,
         agent: Option<&str>,
-        attachments: &[(String, String, Vec<u8>)], // (filename, mime, bytes)
+        attachments: &[(String, String, std::sync::Arc<Vec<u8>>)], // (filename, mime, bytes)
     ) -> Result<()> {
         let mut parts = Vec::new();
         if !text.is_empty() {
@@ -576,7 +580,7 @@ pub enum NetCommand {
         model: Option<String>,
         variant: Option<String>,
         agent: Option<String>,
-        attachments: Vec<(String, String, Vec<u8>)>,
+        attachments: Vec<(String, String, std::sync::Arc<Vec<u8>>)>,
     },
 }
 
@@ -685,10 +689,9 @@ async fn net_main(command_rx: async_channel::Receiver<NetCommand>, event_tx: asy
                 let _ = event_tx.send(UiEvent::ServerStopped { ws_key }).await;
             }
             NetCommand::Request { ws_key, request } => {
-                let Some(api) = workspaces.get(&ws_key).map(|ws| ws.api.base_url.clone()) else {
+                let Some(client) = workspaces.get(&ws_key).map(|ws| ws.api.clone()) else {
                     continue;
                 };
-                let client = ApiClient::new(&api);
                 let event_tx = event_tx.clone();
                 tokio::spawn(async move {
                     let event = run_request(&client, ws_key, request).await;
@@ -696,7 +699,7 @@ async fn net_main(command_rx: async_channel::Receiver<NetCommand>, event_tx: asy
                 });
             }
             NetCommand::SendMessage { ws_key, session_id, text, model, variant, agent, attachments } => {
-                let Some(api) = workspaces.get(&ws_key).map(|ws| ws.api.base_url.clone()) else {
+                let Some(client) = workspaces.get(&ws_key).map(|ws| ws.api.clone()) else {
                     // don't drop silently — the tile would sit "running" forever
                     let _ = event_tx
                         .send(UiEvent::MessageSendFailed {
@@ -707,7 +710,6 @@ async fn net_main(command_rx: async_channel::Receiver<NetCommand>, event_tx: asy
                         .await;
                     continue;
                 };
-                let client = ApiClient::new(&api);
                 let event_tx = event_tx.clone();
                 tokio::spawn(async move {
                     let result = client

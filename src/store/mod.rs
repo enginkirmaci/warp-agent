@@ -9,12 +9,26 @@ use chrono::{Local, TimeZone, Timelike};
 use gpui::prelude::*;
 use gpui::{App, Context, Entity};
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use std::time::Instant;
 
 pub const DEFAULT_MODEL_ENTRY: &str = "(server default)";
 pub const DEFAULT_VARIANT_ENTRY: &str = "(default)";
 pub const DEFAULT_AGENT_ENTRY: &str = "(default build)";
 pub const DRAFT_TITLE: &str = "New chat";
+
+/// ["(default)"] plus the model's variants — a tile's picker list. Stays at
+/// the bare sentinel until the server's model list lands (ModelsLoaded) or
+/// the model is a real key present in `variants_by_model`.
+fn variant_list_for(variants_by_model: &HashMap<String, Vec<String>>, model: &Option<String>) -> Vec<String> {
+    let mut variants = vec![DEFAULT_VARIANT_ENTRY.to_string()];
+    if let Some(m) = model {
+        if let Some(vs) = variants_by_model.get(m) {
+            variants.extend(vs.iter().cloned());
+        }
+    }
+    variants
+}
 
 pub fn format_tokens(tokens: i64) -> String {
     if tokens < 1000 {
@@ -94,7 +108,9 @@ pub fn relative_time_label(updated_ms: i64) -> String {
 pub struct AttachmentItem {
     pub file_name: String,
     pub mime: String,
-    pub data: Vec<u8>,
+    /// file bytes behind an Arc: the composer preview and the queue clone
+    /// attachments on every render, and the bytes must not move with them
+    pub data: Arc<Vec<u8>>,
     pub key: usize,
 }
 
@@ -105,13 +121,13 @@ impl AttachmentItem {
 }
 
 /// Unified diff tint values for a tool's file edit.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Numstat {
     pub additions: i64,
     pub deletions: i64,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ToolItem {
     pub key: usize,
     pub tool: String,
@@ -281,7 +297,9 @@ pub enum ChatItem {
     Image {
         key: String,
         file_name: String,
-        png: Vec<u8>,
+        /// decoded on first render and cached in the view; Arc keeps the
+        /// per-frame menu/copy clones at pointer cost
+        png: Arc<Vec<u8>>,
         created_ms: i64,
     },
     Permission(PermissionItem),
@@ -343,7 +361,9 @@ pub struct ChatTile {
     /// fraction of the context window consumed, 0..1 (0 when the limit is unknown)
     pub context_frac: f32,
     pub auto_title_pending: bool,
-    pub items: Vec<ChatItem>,
+    /// Shared items: the tile view snapshots this list on every render, so the
+    /// payload rides an Arc and a snapshot costs pointer copies, not deep clones.
+    pub items: Vec<Arc<ChatItem>>,
     pub tile_agents: Vec<RunningAgentItem>,
     pub attachments: Vec<AttachmentItem>,
     pub variants: Vec<String>,
@@ -367,6 +387,18 @@ pub struct ChatTile {
 }
 
 impl ChatTile {
+    /// Rebuild the variant picker list around the tile's model and keep the
+    /// current pick when it still exists, else fall back to "(default)".
+    /// Runs wherever the option list could have drifted: tile creation, the
+    /// ModelsLoaded restore, and (list-only) set_tile_model.
+    fn apply_variant_list(&mut self, variants_by_model: &HashMap<String, Vec<String>>) {
+        self.variants = variant_list_for(variants_by_model, &self.selected_model);
+        let selected_ok = self.variants.iter().any(|v| Some(v.as_str()) == self.selected_variant.as_deref());
+        if !selected_ok {
+            self.selected_variant = Some(DEFAULT_VARIANT_ENTRY.into());
+        }
+    }
+
     pub fn new(key: String, seed_model: Option<String>, seed_agent: Option<String>, seed_variant: Option<String>) -> Self {
         let variants = vec![DEFAULT_VARIANT_ENTRY.to_string()];
         let selected_variant = if seed_variant.is_some() { seed_variant.clone() } else { Some(DEFAULT_VARIANT_ENTRY.into()) };
@@ -551,7 +583,7 @@ impl ChatTile {
             if let Some(items) = self.meta_items(&id) {
                 for key in items {
                     if let Some(index) = self.find_item_index(&key) {
-                        if let ChatItem::AssistantText { meta_label, .. } = &mut self.items[index] {
+                        if let ChatItem::AssistantText { meta_label, .. } = Arc::make_mut(&mut self.items[index]) {
                             *meta_label = meta.clone();
                         }
                     }
@@ -580,16 +612,19 @@ impl ChatTile {
         )
     }
 
-    pub fn on_part_updated(&mut self, data: &serde_json::Value, next_key: &mut usize) {
-        let Some(part) = data.get("part") else { return };
-        let Some(id) = part.get("id").and_then(serde_json::Value::as_str) else { return };
+    /// Applies a `message.part.updated` event; returns whether anything the
+    /// transcript shows actually changed — the caller skips the repaint when
+    /// the stream re-sends an unchanged part.
+    pub fn on_part_updated(&mut self, data: &serde_json::Value, next_key: &mut usize) -> bool {
+        let Some(part) = data.get("part") else { return false };
+        let Some(id) = part.get("id").and_then(serde_json::Value::as_str) else { return false };
         let part_type = part.get("type").and_then(serde_json::Value::as_str).unwrap_or("");
         let message_id = part.get("messageID").and_then(serde_json::Value::as_str).map(String::from);
 
         // user parts are rendered locally at send time; stream echoes are skipped
         if let Some(mid) = &message_id {
             if self.role_by_message.get(mid).map(String::as_str) == Some("user") {
-                return;
+                return false;
             }
         }
 
@@ -603,41 +638,52 @@ impl ChatTile {
                         meta_label: self.meta_for(message_id.as_ref()),
                         created_ms: self.created_at_for(message_id.as_ref()),
                     };
-                    self.items.push(item);
+                    self.items.push(Arc::new(item));
                     if let Some(mid) = &message_id {
                         self.key_by_part.insert(format!("{mid}:{id}"), item_id.clone());
                     }
                 }
                 let text = part.get("text").and_then(serde_json::Value::as_str).unwrap_or("").to_string();
-                if let Some(index) = self.find_item_index(&item_id) {
-                    if let ChatItem::AssistantText { text: t, .. } = &mut self.items[index] {
-                        if *t != text {
+                let Some(index) = self.find_item_index(&item_id) else { return false };
+                let changed = match Arc::make_mut(&mut self.items[index]) {
+                    ChatItem::AssistantText { text: t, .. } => {
+                        let changed = *t != text;
+                        if changed {
                             *t = text;
                         }
+                        changed
                     }
-                }
+                    _ => false,
+                };
+                changed
             }
             "reasoning" => {
                 let item_id = format!("r{id}");
                 if self.find_item_index(&item_id).is_none() {
-                    self.items.push(ChatItem::Reasoning {
+                    self.items.push(Arc::new(ChatItem::Reasoning {
                         key: id.to_string(),
                         text: String::new(),
                         created_ms: self.created_at_for(message_id.as_ref()),
-                    });
+                    }));
                 }
                 let text = part.get("text").and_then(serde_json::Value::as_str).unwrap_or("").to_string();
-                if let Some(index) = self.find_item_index(&item_id) {
-                    if let ChatItem::Reasoning { text: t, .. } = &mut self.items[index] {
-                        *t = text;
+                let Some(index) = self.find_item_index(&item_id) else { return false };
+                match Arc::make_mut(&mut self.items[index]) {
+                    ChatItem::Reasoning { text: t, .. } => {
+                        let changed = *t != text;
+                        if changed {
+                            *t = text;
+                        }
+                        changed
                     }
+                    _ => false,
                 }
             }
             "tool" => {
                 let item_id = format!("t{id}");
                 if self.find_item_index(&item_id).is_none() {
                     let tool_name = part.get("tool").and_then(serde_json::Value::as_str).unwrap_or("tool");
-                    self.items.push(ChatItem::Tool(ToolItem {
+                    self.items.push(Arc::new(ChatItem::Tool(ToolItem {
                         key: *next_key,
                         tool: tool_name.into(),
                         status: "pending".into(),
@@ -648,37 +694,45 @@ impl ChatTile {
                         is_error: false,
                         error_preview: String::new(),
                         details: String::new(),
-                    }));
+                    })));
                     *next_key += 1;
                 }
-                if let Some(state) = part.get("state") {
-                    if let Some(index) = self.find_item_index(&item_id) {
-                        if let ChatItem::Tool(tool) = &mut self.items[index] {
-                            apply_tool_state(state, tool);
-                            apply_tool_metadata(state, tool);
-                        }
-                    }
-                }
+                let Some(state) = part.get("state") else { return true };
+                let Some(index) = self.find_item_index(&item_id) else { return false };
+                let changed = {
+                    let tool = match Arc::make_mut(&mut self.items[index]) {
+                        ChatItem::Tool(tool) => tool,
+                        _ => return false,
+                    };
+                    let before = tool.clone();
+                    apply_tool_state(state, tool);
+                    apply_tool_metadata(state, tool);
+                    *tool != before
+                };
+                changed
             }
             "file" => {
                 let item_id = format!("i{id}");
-                if self.find_item_index(&item_id).is_none() {
-                    if let (Some(url), Some(file_name)) = (
-                        part.get("url").and_then(serde_json::Value::as_str),
-                        part.get("filename").and_then(serde_json::Value::as_str),
-                    ) {
-                        if let Some(png) = decode_data_url(url) {
-                            self.items.push(ChatItem::Image {
-                                key: id.to_string(),
-                                file_name: file_name.into(),
-                                png,
-                                created_ms: self.created_at_for(message_id.as_ref()),
-                            });
-                        }
+                if self.find_item_index(&item_id).is_some() {
+                    return false;
+                }
+                if let (Some(url), Some(file_name)) = (
+                    part.get("url").and_then(serde_json::Value::as_str),
+                    part.get("filename").and_then(serde_json::Value::as_str),
+                ) {
+                    if let Some(png) = decode_data_url(url) {
+                        self.items.push(Arc::new(ChatItem::Image {
+                            key: id.to_string(),
+                            file_name: file_name.into(),
+                            png: Arc::new(png),
+                            created_ms: self.created_at_for(message_id.as_ref()),
+                        }));
+                        return true;
                     }
                 }
+                false
             }
-            _ => {}
+            _ => false,
         }
     }
 
@@ -755,27 +809,27 @@ impl ChatTile {
                         let text = part.get("text").and_then(serde_json::Value::as_str).unwrap_or("");
                         if msg.role == "user" {
                             if !text.is_empty() {
-                                self.items.push(ChatItem::UserMessage {
+                                self.items.push(Arc::new(ChatItem::UserMessage {
                                     key: *next_key,
                                     text: text.into(),
                                     created_ms: msg.created_ms,
-                                });
+                                }));
                                 *next_key += 1;
                             }
                         } else {
                             let item_id = format!("a{id}");
-                            self.items.push(ChatItem::AssistantText {
+                            self.items.push(Arc::new(ChatItem::AssistantText {
                                 key: id.into(),
                                 text: text.into(),
                                 meta_label: self.meta_for(Some(&msg.id)),
                                 created_ms: msg.created_ms,
-                            });
+                            }));
                             self.key_by_part.insert(format!("{}:{}", msg.id, id), item_id);
                         }
                     }
                     "reasoning" => {
                         let text = part.get("text").and_then(serde_json::Value::as_str).unwrap_or("").to_string();
-                        self.items.push(ChatItem::Reasoning { key: id.into(), text, created_ms: msg.created_ms });
+                        self.items.push(Arc::new(ChatItem::Reasoning { key: id.into(), text, created_ms: msg.created_ms }));
                     }
                     "tool" => {
                         let tool_name = part.get("tool").and_then(serde_json::Value::as_str).unwrap_or("tool");
@@ -799,7 +853,7 @@ impl ChatTile {
                         if tool_name == "todowrite" {
                             todos = todos_from_part(part);
                         }
-                        self.items.push(ChatItem::Tool(tool));
+                        self.items.push(Arc::new(ChatItem::Tool(tool)));
                     }
                     "file" => {
                         if let Some(url) = part.get("url").and_then(serde_json::Value::as_str) {
@@ -808,17 +862,17 @@ impl ChatTile {
                                 .and_then(serde_json::Value::as_str)
                                 .unwrap_or("image.png");
                             match decode_data_url(url) {
-                                Some(png) => self.items.push(ChatItem::Image {
+                                Some(png) => self.items.push(Arc::new(ChatItem::Image {
                                     key: id.into(),
                                     file_name: file_name.into(),
-                                    png,
+                                    png: Arc::new(png),
                                     created_ms: msg.created_ms,
-                                }),
-                                None => self.items.push(ChatItem::SystemNote {
+                                })),
+                                None => self.items.push(Arc::new(ChatItem::SystemNote {
                                     key: *next_key,
                                     text: format!("Attachment: {file_name}"),
                                     is_error: false,
-                                }),
+                                })),
                             }
                             *next_key += 1;
                         }
@@ -1807,6 +1861,7 @@ impl Store {
                     let key = format!("t{}", self.next_tile_key);
                     self.next_tile_key += 1;
                     let mut tile = ChatTile::new(key.clone(), self.seed_model(), self.seed_agent(), self.seed_variant());
+                    tile.apply_variant_list(&self.variants_by_model);
                     tile.session_id = Some(session_id.clone());
                     tile.title = title;
                     // restore the unsent composer draft, if one was saved
@@ -1926,11 +1981,11 @@ impl Store {
                     let note_key = self.next_key;
                     self.next_key += 1;
                     if let Some(tile) = self.tile_for_session_mut(&session_id) {
-                        tile.items.push(ChatItem::SystemNote {
+                        tile.items.push(Arc::new(ChatItem::SystemNote {
                             key: note_key,
                             text: format!("Abort failed: {err:#}"),
                             is_error: true,
-                        });
+                        }));
                     }
                 } else {
                     self.user_stopped_by_session.insert(session_id.clone());
@@ -1972,10 +2027,10 @@ impl Store {
                                 if owner != for_session {
                                     continue;
                                 }
-                                if tile.items.iter().any(|i| matches!(i, ChatItem::Question(q) if q.id == request.id)) {
+                                if tile.items.iter().any(|i| matches!(i.as_ref(), ChatItem::Question(q) if q.id == request.id)) {
                                     continue;
                                 }
-                                tile.items.push(ChatItem::Question(build_question_item(&request, &mut next_key)));
+                                tile.items.push(Arc::new(ChatItem::Question(build_question_item(&request, &mut next_key))));
                             }
                         }
                         self.next_key = next_key;
@@ -2007,12 +2062,17 @@ impl Store {
                         }
                     }
                     let known_models = self.models.clone();
+                    let variants_by_model = self.variants_by_model.clone();
                     for (key, model, variant) in restore {
                         if let Some(tile) = self.tile_by_key_mut(&key) {
                             tile.selected_model = match model {
                                 Some(saved) if known_models.contains(&saved) => Some(saved),
                                 _ => Some(DEFAULT_MODEL_ENTRY.into()),
                             };
+                            // the model list just landed: rebuild this tile's
+                            // variant options around its model, keep a
+                            // still-valid pick, else fall back to "(default)"
+                            tile.apply_variant_list(&variants_by_model);
                             if let Some(saved_variant) = variant {
                                 if tile.variants.contains(&saved_variant) {
                                     tile.selected_variant = Some(saved_variant);
@@ -2062,7 +2122,8 @@ impl Store {
     fn create_tile(&mut self) -> &mut ChatTile {
         let key = format!("t{}", self.next_tile_key);
         self.next_tile_key += 1;
-        let tile = ChatTile::new(key.clone(), self.seed_model(), self.seed_agent(), self.seed_variant());
+        let mut tile = ChatTile::new(key.clone(), self.seed_model(), self.seed_agent(), self.seed_variant());
+        tile.apply_variant_list(&self.variants_by_model);
         self.open_tiles.push(tile);
         self.tile_by_key_mut(&key).unwrap()
     }
@@ -2263,29 +2324,29 @@ impl Store {
         let tile_key = self.tile_by_session.get(session_id).cloned();
         let sent_at = Instant::now();
         if let Some(tile_key) = &tile_key {
-            let mut items = Vec::new();
+            let mut items: Vec<Arc<ChatItem>> = Vec::new();
             if !text.is_empty() {
-                items.push(ChatItem::UserMessage {
+                items.push(Arc::new(ChatItem::UserMessage {
                     key: self.next_key,
                     text: text.clone(),
                     created_ms: 0, // rendered with no time label, like "now"
-                });
+                }));
                 self.next_key += 1;
             }
             for attachment in &attachments {
                 if attachment.is_image() {
-                    items.push(ChatItem::Image {
+                    items.push(Arc::new(ChatItem::Image {
                         key: format!("local{}", self.next_key),
                         file_name: attachment.file_name.clone(),
-                        png: attachment.data.clone(),
+                        png: Arc::clone(&attachment.data),
                         created_ms: 0,
-                    });
+                    }));
                 } else {
-                    items.push(ChatItem::SystemNote {
+                    items.push(Arc::new(ChatItem::SystemNote {
                         key: self.next_key,
                         text: format!("Attachment: {}", attachment.file_name),
                         is_error: false,
-                    });
+                    }));
                 }
                 self.next_key += 1;
             }
@@ -2862,7 +2923,7 @@ impl Store {
                     if let Some(left) = left {
                         item.auto_countdown = Some(left);
                     }
-                    tile.items.push(ChatItem::Permission(item));
+                    tile.items.push(Arc::new(ChatItem::Permission(item)));
                 }
             }
             self.mark_attention(session_id, false);
@@ -2875,9 +2936,9 @@ impl Store {
             if let Some(tile) = self.tile_for_session_mut(session_id) {
                 for item in pending {
                     if item.is_pending()
-                        && !tile.items.iter().any(|i| matches!(i, ChatItem::Question(q) if q.id == item.id))
+                        && !tile.items.iter().any(|i| matches!(i.as_ref(), ChatItem::Question(q) if q.id == item.id))
                     {
-                        tile.items.push(ChatItem::Question(item));
+                        tile.items.push(Arc::new(ChatItem::Question(item)));
                     }
                 }
             }
@@ -3112,9 +3173,18 @@ impl Store {
                 }
             }
             "message.part.updated" => {
-                if let Some(tile_key) = self.tile_from_data(data, ws_key) {
-                    self.with_tile(&tile_key, |tile, _store, next_key| tile.on_part_updated(data, next_key));
+                // the stream re-sends unchanged part snapshots constantly while a
+                // turn runs; only an actual transcript change may repaint
+                let changed = self
+                    .tile_from_data(data, ws_key)
+                    .and_then(|tile_key| {
+                        self.with_tile(&tile_key, |tile, _store, next_key| tile.on_part_updated(data, next_key))
+                    })
+                    .unwrap_or(false);
+                if changed {
+                    cx.notify();
                 }
+                return;
             }
             "permission.asked" => self.on_permission_asked(data, false, cx),
             "permission.v2.asked" => self.on_permission_asked(data, true, cx),
@@ -3205,7 +3275,7 @@ impl Store {
         let note_key = self.next_key;
         self.next_key += 1;
         if let Some(tile) = self.tile_by_key_mut(&tile_key) {
-            tile.items.push(ChatItem::SystemNote { key: note_key, text, is_error: false });
+            tile.items.push(Arc::new(ChatItem::SystemNote { key: note_key, text, is_error: false }));
         }
         let _ = cx;
     }
@@ -3300,7 +3370,7 @@ impl Store {
         let auto_allow = self.auto_allow;
         if let Some(tile_key) = self.tile_by_session.get(&owner).cloned() {
             let tile = self.tile_by_key_mut(&tile_key).unwrap();
-            tile.items.push(ChatItem::Permission(item));
+            tile.items.push(Arc::new(ChatItem::Permission(item)));
             if !auto_allow {
                 self.mark_attention(&session_id, true);
             }
@@ -3354,7 +3424,7 @@ impl Store {
         // refresh the visible countdown labels
         for tile in &mut self.open_tiles {
             for item in &mut tile.items {
-                if let ChatItem::Permission(p) = item {
+                if let ChatItem::Permission(p) = Arc::make_mut(item) {
                     if let Some(left) = self.countdowns.get(&p.id) {
                         p.auto_countdown = Some(*left);
                     }
@@ -3367,7 +3437,7 @@ impl Store {
     fn find_permission(&self, permission_id: &str) -> Option<&PermissionItem> {
         for tile in &self.open_tiles {
             for item in &tile.items {
-                if let ChatItem::Permission(p) = item {
+                if let ChatItem::Permission(p) = item.as_ref() {
                     if p.id == permission_id {
                         return Some(p);
                     }
@@ -3390,7 +3460,7 @@ impl Store {
         let mut is_v2 = false;
         for tile in &mut self.open_tiles {
             for item in &mut tile.items {
-                if let ChatItem::Permission(p) = item {
+                if let ChatItem::Permission(p) = Arc::make_mut(item) {
                     if p.id == permission_id && p.is_pending() {
                         p.answer = Some(if is_auto { "auto-allowing…".into() } else { "sending…".into() });
                         p.was_auto_answered = is_auto;
@@ -3441,7 +3511,7 @@ impl Store {
     fn resolve_permission(&mut self, permission_id: &str, label: String, is_auto: bool) {
         for tile in &mut self.open_tiles {
             for item in &mut tile.items {
-                if let ChatItem::Permission(p) = item {
+                if let ChatItem::Permission(p) = Arc::make_mut(item) {
                     if p.id == permission_id && p.is_pending() {
                         p.answer = Some(label.clone());
                         p.was_auto_answered = is_auto;
@@ -3485,8 +3555,8 @@ impl Store {
         self.next_key = next_key;
         if let Some(tile_key) = self.tile_by_session.get(&owner).cloned() {
             if let Some(tile) = self.tile_by_key_mut(&tile_key) {
-                if !tile.items.iter().any(|i| matches!(i, ChatItem::Question(q) if q.id == built.id)) {
-                    tile.items.push(ChatItem::Question(built));
+                if !tile.items.iter().any(|i| matches!(i.as_ref(), ChatItem::Question(q) if q.id == built.id)) {
+                    tile.items.push(Arc::new(ChatItem::Question(built)));
                 }
             }
             cx.notify();
@@ -3529,7 +3599,7 @@ impl Store {
     fn resolve_question(&mut self, request_id: &str, summary: &str) {
         for tile in &mut self.open_tiles {
             for item in &mut tile.items {
-                if let ChatItem::Question(q) = item {
+                if let ChatItem::Question(q) = Arc::make_mut(item) {
                     if q.id == request_id && q.is_pending() {
                         q.resolution = Some(summary.to_string());
                         for question in &mut q.questions {
@@ -3556,7 +3626,7 @@ impl Store {
         let mut session_id = None;
         for tile in &mut self.open_tiles {
             for item in &mut tile.items {
-                if let ChatItem::Question(q) = item {
+                if let ChatItem::Question(q) = Arc::make_mut(item) {
                     if q.id == question_id && q.is_pending() && q.can_submit() {
                         answers = Some(q.questions.iter().map(|e| e.answer()).collect());
                         q.resolution = Some(format!("sending {}…", answers.as_ref().unwrap().iter().map(|a| if a.is_empty() { "(empty)".to_string() } else { a.join(", ") }).collect::<Vec<_>>().join(" · ")));
@@ -3584,7 +3654,7 @@ impl Store {
         let mut session_id = None;
         for tile in &mut self.open_tiles {
             for item in &mut tile.items {
-                if let ChatItem::Question(q) = item {
+                if let ChatItem::Question(q) = Arc::make_mut(item) {
                     if q.id == question_id && q.is_pending() {
                         q.resolution = Some("dismissing…".into());
                         for question in &mut q.questions {
@@ -3624,7 +3694,7 @@ impl Store {
         let note_key = self.next_key;
         self.next_key += 1;
         if let Some(tile) = self.tile_by_key_mut(tile_key) {
-            tile.items.push(ChatItem::SystemNote { key: note_key, text: text.into(), is_error: error });
+            tile.items.push(Arc::new(ChatItem::SystemNote { key: note_key, text: text.into(), is_error: error }));
         }
         cx.notify();
     }
@@ -3634,7 +3704,7 @@ impl Store {
         self.next_key += 1;
         if let Some(tile_key) = self.tile_by_session.get(session_id).cloned() {
             if let Some(tile) = self.tile_by_key_mut(&tile_key) {
-                tile.items.push(ChatItem::SystemNote { key: note_key, text: text.into(), is_error: error });
+                tile.items.push(Arc::new(ChatItem::SystemNote { key: note_key, text: text.into(), is_error: error }));
                 return;
             }
         }
@@ -3645,11 +3715,11 @@ impl Store {
             .or_else(|| self.open_tiles.first().map(|t| t.key.clone()));
         if let Some(target) = target {
             if let Some(tile) = self.tile_by_key_mut(&target) {
-                tile.items.push(ChatItem::SystemNote {
+                tile.items.push(Arc::new(ChatItem::SystemNote {
                     key: note_key,
                     text: format!("{title}: {text}"),
                     is_error: error,
-                });
+                }));
             }
         }
     }
@@ -3668,7 +3738,7 @@ impl Store {
     ) {
         let Some(tile) = self.tile_by_key_mut(tile_key) else { return };
         for item in &mut tile.items {
-            if let ChatItem::Question(q) = item {
+            if let ChatItem::Question(q) = Arc::make_mut(item) {
                 if q.id != question_id {
                     continue;
                 }
@@ -3688,7 +3758,7 @@ impl Store {
     pub fn set_question_custom(&mut self, tile_key: &str, question_id: &str, qi: usize, text: String, cx: &mut Context<Self>) {
         let Some(tile) = self.tile_by_key_mut(tile_key) else { return };
         for item in &mut tile.items {
-            if let ChatItem::Question(q) = item {
+            if let ChatItem::Question(q) = Arc::make_mut(item) {
                 if q.id == question_id {
                     if let Some(entry) = q.questions.get_mut(qi) {
                         entry.custom_text = text.clone();
@@ -3709,7 +3779,7 @@ impl Store {
             tile.attachments.push(AttachmentItem {
                 file_name: format!("paste-{count}.png"),
                 mime: "image/png".into(),
-                data: png,
+                data: Arc::new(png),
                 key: akey,
             });
         }
@@ -3719,7 +3789,7 @@ impl Store {
         let akey = self.next_key;
         self.next_key += 1;
         if let Some(tile) = self.tile_by_key_mut(tile_key) {
-            tile.attachments.push(AttachmentItem { file_name, mime, data, key: akey });
+            tile.attachments.push(AttachmentItem { file_name, mime, data: Arc::new(data), key: akey });
         }
     }
 
@@ -3761,13 +3831,7 @@ impl Store {
         let variants_by_model = self.variants_by_model.clone();
         let Some(tile) = self.tile_by_key_mut(tile_key) else { return };
         tile.selected_model = model;
-        tile.variants.clear();
-        tile.variants.push(DEFAULT_VARIANT_ENTRY.to_string());
-        if let Some(m) = &tile.selected_model {
-            if let Some(variants) = variants_by_model.get(m) {
-                tile.variants.extend(variants.iter().cloned());
-            }
-        }
+        tile.variants = variant_list_for(&variants_by_model, &tile.selected_model);
         tile.selected_variant = Some(DEFAULT_VARIANT_ENTRY.into());
         self.persist_composer();
     }

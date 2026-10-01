@@ -35,11 +35,11 @@ enum PickerKind {
 #[derive(Clone)]
 enum ContextMenu {
     /// copy text
-    Copy(String),
+    Copy(SharedString),
     /// user message → back into the composer
-    EditInput(String),
+    EditInput(SharedString),
     /// copy image bytes
-    CopyImage { file_name: String, png: Vec<u8> },
+    CopyImage { file_name: String, png: Arc<Vec<u8>> },
 }
 
 pub struct TileView {
@@ -65,6 +65,71 @@ pub struct TileView {
     last_spring_seen: bool,
     /// item id whose copy button is flashing its "copied" state right now
     copied_flash: Option<String>,
+    /// message text as pointer-stable SharedStrings by item id — the kit's
+    /// text view recognizes the same allocation across frames and skips
+    /// re-parsing; entries are replaced when a message's text changes
+    md_cache: HashMap<String, SharedString>,
+    /// decoded images by item id / attachment key — PNG decode is far too
+    /// expensive to repeat on every repaint; evicted with the transcript
+    img_cache: HashMap<String, Arc<gpui::RenderImage>>,
+}
+
+impl TileView {
+    /// Start the one-second "copied" flash for `key` (a message item id, or
+    /// "{item_id}#code{n}" for a fenced code block inside it). Reverts itself
+    /// after the second unless a newer click has taken over the slot.
+    pub fn flash_copied(&mut self, key: String, cx: &mut Context<Self>) {
+        self.copied_flash = Some(key.clone());
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(1000))
+                .await;
+            let _ = this.update(cx, |this, cx| this.clear_copied_flash(&key, cx));
+        })
+        .detach();
+    }
+
+    /// Revert the flash only if `key` still owns it (a newer click keeps its flash)
+    pub fn clear_copied_flash(&mut self, key: &str, cx: &mut Context<Self>) {
+        if self.copied_flash.as_deref() == Some(key) {
+            self.copied_flash = None;
+            cx.notify();
+        }
+    }
+
+    /// Message text as a pointer-stable SharedString for the kit's text view,
+    /// which recognizes the same allocation across frames and skips re-parsing
+    /// an unchanged document. Replaced whenever the store's copy has moved on
+    /// (the streaming tail).
+    fn md_text(&mut self, item_id: &str, text: &str) -> SharedString {
+        if let Some(cached) = self.md_cache.get(item_id) {
+            if cached.as_ref() == text {
+                return cached.clone();
+            }
+        }
+        let fresh = SharedString::from(text.to_string());
+        self.md_cache.insert(item_id.to_string(), fresh.clone());
+        fresh
+    }
+
+    /// Decoded image for a transcript item or composer attachment, cached by a
+    /// stable key (item id / "att{key}") — both name immutable bytes, so an
+    /// entry never goes stale, only unreachable (pruned after each render).
+    fn image_for(&mut self, cache_key: &str, png: &[u8]) -> Option<Arc<gpui::RenderImage>> {
+        if let Some(cached) = self.img_cache.get(cache_key) {
+            return Some(cached.clone());
+        }
+        let decoded = decode_png_render(png)?;
+        self.img_cache.insert(cache_key.to_string(), decoded.clone());
+        Some(decoded)
+    }
+
+    /// Drops cache entries whose transcript item or attachment is gone.
+    fn prune_caches(&mut self, live: &HashSet<String>) {
+        self.md_cache.retain(|k, _| live.contains(k));
+        self.img_cache.retain(|k, _| live.contains(k));
+    }
 }
 
 /// A context menu request: the actions to offer plus the tile-local anchor point.
@@ -77,7 +142,9 @@ struct TileMenu {
 
 /// Miniature context-usage gauge: a ring of dots whose arc fills clockwise
 /// from 12 o'clock in proportion to the context window consumed. Green below
-/// 60%, amber below 85%, salmon at the danger line.
+/// 60%, amber below 85%, salmon at the danger line. Absolutely-positioned dot
+/// divs, not canvas — the canvas variant painted with its bounds shifted by
+/// half the container, floating the ring high beside the header text.
 fn context_ring(frac: f32) -> gpui::AnyElement {
     let frac = frac.clamp(0., 1.);
     let filled_color = if frac >= 0.85 {
@@ -91,40 +158,24 @@ fn context_ring(frac: f32) -> gpui::AnyElement {
     let dot = 2.6_f32;
     let ring_size = 13.0_f32;
     let radius = (ring_size - dot) / 2.;
-    let gauge = canvas(
-        move |_, _, _| (),
-        move |bounds, (), window, _| {
-            let segments = 28;
-            let center_x = (bounds.origin.x + bounds.size.width / 2.).as_f32();
-            let center_y = (bounds.origin.y + bounds.size.height / 2.).as_f32();
-            for i in 0..segments {
-                let phase = i as f32 / segments as f32;
-                let theta = phase * std::f32::consts::TAU - std::f32::consts::FRAC_PI_2;
-                let (sin, cos) = theta.sin_cos();
-                let dot_bounds = gpui::Bounds {
-                    origin: gpui::point(
-                        px(center_x + sin * radius - dot / 2.),
-                        px(center_y - cos * radius - dot / 2.),
-                    ),
-                    size: gpui::size(px(dot), px(dot)),
-                };
-                let color = if phase < frac { filled_color } else { track_color };
-                window.paint_quad(gpui::quad(
-                    dot_bounds,
-                    gpui::Corners::all(px(dot / 2.)),
-                    color,
-                    gpui::Edges::all(px(0.)),
-                    gpui::transparent_black(),
-                    gpui::BorderStyle::default(),
-                ));
-            }
-        },
-    );
-    div()
-        .flex_shrink_0()
-        .size(px(ring_size))
-        .child(gauge)
-        .into_any_element()
+    let segments = 28;
+    let mut ring = div().relative().flex_shrink_0().size(px(ring_size));
+    for i in 0..segments {
+        let phase = i as f32 / segments as f32;
+        let theta = phase * std::f32::consts::TAU - std::f32::consts::FRAC_PI_2;
+        let (sin, cos) = theta.sin_cos();
+        let color = if phase < frac { filled_color } else { track_color };
+        ring = ring.child(
+            div()
+                .absolute()
+                .left(px(ring_size / 2. + sin * radius - dot / 2.))
+                .top(px(ring_size / 2. - cos * radius - dot / 2.))
+                .size(px(dot))
+                .rounded_full()
+                .bg(color),
+        );
+    }
+    ring.into_any_element()
 }
 
 impl TileView {
@@ -201,6 +252,8 @@ impl TileView {
             flyout_open: false,
             last_spring_seen: false,
             copied_flash: None,
+            md_cache: HashMap::new(),
+            img_cache: HashMap::new(),
         }
     }
 
@@ -310,7 +363,8 @@ impl TileView {
     ) -> gpui::AnyElement {
         match item {
             ChatItem::UserMessage { text, created_ms, .. } => {
-                let text = text.clone();
+                // one backing allocation per render; the clones below are refcounts
+                let text = SharedString::from(text.as_str());
                 let time = crate::store::message_time_label(*created_ms);
                 let copy_text = text.clone();
                 let flash_key = item_id.to_string();
@@ -354,7 +408,7 @@ impl TileView {
                                 div()
                                     .text_size(px(fonts.font_body_large))
                                     .text_color(theme::TEXT)
-                                    .child(SharedString::from(text.clone())),
+                                    .child(text.clone()),
                             )
                             .child(
                                 // copy button shares the time line: pinned left,
@@ -380,22 +434,8 @@ impl TileView {
                                             .group_hover("umsg", |s| s.opacity(1.))
                                             .hover(|s| s.bg(theme::HOVER))
                                             .on_click(cx.listener(move |this, _, _, cx| {
-                                                cx.write_to_clipboard(gpui::ClipboardItem::new_string(copy_text.clone()));
-                                                this.copied_flash = Some(flash_key.clone());
-                                                cx.notify();
-                                                let flash_key = flash_key.clone();
-                                                cx.spawn(async move |this, cx| {
-                                                    cx.background_executor()
-                                                        .timer(std::time::Duration::from_millis(1000))
-                                                        .await;
-                                                    let _ = this.update(cx, |this, cx| {
-                                                        if this.copied_flash.as_deref() == Some(flash_key.as_str()) {
-                                                            this.copied_flash = None;
-                                                            cx.notify();
-                                                        }
-                                                    });
-                                                })
-                                                .detach();
+                                                cx.write_to_clipboard(gpui::ClipboardItem::new_string(copy_text.to_string()));
+                                                this.flash_copied(flash_key.clone(), cx);
                                             }))
                                             .child(crate::ui::icon(copy_icon_path, px(fonts.icon_small), copy_icon_color)),
                                     )
@@ -414,6 +454,9 @@ impl TileView {
             ChatItem::AssistantText { text, meta_label, created_ms, .. } => {
                 let time = crate::store::message_time_label(*created_ms);
                 let meta = meta_label.clone();
+                // cached, pointer-stable: the kit skips re-parsing unchanged text,
+                // and the copy button's string is a refcount, not a fresh copy
+                let text = self.md_text(item_id, text);
                 let copy_text = text.clone();
                 let flash_key = item_id.to_string();
                 let flashed = self.copied_flash.as_deref() == Some(item_id);
@@ -422,7 +465,14 @@ impl TileView {
                 } else {
                     ("icons/copy.svg", theme::TEXT_MUTED, theme::HAIRLINE)
                 };
-                let markdown = render_markdown(text, fonts.icon_small);
+                let markdown = render_markdown(
+                    text,
+                    fonts.icon_small,
+                    item_id.to_string(),
+                    self.copied_flash.as_deref(),
+                    cx.entity().downgrade(),
+                    accent,
+                );
                 div()
                     .w_full()
                     .flex()
@@ -464,22 +514,8 @@ impl TileView {
                                             .group_hover("amsg", |s| s.opacity(1.))
                                             .hover(|s| s.bg(theme::HOVER))
                                             .on_click(cx.listener(move |this, _, _, cx| {
-                                                cx.write_to_clipboard(gpui::ClipboardItem::new_string(copy_text.clone()));
-                                                this.copied_flash = Some(flash_key.clone());
-                                                cx.notify();
-                                                let flash_key = flash_key.clone();
-                                                cx.spawn(async move |this, cx| {
-                                                    cx.background_executor()
-                                                        .timer(std::time::Duration::from_millis(1000))
-                                                        .await;
-                                                    let _ = this.update(cx, |this, cx| {
-                                                        if this.copied_flash.as_deref() == Some(flash_key.as_str()) {
-                                                            this.copied_flash = None;
-                                                            cx.notify();
-                                                        }
-                                                    });
-                                                })
-                                                .detach();
+                                                cx.write_to_clipboard(gpui::ClipboardItem::new_string(copy_text.to_string()));
+                                                this.flash_copied(flash_key.clone(), cx);
                                             }))
                                             .child(crate::ui::icon(copy_icon_path, px(fonts.icon_small), copy_icon_color)),
                                     )
@@ -498,7 +534,7 @@ impl TileView {
             }
             ChatItem::Reasoning { text, .. } => {
                 let open = self.expanded.contains(item_id);
-                let body = text.clone();
+                let body = SharedString::from(text.as_str());
                 div()
                     .w_full()
                     .flex()
@@ -519,7 +555,7 @@ impl TileView {
                                 .text_size(px(fonts.font_detail))
                                 .text_color(theme::TEXT)
                                 .opacity(0.75)
-                                .child(SharedString::from(body)),
+                                .child(body),
                         )
                     })
                     .into_any_element()
@@ -527,8 +563,9 @@ impl TileView {
             ChatItem::Tool(tool) => self.render_tool(item_id, tool, fonts, accent, window, cx),
             ChatItem::Image { file_name, png, created_ms, .. } => {
                 let time = crate::store::message_time_label(*created_ms);
-                let name = file_name.clone();
-                let render = decode_png_render(png);
+                // decoded once per item; PNG decode on every repaint dominated
+                // long transcripts with screenshots
+                let render = self.image_for(item_id, png);
                 let mut image_el = div().child(div());
                 if let Some(render) = render {
                     image_el = div().child(
@@ -1285,7 +1322,7 @@ impl Render for TileView {
             ctx: String,
             ctx_frac: f32,
             has_ctx: bool,
-            items: Vec<(String, ChatItem)>,
+            items: Vec<(String, Arc<ChatItem>)>,
             queue_keys: Vec<usize>,
             queue: Vec<crate::store::QueueEntry>,
             attachments: Vec<crate::store::AttachmentItem>,
@@ -1310,7 +1347,7 @@ impl Render for TileView {
             has_variants_enabled: bool,
             spring: bool,
         }
-        let snap = {
+        let mut snap = {
             let store = self.store.read(cx);
             let Some(tile) = store.tile_by_key(&self.key) else {
                 return div().into_any_element();
@@ -1327,10 +1364,11 @@ impl Render for TileView {
                     .unwrap_or(store.is_server_running),
                 is_focused: tile.is_focused,
                 title: tile.title.clone(),
-                ctx: tile.context_text.clone().unwrap_or_default(),
-                ctx_frac: tile.context_frac,
-                has_ctx: tile.has_context(),
-                items: tile.items.iter().map(|i| (i.id(), i.clone())).collect(),
+            ctx: tile.context_text.clone().unwrap_or_default(),
+            ctx_frac: tile.context_frac,
+            has_ctx: tile.has_context(),
+            // Arc'd items: this snapshot is pointer copies, the payloads stay put
+            items: tile.items.iter().map(|i| (i.id(), Arc::clone(i))).collect(),
                 queue_keys: tile.queue_rows.clone(),
                 queue: store.queue.clone(),
                 attachments: tile.attachments.clone(),
@@ -1387,7 +1425,8 @@ impl Render for TileView {
             self.last_max = max_now;
         }
 
-        let items = snap.items.clone();
+        // moved out rather than cloned — snap's other fields stay usable
+        let items = std::mem::take(&mut snap.items);
         let mut transcript = div()
             .id("transcript")
             .flex_1()
@@ -1416,6 +1455,10 @@ impl Render for TileView {
         for (item_id, item) in &items {
             transcript = transcript.child(self.render_item(item_id, item, fonts, accent, window, cx));
         }
+        // cache entries only live as long as the transcript/composer entries they serve
+        let mut live: HashSet<String> = items.iter().map(|(id, _)| id.clone()).collect();
+        live.extend(snap.attachments.iter().map(|a| format!("att{}", a.key)));
+        self.prune_caches(&live);
 
         let jump_visible = !self.pinned && snap.has_messages;
 
@@ -1536,7 +1579,7 @@ impl Render for TileView {
                     .flex_col()
                     .items_center();
                 if att.is_image() {
-                    if let Some(render) = decode_png_render(&att.data) {
+                    if let Some(render) = self.image_for(&format!("att{akey}"), &att.data) {
                         chip = chip.child(
                             img(render).size(px(56.)).object_fit(gpui::ObjectFit::Cover).rounded_sm(),
                         );
@@ -2105,7 +2148,7 @@ impl Render for TileView {
                         .on_click(move |_, window, cx| {
                             match &item {
                                 ContextMenu::Copy(text) => {
-                                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(text.clone()));
+                                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(text.to_string()));
                                 }
                                 ContextMenu::EditInput(text) => {
                                     let text = text.clone();
@@ -2116,18 +2159,18 @@ impl Render for TileView {
                                         let text = text.clone();
                                         move |s, _| {
                                             if let Some(tile) = s.tile_by_key_mut(&key) {
-                                                tile.input = text;
+                                                tile.input = text.to_string();
                                                 tile.reset_history();
                                             }
                                         }
                                     });
                                     // set_value emits no Change, so the store copy above stands
-                                    composer.update(cx, |field, cx| field.set_value(text, window, cx));
+                                    composer.update(cx, |field, cx| field.set_value(text.as_ref(), window, cx));
                                 }
                                 ContextMenu::CopyImage { file_name: _, png } => {
                                     let image = gpui::Image {
                                         format: ImageFormat::Png,
-                                        bytes: png.clone(),
+                                        bytes: png.as_ref().clone(),
                                         id: 0,
                                     };
                                     cx.write_to_clipboard(gpui::ClipboardItem::new_image(&image));

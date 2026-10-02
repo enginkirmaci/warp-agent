@@ -43,7 +43,10 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg",
 anyhow = "1"
 rand = "0.9"
 chrono = "0.4"
-rust-embed = "8"
+# debug-embed: embed assets at compile time in debug builds too — without it
+# rust-embed resolves "assets" against the process CWD at runtime, so the app
+# only finds its icons when launched from the repo root
+rust-embed = { version = "8", features = ["debug-embed"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 tracing-appender = "0.2"

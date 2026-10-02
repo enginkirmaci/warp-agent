@@ -61,6 +61,20 @@ pub struct AgentInfo {
     pub hidden: bool,
 }
 
+/// A server-side slash command or skill: GET /command. `template` is the full
+/// prompt the TUI submits; `$ARGUMENTS` (when present) takes the text typed
+/// after `/name args`.
+#[derive(Clone, Debug)]
+pub struct CommandInfo {
+    pub name: String,
+    pub description: String,
+    /// "command" (built-in / user markdown) or "skill"
+    pub source: String,
+    pub template: String,
+    /// commands flagged subtask run as a background task in the TUI
+    pub subtask: bool,
+}
+
 #[derive(Clone, Debug)]
 pub struct QuestionOptionInfo {
     pub label: String,
@@ -418,6 +432,48 @@ impl ApiClient {
         Ok(agents)
     }
 
+    /// The server's slash commands and skills, in server order.
+    pub async fn get_commands(&self) -> Result<Vec<CommandInfo>> {
+        let resp = self.http.get(format!("{}/command", self.base_url)).send().await?;
+        let value: Value = error_for_status(resp).await?.json().await?;
+        let mut commands = Vec::new();
+        if let Some(arr) = value.as_array() {
+            for c in arr {
+                let Some(name) = c.get("name").and_then(Value::as_str) else {
+                    continue;
+                };
+                commands.push(CommandInfo {
+                    name: name.to_string(),
+                    description: c.get("description").and_then(Value::as_str).unwrap_or("").into(),
+                    source: c.get("source").and_then(Value::as_str).unwrap_or("command").into(),
+                    template: c.get("template").and_then(Value::as_str).unwrap_or("").into(),
+                    subtask: c.get("subtask").and_then(Value::as_bool).unwrap_or(false),
+                });
+            }
+        }
+        Ok(commands)
+    }
+
+    /// Filename search over the server's working directory (the `@` mention
+    /// source); paths come back as the server reports them, usually relative.
+    pub async fn find_files(&self, query: &str) -> Result<Vec<String>> {
+        let resp = self
+            .http
+            .get(format!("{}/find/file", self.base_url))
+            .query(&[("query", query)])
+            .send()
+            .await?;
+        let value: Value = error_for_status(resp).await?.json().await?;
+        Ok(value
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default())
+    }
+
     pub async fn get_models(&self) -> Result<Vec<ModelInfo>> {
         let resp = self
             .http
@@ -628,6 +684,10 @@ pub enum ApiRequest {
     GetQuestions { for_session: String },
     ReplyQuestion { request_id: String, answers: Vec<Vec<String>> },
     RejectQuestion { request_id: String },
+    /// The workspace's slash commands and skills (GET /command).
+    ListCommands,
+    /// Filename search for the `@` mention menu (GET /find/file).
+    FindFiles { query: String },
 }
 
 /// Live state of a workspace's event pump. Connected is reported on every
@@ -658,6 +718,10 @@ pub enum UiEvent {
     QuestionReplied { request_id: String, summary: String, result: Result<()> },
     ModelsLoaded { ws_key: String, result: Result<Vec<ModelInfo>> },
     AgentsLoaded { ws_key: String, result: Result<Vec<AgentInfo>> },
+    CommandsLoaded { ws_key: String, result: Result<Vec<CommandInfo>> },
+    /// Answer to a FindFiles request; the query rides along so stale answers
+    /// can be told apart from the menu's current token.
+    FilesFound { ws_key: String, query: String, result: Result<Vec<String>> },
     MessageSendFailed { ws_key: String, session_id: String, error: String },
     Log { ws_key: String, line: String },
 }
@@ -973,5 +1037,14 @@ async fn run_request(client: &ApiClient, ws_key: String, request: ApiRequest) ->
             let result = client.reject_question(&request_id).await;
             UiEvent::QuestionReplied { request_id, summary: "dismissed".into(), result }
         }
+        ApiRequest::ListCommands => UiEvent::CommandsLoaded {
+            ws_key,
+            result: client.get_commands().await,
+        },
+        ApiRequest::FindFiles { query } => UiEvent::FilesFound {
+            ws_key,
+            query: query.clone(),
+            result: client.find_files(&query).await,
+        },
     }
 }

@@ -2,8 +2,8 @@
 //! transcripts, queues, permissions, questions and subagent tracking. A 1:1
 //! port of MainViewModel + ChatTileViewModel + the ChatItems model.
 
-use crate::oc::{self, ApiRequest, NetCommand, SessionInfo, StoredMessage, UiEvent};
-use crate::settings::{AppSettings, PromptTemplate, UiState, WorkspaceState, DEFAULT_EXECUTABLE};
+use crate::oc::{self, ApiRequest, CommandInfo, NetCommand, SessionInfo, StoredMessage, UiEvent};
+use crate::settings::{AppSettings, UiState, WorkspaceState, DEFAULT_EXECUTABLE};
 use crate::theme::{self, AccentColors, FontTokens};
 use chrono::{Local, TimeZone, Timelike};
 use gpui::prelude::*;
@@ -28,6 +28,43 @@ fn variant_list_for(variants_by_model: &HashMap<String, Vec<String>>, model: &Op
         }
     }
     variants
+}
+
+/// The tile's `@`-mention token: the last `@` that starts a token (text start
+/// or right after whitespace) with no whitespace between it and the end.
+/// Returns the byte index of the `@` and the query typed after it.
+pub fn at_token_start(text: &str) -> Option<(usize, String)> {
+    let byte_at = text.rfind('@')?;
+    if text.is_char_boundary(byte_at) {
+        let prev = text[..byte_at].chars().next_back();
+        if prev.is_none_or(|c| c.is_whitespace()) && !text[byte_at + 1..].chars().any(char::is_whitespace) {
+            return Some((byte_at, text[byte_at + 1..].to_string()));
+        }
+    }
+    None
+}
+
+/// `/name args` → the matching server command's template with `$ARGUMENTS`
+/// substituted; args append when the template has no slot. Text matching no
+/// command comes back unchanged (it goes to the model verbatim).
+pub fn expand_slash_command(text: &str, commands: &[CommandInfo]) -> String {
+    let Some(rest) = text.strip_prefix('/') else {
+        return text.to_string();
+    };
+    let (name, args) = match rest.find(char::is_whitespace) {
+        Some(pos) => (&rest[..pos], rest[pos..].trim()),
+        None => (rest, ""),
+    };
+    let Some(cmd) = commands.iter().find(|c| c.name == name) else {
+        return text.to_string();
+    };
+    if cmd.template.contains("$ARGUMENTS") {
+        cmd.template.replace("$ARGUMENTS", args)
+    } else if args.is_empty() {
+        cmd.template.clone()
+    } else {
+        format!("{}\n\n{}", cmd.template.trim_end(), args)
+    }
 }
 
 pub fn format_tokens(tokens: i64) -> String {
@@ -1319,6 +1356,21 @@ pub struct Store {
     pending_opens: Vec<(String, String)>,
     /// tile whose flyout should spring open after a live todo batch
     pub todos_spring: Option<String>,
+
+    // ---- composer suggestions (/commands, @files) ----
+    /// The workspace's server commands + skills, keyed by workspace folder
+    /// path; filled on ServerStarted and refreshed when a slash menu opens.
+    pub commands: HashMap<String, Vec<CommandInfo>>,
+    /// Latest @-mention filename search answer (last request wins); the query
+    /// rides along so a tile can tell stale answers from its current token.
+    pub file_results: Option<FileSuggest>,
+}
+
+/// A /find/file answer as delivered to the @ mention menu.
+pub struct FileSuggest {
+    pub ws_key: String,
+    pub query: String,
+    pub paths: Vec<String>,
 }
 
 impl Store {
@@ -1390,6 +1442,8 @@ impl Store {
             pending_restores: Vec::new(),
             pending_opens: Vec::new(),
             todos_spring: None,
+            commands: HashMap::new(),
+            file_results: None,
         };
 
         // ensure the General workspace exists and leads the list
@@ -1532,36 +1586,51 @@ impl Store {
         self.ui.save();
     }
 
-    // ---- prompt library (ui.json "Prompts") ----
+    // ---- composer suggestions (/commands, @files) ----
 
-    /// Insert or update a prompt template; the library is client-side state,
-    /// so every mutation rewrites ui.json immediately. `replace` names the
-    /// entry being edited (rename-safe); None appends. The name is normalized
-    /// (whitespace and `/` stripped) and must be unique — a rename onto an
-    /// existing name replaces that entry instead of duplicating it.
-    pub fn save_prompt(&mut self, replace: Option<&str>, name: &str, body: &str, cx: &mut Context<Self>) {
-        let name = PromptTemplate::normalize_name(name);
-        if name.is_empty() || body.trim().is_empty() {
-            return;
-        }
-        if replace != Some(name.as_str()) {
-            self.ui.prompts.retain(|t| t.name != name);
-        }
-        match replace.and_then(|original| self.ui.prompts.iter_mut().find(|t| t.name == original)) {
-            Some(existing) => {
-                existing.name = name;
-                existing.body = body.trim_end().to_string();
-            }
-            None => self.ui.prompts.push(PromptTemplate { name, body: body.trim_end().to_string() }),
-        }
-        self.ui.save();
-        cx.notify();
+    /// Slash commands for the workspace a tile talks to (its own session's
+    /// server, else the selected one). Empty when the server has none.
+    pub fn tile_commands(&self, tile_key: &str) -> Vec<CommandInfo> {
+        self.tile_ws_key(tile_key)
+            .and_then(|ws| self.commands.get(&ws).cloned())
+            .unwrap_or_default()
     }
 
-    pub fn delete_prompt(&mut self, name: &str, cx: &mut Context<Self>) {
-        self.ui.prompts.retain(|t| t.name != name);
-        self.ui.save();
-        cx.notify();
+    /// Fire a /command refresh for the tile's workspace (menu open).
+    pub fn refresh_commands(&mut self, tile_key: &str) {
+        if let Some(ws) = self.tile_ws_key(tile_key) {
+            self.net.send(NetCommand::Request { ws_key: ws, request: ApiRequest::ListCommands });
+        }
+    }
+
+    /// Fire a filename search for the tile's workspace (@ menu keystroke).
+    pub fn search_files(&mut self, tile_key: &str, query: &str) {
+        if let Some(ws) = self.tile_ws_key(tile_key) {
+            self.net.send(NetCommand::Request {
+                ws_key: ws,
+                request: ApiRequest::FindFiles { query: query.to_string() },
+            });
+        }
+    }
+
+    /// The file-search answer a tile's menu should show right now: only when
+    /// it answers this workspace's exact query (older answers don't count).
+    pub fn file_results_for(&self, tile_key: &str, query: &str) -> Option<&Vec<String>> {
+        let result = self.file_results.as_ref()?;
+        if result.query == query && self.tile_ws_key(tile_key).as_deref() == Some(result.ws_key.as_str()) {
+            Some(&result.paths)
+        } else {
+            None
+        }
+    }
+
+    /// Which workspace's server a tile talks to: its own session's workspace,
+    /// or the selected one for drafts.
+    pub fn tile_ws_key(&self, tile_key: &str) -> Option<String> {
+        self.tile_by_key(tile_key)
+            .and_then(|t| t.session_id.clone())
+            .and_then(|sid| self.workspace_by_session.get(&sid).cloned())
+            .or_else(|| self.selected_workspace.clone())
     }
 
     // ---- lookups ----
@@ -1928,6 +1997,8 @@ impl Store {
                     // model/agent pickers feed off every running server
                     self.net.send(NetCommand::Request { ws_key: ws_key.clone(), request: ApiRequest::ListModels });
                     self.net.send(NetCommand::Request { ws_key: ws_key.clone(), request: ApiRequest::ListAgents });
+                    // the / suggestion menu serves this workspace's commands
+                    self.net.send(NetCommand::Request { ws_key: ws_key.clone(), request: ApiRequest::ListCommands });
                     if is_selected {
                         let wanted = self
                             .selected_workspace()
@@ -2305,6 +2376,18 @@ impl Store {
                 }
                 cx.notify();
             }
+            UiEvent::CommandsLoaded { ws_key, result } => {
+                if let Ok(commands) = result {
+                    self.commands.insert(ws_key, commands);
+                    cx.notify();
+                }
+            }
+            UiEvent::FilesFound { ws_key, query, result } => {
+                if let Ok(paths) = result {
+                    self.file_results = Some(FileSuggest { ws_key, query, paths });
+                    cx.notify();
+                }
+            }
             UiEvent::MessageSendFailed { session_id, error, .. } => {
                 self.post_note_for_session(&session_id, &format!("Message failed: {error}"), true);
                 cx.notify();
@@ -2463,6 +2546,13 @@ impl Store {
         if text.is_empty() && attachment_count == 0 {
             return;
         }
+        // a leading `/name` expands against the workspace's server command
+        // list; anything that matches no command goes out verbatim
+        let text = self
+            .tile_ws_key(tile_key)
+            .and_then(|ws| self.commands.get(&ws))
+            .map(|commands| expand_slash_command(&text, commands))
+            .unwrap_or_else(|| text.clone());
         // an existing chat talks to its own workspace's server; a draft to the selected one
         let Some(tile) = self.tile_by_key(tile_key) else { return };
         if let Some(session_id) = &tile.session_id {
@@ -2785,19 +2875,6 @@ impl Store {
             tile.set_input_direct(text);
         }
         true
-    }
-
-    /// Loads the tile's most recent sent user message into the composer for
-    /// review (the "↻ last prompt" pill) — no auto-send.
-    pub fn recall_last_prompt(&mut self, tile_key: &str, cx: &mut Context<Self>) {
-        let text = self.tile_by_key(tile_key).map(|t| t.peek_sent_prompt(0)).unwrap_or_default();
-        if text.trim().is_empty() {
-            return;
-        }
-        if let Some(tile) = self.tile_by_key_mut(tile_key) {
-            tile.set_input_direct(text);
-        }
-        cx.notify();
     }
 
     /// Re-prompt: sends a previous user message's text again in this chat by
@@ -4174,7 +4251,11 @@ impl Store {
         self.ui.auto_allow_always = Some(self.auto_allow);
         self.fonts = theme::font_tokens(self.settings.font_scale.as_deref(), self.system_font_factor);
         self.accent = AccentColors::for_preset(theme::normalize_accent(self.settings.accent.as_deref()));
+        // re-map the kit theme so input selection/ring/primary follow the preset
+        // (Theme::update refreshes every window)
+        theme::apply_kit_theme(self.accent, cx);
         self.tool_tips_visible = self.settings.show_tool_tips;
+        crate::ui::tooltip::sync_settings(cx, self.tool_tips_visible, self.fonts.font_xsmall);
         self.settings.save();
         self.save_state();
         cx.notify();
@@ -4305,4 +4386,38 @@ fn rand_0_to(n: i64) -> i64 {
         .map(|d| d.subsec_nanos() as i64 ^ (d.as_secs() as i64))
         .unwrap_or(0);
     nanos.rem_euclid(n + 1)
+}
+
+#[cfg(test)]
+mod suggest_tests {
+    use super::{at_token_start, expand_slash_command};
+    use crate::oc::CommandInfo;
+
+    fn cmd(name: &str, template: &str) -> CommandInfo {
+        CommandInfo { name: name.into(), description: "".into(), source: "command".into(), template: template.into(), subtask: false }
+    }
+
+    #[test]
+    fn at_token_positions() {
+        assert_eq!(at_token_start("hello @src/ma"), Some(("hello ".len(), "src/ma".into())));
+        assert_eq!(at_token_start("@"), Some((0, "".into())));
+        assert_eq!(at_token_start("mail me a@b.com"), None);
+        assert_eq!(at_token_start("done @a b"), None);
+        assert_eq!(at_token_start("plain"), None);
+    }
+
+    #[test]
+    fn slash_expansion() {
+        let commands = vec![
+            cmd("init", "bootstrap $ARGUMENTS now"),
+            cmd("review", "review this"),
+        ];
+        assert_eq!(expand_slash_command("/init", &commands), "bootstrap  now");
+        assert_eq!(expand_slash_command("/init fast", &commands), "bootstrap fast now");
+        // no $ARGUMENTS slot: args append
+        assert_eq!(expand_slash_command("/review the diff", &commands), "review this\n\nthe diff");
+        // unknown command and non-slash text go out verbatim
+        assert_eq!(expand_slash_command("/nope", &commands), "/nope");
+        assert_eq!(expand_slash_command("plain text", &commands), "plain text");
+    }
 }

@@ -9,10 +9,10 @@
 //! string, everything else skips straight through.
 
 use gpui::{
-    div, px, AnyElement, IntoElement, InteractiveElement, ParentElement, SharedString,
+    div, px, AnyElement, ElementId, IntoElement, InteractiveElement, ParentElement, SharedString,
     StatefulInteractiveElement, Styled, WeakEntity,
 };
-use gpui_kit::component::text::markdown as kit_markdown;
+use gpui_kit::base::text::TextView;
 
 use crate::ui::tile::TileView;
 
@@ -22,6 +22,10 @@ use crate::ui::tile::TileView;
 /// accent color for a second — the same animation as the message copy
 /// buttons, driven through TileView.copied_flash with keys
 /// "{flash_base}#code{n}" (n = fenced block order in this message).
+///
+/// Built on the base-layer TextView (not the component facade) because the
+/// facade doesn't forward the per-instance code-block highlighter that styles
+/// diff fences; the global TextViewDefaults style still applies to it.
 pub fn render_markdown(
     text: SharedString,
     icon_px: f32,
@@ -29,14 +33,16 @@ pub fn render_markdown(
     flash_active: Option<&str>,
     view: WeakEntity<TileView>,
     accent: gpui::Rgba,
+    cx: &gpui::App,
 ) -> AnyElement {
     let flash_active = flash_active.map(str::to_string);
     // the kit's Fn(+Send+Sync) closure can't own a mutable counter — and the
     // keys only stay stable because the tile re-calls render_markdown on every
     // render, giving each pass a fresh counter fed in fenced-block order
     let block_index = std::sync::atomic::AtomicUsize::new(0);
-    kit_markdown(text)
+    TextView::markdown(ElementId::CodeLocation(*std::panic::Location::caller()), text)
         .selectable(true)
+        .shared_code_block_highlighter(crate::ui::code_highlight::shared_highlighter(cx))
         .code_block_actions(move |block, _, _| {
             let code = block.code();
             let n = block_index.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -49,21 +55,24 @@ pub fn render_markdown(
             };
             let click_view = view.clone();
             let click_key = key.clone();
-            div()
-                .id("copy-code")
-                .cursor_pointer()
-                .p_1()
-                .rounded_sm()
-                .border_1()
-                .border_color(border)
-                .bg(crate::theme::CHIP)
-                .hover(|s| s.bg(crate::theme::HOVER))
-                .on_click(move |_, _, cx| {
-                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(code.to_string()));
-                    // flash_copied owns the one-second revert timer
-                    let _ = click_view.update(cx, |this, cx| this.flash_copied(click_key.clone(), cx));
-                })
-                .child(crate::ui::icon(icon_path, px(icon_px), icon_color))
+            crate::ui::tooltip::tip(
+                div()
+                    .id("copy-code")
+                    .cursor_pointer()
+                    .p_1()
+                    .rounded_sm()
+                    .border_1()
+                    .border_color(border)
+                    .bg(crate::theme::CHIP)
+                    .hover(|s| s.bg(crate::theme::HOVER))
+                    .on_click(move |_, _, cx| {
+                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(code.to_string()));
+                        // flash_copied owns the one-second revert timer
+                        let _ = click_view.update(cx, |this, cx| this.flash_copied(click_key.clone(), cx));
+                    }),
+                "Copy code",
+            )
+            .child(crate::ui::icon(icon_path, px(icon_px), icon_color))
         })
         .into_any_element()
 }

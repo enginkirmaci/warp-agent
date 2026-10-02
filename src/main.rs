@@ -27,7 +27,6 @@ fn main() {
             // kit components (input decorations, popovers) + our palette mapped
             // onto their theme tokens — must run before any kit component renders
             gpui_kit::init(cx);
-            theme::apply_kit_theme(cx);
 
             // composer key overrides: bound after gpui_kit::init so our later
             // bindings win the "Input" context ties (up/down history, shift-tab)
@@ -35,20 +34,25 @@ fn main() {
                 gpui::KeyBinding::new("up", ui::tile::ComposerUp, Some("Input")),
                 gpui::KeyBinding::new("down", ui::tile::ComposerDown, Some("Input")),
                 gpui::KeyBinding::new("shift-tab", ui::tile::ComposerCycleAgent, Some("Input")),
-                // slash-menu keys: the extra "Composer" context (set on the
-                // composer frame) scopes these to the composer — with the
-                // context present they match at the same depth as the plain
-                // "Input" bindings above and win as the later registration,
-                // while every other input keeps the stock editor
-                // up/down/enter/escape behavior
-                gpui::KeyBinding::new("up", ui::tile::ComposerSlashUp, Some("Composer Input")),
-                gpui::KeyBinding::new("down", ui::tile::ComposerSlashDown, Some("Composer Input")),
-                gpui::KeyBinding::new("enter", ui::tile::ComposerSlashEnter, Some("Composer Input")),
-                gpui::KeyBinding::new("escape", ui::tile::ComposerSlashEscape, Some("Composer Input")),
+                // slash-menu keys: the descendant predicate matches only the
+                // composer frame's textarea (the frame sets "Composer", the
+                // textarea is "Input" below it) — at the same depth as the
+                // plain "Input" bindings above, winning as the later
+                // registration, while every other input keeps the stock
+                // editor up/down/enter/escape behavior
+                gpui::KeyBinding::new("up", ui::tile::ComposerSlashUp, Some("Composer > Input")),
+                gpui::KeyBinding::new("down", ui::tile::ComposerSlashDown, Some("Composer > Input")),
+                gpui::KeyBinding::new("enter", ui::tile::ComposerSlashEnter, Some("Composer > Input")),
+                gpui::KeyBinding::new("escape", ui::tile::ComposerSlashEscape, Some("Composer > Input")),
             ]);
 
             let (_net_handle, net_sender, event_rx) = oc::spawn_net_thread();
             let store = Store::new(cx, net_sender);
+
+            // kit theme after the store so the saved accent preset (not the
+            // green default) drives input selection/ring/primary from launch
+            let accent = store.read(cx).accent;
+            theme::apply_kit_theme(accent, cx);
 
             // network events → store. Polled with a timer fallback: this gpui rev
             // does not service cross-thread channel wakeups on foreground tasks,

@@ -1,12 +1,15 @@
 //! ui module: shared helpers + the main window.
 
+pub mod code_highlight;
+pub mod controls;
 pub mod diff;
 pub mod markdown;
 pub mod settings;
 pub mod tile;
+pub mod tooltip;
 pub mod window;
 
-use gpui::{px, Styled};
+use gpui::Styled;
 
 /// A tinted svg icon.
 pub fn icon(path: &'static str, size: gpui::Pixels, color: impl Into<gpui::Hsla>) -> gpui::Svg {
@@ -22,11 +25,7 @@ pub fn mime_for_path(name: &str) -> &'static str {
         "gif" => "image/gif",
         "webp" => "image/webp",
         "bmp" => "image/bmp",
-        "pdf" => "application/pdf",
+        "pdf" => "image/pdf",
         _ => "text/plain",
     }
-}
-
-pub fn gap(v: f32) -> gpui::Pixels {
-    px(v)
 }

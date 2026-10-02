@@ -62,8 +62,10 @@ pub fn code_font() -> &'static str {
 
 /// Map the WarpAgent palette onto gpui-kit's shadcn-style theme tokens so kit
 /// components (Input/Textarea/TextView/popovers) render in our colors.
-/// Call once after [`gpui_kit::init`], before opening windows.
-pub fn apply_kit_theme(cx: &mut App) {
+/// The accent family is a parameter so a settings-page preset swap can re-run
+/// the mapping (`Theme::update` refreshes every window). Call after
+/// [`gpui_kit::init`], before opening windows.
+pub fn apply_kit_theme(accent: AccentColors, cx: &mut App) {
     use gpui_kit::component::{Theme, ThemeMode};
 
     resolve_fonts(cx);
@@ -71,8 +73,8 @@ pub fn apply_kit_theme(cx: &mut App) {
         t.mode = ThemeMode::Dark;
         t.background = WINDOW_CHROME.into();
         t.foreground = TEXT.into();
-        t.primary = GREEN_ACCENT.accent.into();
-        t.primary_foreground = SURFACE.into();
+        t.primary = accent.accent.into();
+        t.primary_foreground = accent.on.into();
         t.secondary = CHIP.into();
         t.secondary_foreground = TEXT.into();
         t.muted = INPUT.into();
@@ -83,10 +85,10 @@ pub fn apply_kit_theme(cx: &mut App) {
         t.danger_foreground = TEXT.into();
         t.border = HAIRLINE.into();
         t.input = INPUT.into();
-        t.ring = GREEN_ACCENT.accent.into();
-        t.selection = SELECTION.into();
+        t.ring = accent.accent.into();
+        t.selection = selection(&accent).into();
         t.caret = TEXT.into();
-        t.link = GREEN_ACCENT.accent.into();
+        t.link = accent.accent.into();
         t.popover = SETTINGS_CARD.into();
         t.popover_foreground = TEXT.into();
         t.sidebar = WINDOW_CHROME.into();
@@ -110,7 +112,6 @@ pub const WINDOW_CHROME: Rgba = c(0x1E1E1EFF); // titlebar, sidebar, ring around
 pub const SETTINGS_BG: Rgba = c(0x202020FF); // settings sheet
 pub const SETTINGS_CARD: Rgba = c(0x1A1A1AFF);
 pub const INPUT: Rgba = c(0x2A2A2AFF);
-pub const SELECTION: Rgba = c(0x4AC26540); // accent green, 25% — text selection in fields
 pub const HAIRLINE: Rgba = c(0x3E3E3EFF);
 pub const TILE_HEADER_SEPARATOR: Rgba = c(0x333333FF);
 pub const CHIP: Rgba = c(0x343434FF);
@@ -118,7 +119,15 @@ pub const DIFF_BG: Rgba = c(0x171717FF); // inset code/diff/fold body
 pub const HOVER: Hsla = hsla(0.0, 0.0, 1.0, 0.08); // #14FFFFFF
 
 pub const TEXT: Rgba = c(0xE4E4E4FF);
-pub const TEXT_MUTED: Rgba = c(0x9A9A9AFF);
+pub const TEXT_DIM: Rgba = c(0xB4B4B4FF); // secondary body text
+pub const TEXT_MUTED: Rgba = c(0x9A9A9AFF); // labels, metadata
+pub const TEXT_FAINT: Rgba = c(0x707070FF); // hints, quietest meta
+
+/// Text selection in fields: the accent at 25% alpha.
+pub fn selection(accent: &AccentColors) -> Rgba {
+    let a = accent.accent;
+    Rgba { r: a.r, g: a.g, b: a.b, a: 0.25 }
+}
 
 // ---- chat surfaces -------------------------------------------------------
 
@@ -148,6 +157,13 @@ pub const SYN_STRING: Rgba = c(0x93B585FF);
 pub const SYN_COMMENT: Rgba = c(0x6F6F6FFF);
 pub const SYN_NUMBER: Rgba = c(0xC9986EFF);
 
+// ---- diffs (the renderer in ui/diff.rs draws from here) -------------------
+
+pub const DIFF_GUTTER: Rgba = c(0x9A9A9A55); // line-number gutter text
+pub const DIFF_ADD_BG: Hsla = hsla(0.36, 0.44, 0.55, 0.15);
+pub const DIFF_DEL_BG: Hsla = hsla(0.02, 0.83, 0.68, 0.15);
+pub const DIFF_HUNK_BG: Hsla = hsla(0.0, 0.0, 0.6, 0.12);
+
 // ---- overlays ------------------------------------------------------------
 
 pub const OVERLAY_SCRIM: Hsla = hsla(0.0, 0.0, 0.0, 0.65); // #A6000000
@@ -164,12 +180,13 @@ pub struct AccentPreset {
     pub success_dim: u32,
 }
 
-pub const ACCENT_PRESETS: [AccentPreset; 7] = [
+pub const ACCENT_PRESETS: [AccentPreset; 8] = [
     AccentPreset { key: "green", label: "Green", accent: 0x4AC265, dim: 0x223322, on: 0x0C140C, success_dim: 0x1D3122 },
+    AccentPreset { key: "blue", label: "Blue", accent: 0x4C8EFF, dim: 0x1E2C42, on: 0x0C1219, success_dim: 0x1C2E45 },
     AccentPreset { key: "amber", label: "Amber", accent: 0xE8A348, dim: 0x33270F, on: 0x171006, success_dim: 0x382B12 },
     AccentPreset { key: "salmon", label: "Salmon", accent: 0xF47067, dim: 0x38201D, on: 0x1A0B09, success_dim: 0x3B2523 },
     AccentPreset { key: "gray", label: "Gray", accent: 0xA8A8A8, dim: 0x262626, on: 0x101010, success_dim: 0x2F2F2F },
-    AccentPreset { key: "silver", label: "Silver", accent: 0xC9C9C9, dim: 0x303030, on: 0x141414, success_dim: 0x383838 },
+    AccentPreset { key: "silver", label: "Silver", accent: 0xC9C9C9, dim: 0x303030, on: 0x141010, success_dim: 0x383838 },
     AccentPreset { key: "graphite", label: "Graphite", accent: 0x7A7A7A, dim: 0x1F1F1F, on: 0x0E0E0E, success_dim: 0x292929 },
     AccentPreset { key: "charcoal", label: "Charcoal", accent: 0x505050, dim: 0x1A1A1A, on: 0x0C0C0C, success_dim: 0x232323 },
 ];

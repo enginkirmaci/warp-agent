@@ -1,11 +1,14 @@
 //! One chat tile in the grid: transcript, composer and stream state for a
 //! single session — the ChatTile view port.
 
-use crate::settings::PromptTemplate;
-use crate::store::{ChatItem, QuestionEntry, Store, ToolItem};
+use crate::oc::CommandInfo;
+use crate::store::{at_token_start, ChatItem, QuestionEntry, Store, ToolItem};
 use crate::theme;
+use crate::ui::controls::{fold_body, menu_row, popover_card, BtnKind};
+use crate::ui::controls;
 use crate::ui::diff::render_diff;
 use crate::ui::markdown::render_markdown;
+use crate::ui::tooltip::tip;
 use gpui::prelude::*;
 use gpui::{
     canvas, div, img, px, relative, actions, App, AnimationExt, Context, Entity, Focusable,
@@ -22,24 +25,25 @@ use std::sync::Arc;
 // gpui_kit::init so the later binding wins over the editor's own up/down
 actions!(warp_agent, [ComposerUp, ComposerDown, ComposerCycleAgent]);
 
-// slash-menu keys, bound over a "Composer Input" context (the composer frame
-// sets "Composer"): they win the same-depth tie as later registrations and
-// never fire for the app's other inputs, which keep the stock editor bindings
+// composer-suggestion keys, bound over a "Composer > Input" context (the
+// composer frame sets "Composer"): they win the same-depth tie as later
+// registrations and never fire for the app's other inputs, which keep the
+// stock editor bindings
 actions!(
     warp_agent,
     [ComposerSlashUp, ComposerSlashDown, ComposerSlashEnter, ComposerSlashEscape]
 );
 
-/// How many template rows the slash menu shows at once; the rest collapse
+/// How many suggestion rows either menu shows at once; the rest collapse
 /// into a "keep typing" hint.
 const SLASH_MENU_VISIBLE: usize = 8;
 
-/// Placeholder fill-in for a template with `{{tokens}}`: one input per unique
-/// placeholder, composed into the final body on confirm — the question-card's
-/// lazy InputState idiom, scoped to this popover.
-struct FillState {
-    template: PromptTemplate,
-    fields: Vec<(String, Entity<InputState>)>,
+/// Which suggestion menu the composer is showing: server commands for a
+/// leading `/`, filename mentions for an active `@token`.
+#[derive(Clone, Copy, PartialEq)]
+enum SuggestMode {
+    Commands,
+    Files,
 }
 
 pub fn decode_png_render(png: &[u8]) -> Option<Arc<gpui::RenderImage>> {
@@ -86,13 +90,26 @@ pub struct TileView {
     origin: std::rc::Rc<std::cell::Cell<(f32, f32, f32, f32)>>,
     composer: Entity<TextareaState>,
     question_inputs: HashMap<String, Entity<InputState>>,
+    /// question input keys touched by the current render pass — the prune
+    /// after the transcript loop drops inputs of resolved/removed questions
+    question_keys_seen: HashSet<String>,
     last_composer_text: String,
-    /// slash menu over the prompt library: open while the composer text starts
-    /// with `/`; `slash_selected` indexes the (capped) match list
-    slash_open: bool,
-    slash_selected: usize,
-    /// open fill-in popover for a template with `{{placeholders}}`
-    fill: Option<FillState>,
+    /// composer suggestion menu: open while the text starts with `/` (server
+    /// commands) or holds an active `@token` (file mentions); `suggest_selected`
+    /// indexes the (capped) row list of the active mode
+    suggest_open: bool,
+    suggest_mode: SuggestMode,
+    suggest_selected: usize,
+    /// Escape-closed menu: stays closed until the composer text changes (or
+    /// the field blurs), so it doesn't spring back on the next render
+    suggest_dismissed: bool,
+    /// byte offset of the `@` the file menu hangs from, and the query typed
+    /// after it (the key file results are matched against)
+    at_start: usize,
+    at_query: String,
+    /// the query a /find/file request last went out for, so keystrokes don't
+    /// spam the server with repeats of the same token
+    find_requested: Option<String>,
     flyout_open: bool,
     last_spring_seen: bool,
     /// item id whose copy button is flashing its "copied" state right now
@@ -266,11 +283,13 @@ impl TileView {
         })
         .detach();
 
-        // the slash menu lives only while the composer holds focus: clicking
-        // elsewhere (transcript, another tile) closes it like Escape would
+        // the suggestion menu lives only while the composer holds focus:
+        // clicking elsewhere (transcript, another tile) closes it like Escape
+        // would, and a later refocus may open it again
         cx.subscribe(&composer, move |this, _, event: &InputEvent, cx| {
-            if matches!(event, InputEvent::Blur) && this.slash_open {
-                this.slash_open = false;
+            if matches!(event, InputEvent::Blur) && this.suggest_open {
+                this.suggest_open = false;
+                this.suggest_dismissed = false;
                 cx.notify();
             }
         })
@@ -290,10 +309,15 @@ impl TileView {
             origin: std::rc::Rc::new(std::cell::Cell::new((0., 0., 0., 0.))),
             composer,
             question_inputs: HashMap::new(),
+            question_keys_seen: HashSet::new(),
             last_composer_text: String::new(),
-            slash_open: false,
-            slash_selected: 0,
-            fill: None,
+            suggest_open: false,
+            suggest_mode: SuggestMode::Commands,
+            suggest_selected: 0,
+            suggest_dismissed: false,
+            at_start: 0,
+            at_query: String::new(),
+            find_requested: None,
             flyout_open: false,
             last_spring_seen: false,
             copied_flash: None,
@@ -311,7 +335,7 @@ impl TileView {
     }
 
     /// File attach via the platform picker; files over 512 KB are skipped like the C# app.
-    fn pick_files(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn pick_files(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         let task = cx.prompt_for_paths(gpui::PathPromptOptions {
             files: true,
             directories: false,
@@ -344,22 +368,20 @@ impl TileView {
         .detach();
     }
 
-    fn tile<'a>(&self, store: &'a Store) -> Option<&'a crate::store::ChatTile> {
-        store.tile_by_key(&self.key)
-    }
+    // ---- composer suggestions: /commands · @files ----
 
-    // ---- prompt library slash menu ----
-
-    /// The prompt library filtered by the text after the leading `/`
+    /// Server commands filtered by the text after the leading `/`
     /// (case-insensitive substring on the name; empty prefix lists all).
-    fn slash_matches(&self, text: &str, cx: &App) -> Vec<PromptTemplate> {
-        let prefix = text.get(1..).unwrap_or("").to_lowercase();
+    fn command_matches(&self, text: &str, cx: &App) -> Vec<CommandInfo> {
+        let prefix = text.get(1..).unwrap_or("");
+        // the typed part is `/name` — cut at the first space so args don't
+        // narrow the list away
+        let prefix = prefix.split(char::is_whitespace).next().unwrap_or("").to_lowercase();
         self.store
             .read(cx)
-            .ui
-            .prompts
+            .tile_commands(&self.key)
             .iter()
-            .filter(|t| prefix.is_empty() || t.name.to_lowercase().contains(&prefix))
+            .filter(|c| prefix.is_empty() || c.name.to_lowercase().contains(&prefix))
             .cloned()
             .collect()
     }
@@ -367,8 +389,7 @@ impl TileView {
     /// Writes `text` into the composer AND the store copy (set_value emits no
     /// Change, so the store would keep the old draft), caret parked at the
     /// end — the shared tail of menu acceptance. `last_composer_text` moves
-    /// too: a template whose body starts with `/` must not re-open the menu
-    /// on the next render.
+    /// too: text starting with `/` must not re-trigger a stale menu open.
     fn insert_composer_text(&mut self, text: String, window: &mut Window, cx: &mut Context<Self>) {
         let key = self.key.clone();
         self.store.update(cx, |s, _| {
@@ -390,85 +411,61 @@ impl TileView {
         self.last_composer_text = text;
     }
 
-    /// Accepts the highlighted slash-menu row: placeholder-free templates go
-    /// straight into the composer, the rest open the fill-in popover.
-    fn accept_slash(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// Accepts the highlighted suggestion row. Commands expand into their
+    /// server template (`$ARGUMENTS` takes the typed args, or the args append)
+    /// and land in the composer for a final look before sending; file mentions
+    /// replace the `@token` with `@path `.
+    fn accept_suggest(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let text = self.composer.read(cx).value().to_string();
-        let matches = self.slash_matches(&text, cx);
-        let Some(template) = matches.get(self.slash_selected).cloned() else {
-            return;
-        };
-        self.slash_open = false;
-        let names = template.placeholders();
-        if names.is_empty() {
-            self.insert_composer_text(template.body.clone(), window, cx);
-        } else {
-            let fields = names
-                .into_iter()
-                .map(|name| {
-                    let field = cx.new(|cx| InputState::new(window, cx).placeholder(name.clone()));
-                    (name, field)
+        let accepted = match self.suggest_mode {
+            SuggestMode::Commands => {
+                let matches = self.command_matches(&text, cx);
+                let Some(cmd) = matches.get(self.suggest_selected).cloned() else {
+                    return;
+                };
+                // whatever follows the typed `/name` rides in as the arguments
+                let args = text
+                    .get(1..)
+                    .and_then(|rest| rest.split_once(char::is_whitespace))
+                    .map(|(_, args)| args.trim())
+                    .unwrap_or("");
+                Some(if cmd.template.contains("$ARGUMENTS") {
+                    cmd.template.replace("$ARGUMENTS", args)
+                } else if args.is_empty() {
+                    cmd.template.clone()
+                } else {
+                    format!("{}\n\n{}", cmd.template.trim_end(), args)
                 })
-                .collect();
-            self.fill = Some(FillState { template, fields });
-            if let Some((_, field)) = self.fill.as_ref().and_then(|f| f.fields.first()) {
-                let handle = field.read(cx).focus_handle(cx).clone();
-                window.focus(&handle, cx);
             }
-        }
-        cx.notify();
-    }
-
-    /// Enter inside the fill-in popover: the last field confirms, earlier
-    /// ones hop to the next field. Returns false when no fill field has
-    /// focus (the key belongs to the composer then).
-    fn fill_enter(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        let hit = self.fill.as_ref().and_then(|fill| {
-            let index = fill
-                .fields
-                .iter()
-                .position(|(_, f)| f.read(cx).focus_handle(cx).is_focused(window));
-            index.map(|index| (index, fill.fields.len()))
-        });
-        let Some((index, count)) = hit else {
-            return false;
+            SuggestMode::Files => {
+                let Some(paths) = self.store.read(cx).file_results_for(&self.key, &self.at_query) else {
+                    return;
+                };
+                let Some(path) = paths.get(self.suggest_selected).cloned() else {
+                    return;
+                };
+                let start = self.at_start.min(text.len());
+                if !text.is_char_boundary(start) {
+                    return;
+                }
+                Some(format!("{}@{} ", &text[..start], path))
+            }
         };
-        if index + 1 < count {
-            if let Some((_, field)) = self.fill.as_ref().map(|f| &f.fields[index + 1]) {
-                let handle = field.read(cx).focus_handle(cx).clone();
-                window.focus(&handle, cx);
-                cx.notify();
-            }
-        } else {
-            self.confirm_fill(window, cx);
+        self.suggest_open = false;
+        self.suggest_dismissed = true;
+        if let Some(text) = accepted {
+            self.insert_composer_text(text, window, cx);
         }
-        true
-    }
-
-    /// Composes the template with the fields' values and writes the result
-    /// into the composer.
-    fn confirm_fill(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(fill) = self.fill.take() else { return };
-        let mut values: HashMap<String, String> = HashMap::new();
-        for (name, field) in &fill.fields {
-            values.insert(name.clone(), field.read(cx).value().to_string());
-        }
-        let body = fill.template.compose(&values);
-        self.insert_composer_text(body, window, cx);
         cx.notify();
     }
 
-    /// The slash-menu popup, rendered as the composer frame's last child so
+    /// The suggestion popup, rendered as the composer frame's last child so
     /// it paints above the field; `bottom(relative(1.))` parks it just above
-    /// the frame's top edge.
-    fn render_slash_menu(&mut self, input: &str, fonts: theme::FontTokens, accent: gpui::Rgba, cx: &mut Context<Self>) -> gpui::AnyElement {
-        if !self.slash_open || self.fill.is_some() {
+    /// the frame's top edge. Commands rows show `/name` + description (with a
+    /// faint skill/command tag); file rows show the doc glyph + path.
+    fn render_suggest_menu(&mut self, input: &str, fonts: theme::FontTokens, accent: gpui::Rgba, cx: &mut Context<Self>) -> gpui::AnyElement {
+        if !self.suggest_open {
             return div().into_any_element();
-        }
-        let matches = self.slash_matches(input, cx);
-        let visible = matches.len().min(SLASH_MENU_VISIBLE);
-        if visible > 0 && self.slash_selected >= visible {
-            self.slash_selected = 0;
         }
         let muted_row = |label: String| {
             div()
@@ -476,57 +473,126 @@ impl TileView {
                 .py_1()
                 .text_size(px(fonts.font_xsmall))
                 .italic()
-                .text_color(theme::TEXT_MUTED)
-                .opacity(0.7)
+                .text_color(theme::TEXT_FAINT)
                 .child(label)
         };
         let mut rows = div().flex().flex_col();
-        if self.store.read(cx).ui.prompts.is_empty() {
-            rows = rows.child(muted_row("no prompts yet".into()));
-        } else if matches.is_empty() {
-            rows = rows.child(muted_row("no matching prompt".into()));
-        }
-        for (ix, template) in matches.iter().enumerate() {
-            if ix == SLASH_MENU_VISIBLE {
-                rows = rows.child(muted_row(format!("+{} more — keep typing", matches.len() - SLASH_MENU_VISIBLE)));
-                break;
+        let mut count = 0usize;
+        match self.suggest_mode {
+            SuggestMode::Commands => {
+                let matches = self.command_matches(input, cx);
+                count = matches.len();
+                if count == 0 {
+                    rows = rows.child(muted_row(if self.store.read(cx).tile_commands(&self.key).is_empty() {
+                        "no server commands".into()
+                    } else {
+                        "no matching command".into()
+                    }));
+                }
+                for (ix, cmd) in matches.iter().enumerate() {
+                    if ix == SLASH_MENU_VISIBLE {
+                        rows = rows.child(muted_row(format!("+{} more — keep typing", count - SLASH_MENU_VISIBLE)));
+                        break;
+                    }
+                    let selected = ix == self.suggest_selected;
+                    rows = rows.child(
+                        div()
+                            .id(gpui::ElementId::NamedInteger("suggest-row".into(), ix as u64))
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .px_2()
+                            .py_1()
+                            .rounded_md()
+                            .cursor_pointer()
+                            .when(selected, |d| d.bg(theme::HOVER))
+                            .hover(|s| s.bg(theme::HOVER))
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.suggest_selected = ix;
+                                this.accept_suggest(window, cx);
+                            }))
+                            .child(
+                                div()
+                                    .flex_shrink_0()
+                                    .text_size(px(fonts.font_small))
+                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                    .text_color(accent)
+                                    .child(SharedString::from(format!("/{}", cmd.name))),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .text_size(px(fonts.font_xsmall))
+                                    .text_color(theme::TEXT_MUTED)
+                                    .truncate()
+                                    .child({
+                                        let desc = cmd.description.lines().next().unwrap_or("").to_string();
+                                        SharedString::from(desc)
+                                    }),
+                            )
+                            .child(
+                                div()
+                                    .flex_shrink_0()
+                                    .text_size(px(fonts.font_micro))
+                                    .text_color(theme::TEXT_FAINT)
+                                    .child(if cmd.source == "skill" { "skill" } else { "cmd" }),
+                            ),
+                    );
+                }
             }
-            let selected = ix == self.slash_selected;
-            let preview = template.body.lines().next().unwrap_or("").to_string();
-            rows = rows.child(
-                div()
-                    .id(gpui::ElementId::NamedInteger("slash-row".into(), ix as u64))
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .px_2()
-                    .py_1()
-                    .rounded_md()
-                    .cursor_pointer()
-                    .when(selected, |d| d.bg(theme::HOVER))
-                    .hover(|s| s.bg(theme::HOVER))
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.slash_selected = ix;
-                        this.accept_slash(window, cx);
-                    }))
-                    .child(
-                        div()
-                            .flex_shrink_0()
-                            .text_size(px(fonts.font_small))
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .text_color(accent)
-                            .child(SharedString::from(format!("/{}", template.name))),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .text_size(px(fonts.font_xsmall))
-                            .text_color(theme::TEXT_MUTED)
-                            .truncate()
-                            .child(SharedString::from(preview)),
-                    ),
-            );
+            SuggestMode::Files => {
+                let results = self.store.read(cx).file_results_for(&self.key, &self.at_query).cloned();
+                match results {
+                    None => rows = rows.child(muted_row("searching files…".into())),
+                    Some(paths) if paths.is_empty() => rows = rows.child(muted_row("no matching file".into())),
+                    Some(paths) => {
+                        count = paths.len();
+                        for (ix, path) in paths.iter().enumerate() {
+                            if ix == SLASH_MENU_VISIBLE {
+                                rows = rows.child(muted_row(format!("+{} more — keep typing", count - SLASH_MENU_VISIBLE)));
+                                break;
+                            }
+                            let selected = ix == self.suggest_selected;
+                            let path = path.clone();
+                            rows = rows.child(
+                                div()
+                                    .id(gpui::ElementId::NamedInteger("suggest-row".into(), ix as u64))
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .px_2()
+                                    .py_1()
+                                    .rounded_md()
+                                    .cursor_pointer()
+                                    .when(selected, |d| d.bg(theme::HOVER))
+                                    .hover(|s| s.bg(theme::HOVER))
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        this.suggest_selected = ix;
+                                        this.accept_suggest(window, cx);
+                                    }))
+                                    .child(crate::ui::icon("icons/doc.svg", px(fonts.icon_small), theme::TEXT_MUTED))
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .text_size(px(fonts.font_xsmall))
+                                            .font_family(theme::code_font())
+                                            .text_color(theme::TEXT_DIM)
+                                            .truncate()
+                                            .child(SharedString::from(path)),
+                                    ),
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        // keyboard selection follows whichever list is live; wrap on the ends
+        // like the history cycle does
+        let visible = count.min(SLASH_MENU_VISIBLE);
+        if visible > 0 && self.suggest_selected >= visible {
+            self.suggest_selected = 0;
         }
         div()
             .absolute()
@@ -534,111 +600,7 @@ impl TileView {
             .right_2()
             .bottom(relative(1.))
             .pb_1()
-            .child(
-                div()
-                    .rounded_lg()
-                    .border_1()
-                    .border_color(theme::HAIRLINE)
-                    .bg(theme::SETTINGS_BG)
-                    .p_1()
-                    .shadow_lg()
-                    .child(rows),
-            )
-            .into_any_element()
-    }
-
-    /// The fill-in popover for a placeholder template, anchored like the
-    /// slash menu. One input per unique `{{placeholder}}`, an Insert button,
-    /// and a muted key hint.
-    fn render_fill_popover(&mut self, fonts: theme::FontTokens, accent: gpui::Rgba, cx: &mut Context<Self>) -> gpui::AnyElement {
-        let Some(fill) = self.fill.as_ref() else {
-            return div().into_any_element();
-        };
-        let mut column = div().flex().flex_col().gap_1p5().child(
-            div()
-                .flex()
-                .items_center()
-                .gap_2()
-                .child(
-                    div()
-                        .text_size(px(fonts.font_small))
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .text_color(accent)
-                        .child(SharedString::from(format!("/{}", fill.template.name))),
-                )
-                .child(
-                    div()
-                        .text_size(px(fonts.font_xsmall))
-                        .text_color(theme::TEXT_MUTED)
-                        .opacity(0.7)
-                        .child("fill the placeholders"),
-                ),
-        );
-        for (name, field) in &fill.fields {
-            column = column.child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .child(
-                        div()
-                            .w(px(96.))
-                            .flex_shrink_0()
-                            .text_size(px(fonts.font_xsmall))
-                            .font_family(theme::code_font())
-                            .text_color(theme::TEXT_MUTED)
-                            .truncate()
-                            .child(SharedString::from(format!("{{{{{}}}}}", name))),
-                    )
-                    .child(div().flex_1().min_w_0().child(Input::new(field))),
-            );
-        }
-        column = column.child(
-            div()
-                .flex()
-                .items_center()
-                .gap_2()
-                .child(
-                    div()
-                        .id("fill-insert")
-                        .px_3()
-                        .py_1()
-                        .rounded_md()
-                        .text_size(px(fonts.font_small))
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .bg(accent)
-                        .text_color(theme::ON_ACCENT)
-                        .cursor_pointer()
-                        .hover(|s| s.opacity(0.9))
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.confirm_fill(window, cx);
-                        }))
-                        .child("Insert"),
-                )
-                .child(
-                    div()
-                        .text_size(px(fonts.font_micro))
-                        .text_color(theme::TEXT_MUTED)
-                        .opacity(0.7)
-                        .child("enter advances · esc cancels"),
-                ),
-        );
-        div()
-            .absolute()
-            .left_2()
-            .right_2()
-            .bottom(relative(1.))
-            .pb_1()
-            .child(
-                div()
-                    .rounded_lg()
-                    .border_1()
-                    .border_color(theme::HAIRLINE)
-                    .bg(theme::SETTINGS_BG)
-                    .p_2()
-                    .shadow_lg()
-                    .child(column),
-            )
+            .child(popover_card().child(rows))
             .into_any_element()
     }
 
@@ -779,14 +741,13 @@ impl TileView {
                                                 cx.write_to_clipboard(gpui::ClipboardItem::new_string(copy_text.to_string()));
                                                 this.flash_copied(flash_key.clone(), cx);
                                             }))
-                                            .child(crate::ui::icon(copy_icon_path, px(fonts.icon_small), copy_icon_color)),
+                                            .child(crate::ui::icon(copy_icon_path, px(fonts.icon_medium), copy_icon_color)),
                                     )
                                     .child(div().flex_1())
                                     .child(
                                         div()
                                             .text_size(px(fonts.font_micro))
-                                            .text_color(theme::TEXT_MUTED)
-                                            .opacity(0.55)
+                                            .text_color(theme::TEXT_FAINT)
                                             .child(time),
                                     ),
                             ),
@@ -809,11 +770,12 @@ impl TileView {
                 };
                 let markdown = render_markdown(
                     text,
-                    fonts.icon_small,
+                    fonts.icon_medium,
                     item_id.to_string(),
                     self.copied_flash.as_deref(),
                     cx.entity().downgrade(),
                     accent,
+                    cx,
                 );
                 div()
                     .w_full()
@@ -859,15 +821,14 @@ impl TileView {
                                                 cx.write_to_clipboard(gpui::ClipboardItem::new_string(copy_text.to_string()));
                                                 this.flash_copied(flash_key.clone(), cx);
                                             }))
-                                            .child(crate::ui::icon(copy_icon_path, px(fonts.icon_small), copy_icon_color)),
+                                            .child(crate::ui::icon(copy_icon_path, px(fonts.icon_medium), copy_icon_color)),
                                     )
                                     .child(div().flex_1())
-                                    .child(div().text_size(px(fonts.font_micro)).text_color(theme::TEXT_MUTED).opacity(0.7).child(meta))
+                                    .child(div().text_size(px(fonts.font_micro)).text_color(theme::TEXT_FAINT).child(meta))
                                     .child(
                                         div()
                                             .text_size(px(fonts.font_micro))
-                                            .text_color(theme::TEXT_MUTED)
-                                            .opacity(0.55)
+                                            .text_color(theme::TEXT_FAINT)
                                             .child(time),
                                     ),
                             ),
@@ -884,20 +845,13 @@ impl TileView {
                     .child(self.fold_header(item_id, "thinking", None, open, fonts, cx))
                     .when(open, |d| {
                         d.child(
-                            div()
-                                .id(gpui::ElementId::NamedInteger(
-                                    "fold-thinking".into(),
-                                    TileView::hash(item_id),
-                                ))
-                                .rounded_lg()
-                                .bg(theme::DIFF_BG)
-                                .p_2()
-                                .max_h(px(260.))
-                                .overflow_y_scroll()
-                                .text_size(px(fonts.font_detail))
-                                .text_color(theme::TEXT)
-                                .opacity(0.75)
-                                .child(body),
+                            fold_body(gpui::ElementId::NamedInteger(
+                                "fold-thinking".into(),
+                                TileView::hash(item_id),
+                            ))
+                            .text_size(px(fonts.font_detail))
+                            .text_color(theme::TEXT_DIM)
+                            .child(body),
                         )
                     })
                     .into_any_element()
@@ -952,20 +906,18 @@ impl TileView {
                                     .flex()
                                     .items_center()
                                     .gap_2()
-                                    .child(
-                                        div()
-                                            .text_size(px(fonts.font_xsmall))
-                                            .text_color(theme::TEXT)
-                                            .opacity(0.7)
-                                            .child(SharedString::from(file_name.clone())),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_size(px(fonts.font_micro))
-                                            .text_color(theme::TEXT_MUTED)
-                                            .opacity(0.55)
-                                            .child(time),
-                                    ),
+                            .child(
+                                div()
+                                    .text_size(px(fonts.font_xsmall))
+                                    .text_color(theme::TEXT_DIM)
+                                    .child(SharedString::from(file_name.clone())),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(fonts.font_micro))
+                                    .text_color(theme::TEXT_FAINT)
+                                    .child(time),
+                            ),
                             ),
                     )
                     .into_any_element()
@@ -1080,16 +1032,14 @@ impl TileView {
                             .flex_1()
                             .min_w_0()
                             .text_size(px(fonts.font_body))
-                            .text_color(theme::TEXT)
-                            .opacity(0.8)
+                            .text_color(theme::TEXT_DIM)
                             .truncate()
                             .child(SharedString::from(tool.title.clone())),
                     )
                     .child(
                         div()
                             .text_size(px(fonts.font_xsmall))
-                            .text_color(theme::TEXT_MUTED)
-                            .opacity(0.5)
+                            .text_color(theme::TEXT_FAINT)
                             .child(SharedString::from(tool.status.clone())),
                     ),
             )
@@ -1114,13 +1064,7 @@ impl TileView {
                 ))
                 .when(open_diff, |d| {
                     d.child(
-                        div()
-                            .id(gpui::ElementId::NamedInteger("fold-diff".into(), Self::hash(item_id)))
-                            .rounded_lg()
-                            .bg(theme::DIFF_BG)
-                            .p_2()
-                            .max_h(px(260.))
-                            .overflow_y_scroll()
+                        fold_body(gpui::ElementId::NamedInteger("fold-diff".into(), Self::hash(item_id)))
                             .child(render_diff(&diff, fonts.font_detail, window)),
                     )
                 })
@@ -1130,17 +1074,10 @@ impl TileView {
                     open_details,
                     |d| {
                         d.child(
-                            div()
-                                .id(gpui::ElementId::NamedInteger("fold-details".into(), Self::hash(item_id)))
-                                .rounded_lg()
-                                .bg(theme::DIFF_BG)
-                                .p_2()
-                                .max_h(px(260.))
-                                .overflow_y_scroll()
+                            fold_body(gpui::ElementId::NamedInteger("fold-details".into(), Self::hash(item_id)))
                                 .text_size(px(fonts.font_detail))
                                 .font_family(theme::code_font())
-                                .text_color(theme::TEXT)
-                                .opacity(0.75)
+                                .text_color(theme::TEXT_DIM)
                                 .child(SharedString::from(details)),
                         )
                     },
@@ -1192,8 +1129,7 @@ impl TileView {
             .child(
                 div()
                     .text_size(px(fonts.font_xsmall))
-                    .text_color(theme::TEXT_MUTED)
-                    .opacity(0.75)
+                    .text_color(theme::TEXT_FAINT)
                     .child(label),
             )
             .when_some(numstat, |d, (adds, dels)| {
@@ -1245,7 +1181,7 @@ impl TileView {
                                     .items_center()
                                     .gap_2()
                                     .child(
-                                        crate::ui::icon("icons/shield.svg", px(fonts.icon_medium), theme::WARN),
+                                        crate::ui::icon("icons/shield.svg", px(fonts.icon_body), theme::WARN),
                                     )
                                     .child(
                                         div()
@@ -1259,8 +1195,7 @@ impl TileView {
                                 div()
                                     .text_size(px(fonts.font_detail))
                                     .font_family(theme::code_font())
-                                    .text_color(theme::TEXT)
-                                    .opacity(0.9)
+                                    .text_color(theme::TEXT_DIM)
                                     .child(SharedString::from(perm.detail.clone())),
                             )
                             .when(perm.is_pending(), |d| {
@@ -1275,34 +1210,57 @@ impl TileView {
                                         .flex()
                                         .items_center()
                                         .gap_2()
-                                        .child(self.pill_button("Allow", true, fonts, accent, {
-                                            let store = store.clone();
-                                            let id = id.clone();
-                                            move |cx| {
-                                                store.update(cx, |s, cx| s.respond_permission(&id, "once", false, cx));
-                                            }
-                                        }))
-                                        .child(self.pill_button("Always", false, fonts, accent, {
-                                            let store = store.clone();
-                                            let id = id.clone();
-                                            move |cx| {
-                                                store.update(cx, |s, cx| s.respond_permission(&id, "always", false, cx));
-                                            }
-                                        }))
-                                        .child(self.pill_button("Deny", false, fonts, accent, {
-                                            let store = store.clone();
-                                            let id = id.clone();
-                                            move |cx| {
-                                                store.update(cx, |s, cx| s.respond_permission(&id, "reject", false, cx));
-                                            }
-                                        }))
+                                        .child(controls::button(
+                                            gpui::ElementId::NamedInteger("pill".into(), Self::hash("Allow")),
+                                            "Allow",
+                                            BtnKind::Primary,
+                                            accent,
+                                            fonts.font_body,
+                                            true,
+                                            {
+                                                let store = store.clone();
+                                                let id = id.clone();
+                                                move |_, _, cx| {
+                                                    store.update(cx, |s, cx| s.respond_permission(&id, "once", false, cx));
+                                                }
+                                            },
+                                        ))
+                                        .child(controls::button(
+                                            gpui::ElementId::NamedInteger("pill".into(), Self::hash("Always")),
+                                            "Always",
+                                            BtnKind::Chip,
+                                            accent,
+                                            fonts.font_body,
+                                            true,
+                                            {
+                                                let store = store.clone();
+                                                let id = id.clone();
+                                                move |_, _, cx| {
+                                                    store.update(cx, |s, cx| s.respond_permission(&id, "always", false, cx));
+                                                }
+                                            },
+                                        ))
+                                        .child(controls::button(
+                                            gpui::ElementId::NamedInteger("pill".into(), Self::hash("Deny")),
+                                            "Deny",
+                                            BtnKind::Chip,
+                                            accent,
+                                            fonts.font_body,
+                                            true,
+                                            {
+                                                let store = store.clone();
+                                                let id = id.clone();
+                                                move |_, _, cx| {
+                                                    store.update(cx, |s, cx| s.respond_permission(&id, "reject", false, cx));
+                                                }
+                                            },
+                                        ))
                                         .when(!auto_text.is_empty(), |d| {
                                             d.child(
                                                 div()
                                                     .italic()
                                                     .text_size(px(fonts.font_xsmall))
-                                                    .text_color(theme::TEXT_MUTED)
-                                                    .opacity(0.7)
+                                                    .text_color(theme::TEXT_FAINT)
                                                     .child(auto_text),
                                             )
                                         }),
@@ -1313,8 +1271,7 @@ impl TileView {
                                     div()
                                         .italic()
                                         .text_size(px(fonts.font_detail))
-                                        .text_color(theme::TEXT)
-                                        .opacity(0.85)
+                                        .text_color(theme::TEXT_DIM)
                                         .child(SharedString::from(perm.answer.clone().unwrap_or_default())),
                                 )
                             })
@@ -1322,48 +1279,13 @@ impl TileView {
                                 d.child(self.fold_header(&format!("{item_id}:diff"), "View diff", None, open_diff, fonts, cx))
                                     .when(open_diff, |d| {
                                         d.child(
-                                            div()
-                                                .id(gpui::ElementId::NamedInteger("perm-diff".into(), Self::hash(item_id)))
-                                                .rounded_lg()
-                                                .bg(theme::DIFF_BG)
-                                                .p_2()
-                                                .max_h(px(260.))
-                                                .overflow_y_scroll()
+                                            fold_body(gpui::ElementId::NamedInteger("perm-diff".into(), Self::hash(item_id)))
                                                 .child(render_diff(&diff, fonts.font_detail, window)),
                                         )
                                     })
                             }),
                     ),
             )
-            .into_any_element()
-    }
-
-    fn pill_button(
-        &self,
-        label: &str,
-        filled: bool,
-        fonts: theme::FontTokens,
-        accent: gpui::Rgba,
-        on_click: impl Fn(&mut App) + 'static,
-    ) -> gpui::AnyElement {
-        let (bg, fg) = if filled {
-            (accent.into(), gpui::Hsla::from(theme::ON_ACCENT))
-        } else {
-            (gpui::Hsla::from(theme::CHIP), gpui::Hsla::from(theme::TEXT))
-        };
-        div()
-            .id(gpui::ElementId::NamedInteger("pill".into(), Self::hash(label)))
-            .px_3()
-            .py_1()
-            .rounded_md()
-            .text_size(px(fonts.font_body))
-            .font_weight(gpui::FontWeight::SEMIBOLD)
-            .bg(bg)
-            .text_color(fg)
-            .cursor_pointer()
-            .hover(|s| s.opacity(0.9))
-            .on_click(move |_, _, cx| on_click(cx))
-            .child(label.to_string())
             .into_any_element()
     }
 
@@ -1395,8 +1317,7 @@ impl TileView {
                     .child(
                         div()
                             .text_size(px(fonts.font_xsmall))
-                            .text_color(theme::TEXT_MUTED)
-                            .opacity(0.5)
+                            .text_color(theme::TEXT_FAINT)
                             .child("pick an answer for each question"),
                     ),
             );
@@ -1415,19 +1336,14 @@ impl TileView {
                     .gap_2()
                     .pt_1()
                     .child(
-                        div()
-                            .id(gpui::ElementId::NamedInteger("answer".into(), Self::hash(&id)))
-                            .px_3()
-                            .py_1()
-                            .rounded_md()
-                            .text_size(px(fonts.font_body))
-                            .bg(accent)
-                            .text_color(theme::ON_ACCENT)
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .cursor_pointer()
-                            .when(!can_submit, |d| d.opacity(0.5))
-                            .when(can_submit, |d| d.hover(|s| s.opacity(0.9)))
-                            .on_click({
+                        controls::button(
+                            gpui::ElementId::NamedInteger("answer".into(), Self::hash(&id)),
+                            "Answer",
+                            BtnKind::Primary,
+                            accent,
+                            fonts.font_body,
+                            can_submit,
+                            {
                                 let store = store.clone();
                                 let id = id.clone();
                                 move |_, _, cx| {
@@ -1435,8 +1351,8 @@ impl TileView {
                                         store.update(cx, |s, cx| s.submit_question(&id, cx));
                                     }
                                 }
-                            })
-                            .child("Answer"),
+                            },
+                        ),
                     )
                     .child(
                         div()
@@ -1464,8 +1380,7 @@ impl TileView {
                 div()
                     .italic()
                     .text_size(px(fonts.font_small))
-                    .text_color(theme::TEXT_MUTED)
-                    .opacity(0.75)
+                    .text_color(theme::TEXT_FAINT)
                     .child(SharedString::from(resolution.clone())),
             );
         }
@@ -1501,6 +1416,7 @@ impl TileView {
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let input_key = format!("{}#{qi}", question.id);
+        self.question_keys_seen.insert(input_key.clone());
         // custom-answer field, created lazily and wired to the store
         if let std::collections::hash_map::Entry::Vacant(slot) = self.question_inputs.entry(input_key.clone()) {
             let store = self.store.clone();
@@ -1529,8 +1445,7 @@ impl TileView {
                     div()
                         .text_size(px(fonts.font_xsmall))
                         .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .text_color(theme::TEXT_MUTED)
-                        .opacity(0.55)
+                        .text_color(theme::TEXT_FAINT)
                         .child(SharedString::from(entry.header.clone())),
                 )
             })
@@ -1626,8 +1541,7 @@ impl TileView {
                                 d.child(
                                     div()
                                         .text_size(px(fonts.font_detail))
-                                        .text_color(theme::TEXT_MUTED)
-                                        .opacity(0.6)
+                                        .text_color(theme::TEXT_FAINT)
                                         .child(SharedString::from(description)),
                                 )
                             }),
@@ -1650,176 +1564,180 @@ impl TileView {
 }
 
 
-impl Render for TileView {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl gpui::IntoElement {
-        // snapshot everything the render needs from the store, releasing the borrow
-        struct Snap {
-            fonts: theme::FontTokens,
-            accent: gpui::Rgba,
-            input: String,
-            is_busy: bool,
-            is_connected: bool,
-            is_reconnecting: bool,
-            is_focused: bool,
-            title: String,
-            ctx: String,
-            ctx_frac: f32,
-            has_ctx: bool,
-            items: Vec<(String, Arc<ChatItem>)>,
-            queue_keys: Vec<usize>,
-            queue: Vec<crate::store::QueueEntry>,
-            attachments: Vec<crate::store::AttachmentItem>,
-            has_queue: bool,
-            has_messages: bool,
-            has_variants: bool,
-            selected_variant: String,
-            selected_model_short: String,
-            selected_agent: String,
-            has_agents: bool,
-            has_tasks_or_agents: bool,
-            has_tasks: bool,
-            tasks_progress: String,
-            tasks: Vec<crate::store::TaskItem>,
-            has_tile_agents: bool,
-            agents_summary: String,
-            tile_agents: Vec<crate::store::RunningAgentItem>,
-            multiple_workspaces: bool,
-            has_attention: bool,
-            allow_on: bool,
-            auto_allow: bool,
-            has_variants_enabled: bool,
-            spring: bool,
-            has_sent_prompts: bool,
-        }
-        let mut snap = {
-            let store = self.store.read(cx);
-            let Some(tile) = store.tile_by_key(&self.key) else {
-                return div().into_any_element();
-            };
-            Snap {
-                fonts: store.fonts,
-                accent: store.accent.accent,
-                input: tile.input.clone(),
-                is_busy: tile.is_busy(store),
-                is_connected: tile
-                    .session_id
-                    .as_ref()
-                    .map(|id| store.has_runtime(id))
-                    .unwrap_or(store.is_server_running),
-                is_reconnecting: store.stream_reconnecting(tile.session_id.as_deref()),
-                is_focused: tile.is_focused,
-                title: tile.title.clone(),
-            ctx: tile.context_text.clone().unwrap_or_default(),
-            ctx_frac: tile.context_frac,
-            has_ctx: tile.has_context(),
-            // Arc'd items: this snapshot is pointer copies, the payloads stay put
-            items: tile.items.iter().map(|i| (i.id(), Arc::clone(i))).collect(),
-                queue_keys: tile.queue_rows.clone(),
-                queue: store.queue.clone(),
-                attachments: tile.attachments.clone(),
-                has_queue: tile.has_queue_rows(),
-                has_messages: tile.has_messages(),
-                has_variants: tile.has_variants(),
-                selected_variant: tile.selected_variant.clone().unwrap_or_default(),
-                selected_model_short: tile.selected_model_short(),
-                selected_agent: tile.selected_agent.clone().unwrap_or_default(),
-                has_agents: store.has_agents(),
-                has_tasks_or_agents: tile.has_tasks_or_agents(),
-                has_tasks: tile.has_tasks(),
-                tasks_progress: tile.tasks_progress(),
-                tasks: tile.tasks.clone(),
-                has_tile_agents: tile.has_tile_agents(),
-                agents_summary: tile.tile_agents_summary(),
-                tile_agents: tile.tile_agents.clone(),
-                multiple_workspaces: store.multiple_workspaces(),
-                has_attention: store.has_attention_needed(),
-                allow_on: store.auto_allow,
-                auto_allow: store.auto_allow,
-                has_variants_enabled: tile.has_variants(),
-                spring: store.todos_spring.as_deref() == Some(self.key.as_str()),
-                has_sent_prompts: tile.sent_prompt_count() > 0,
-            }
-        };
+/// Everything one render pass needs from the store, snapshotted up front so
+/// the store borrow is released before the element tree is built.
+struct TileSnap {
+    fonts: theme::FontTokens,
+    accent: gpui::Rgba,
+    input: String,
+    is_busy: bool,
+    is_connected: bool,
+    is_reconnecting: bool,
+    is_focused: bool,
+    title: String,
+    ctx: String,
+    ctx_frac: f32,
+    has_ctx: bool,
+    items: Vec<(String, Arc<ChatItem>)>,
+    queue_keys: Vec<usize>,
+    queue: Vec<crate::store::QueueEntry>,
+    attachments: Vec<crate::store::AttachmentItem>,
+    has_queue: bool,
+    has_messages: bool,
+    has_variants: bool,
+    selected_variant: String,
+    selected_model_short: String,
+    selected_agent: String,
+    has_agents: bool,
+    has_tasks_or_agents: bool,
+    has_tasks: bool,
+    tasks_progress: String,
+    tasks: Vec<crate::store::TaskItem>,
+    has_tile_agents: bool,
+    agents_summary: String,
+    tile_agents: Vec<crate::store::RunningAgentItem>,
+    multiple_workspaces: bool,
+    has_attention: bool,
+    allow_on: bool,
+    spring: bool,
+}
+
+impl TileView {
+    /// Header row: close, busy pulse, title, then the right cluster —
+    /// reconnecting pill, context ring readout, tasks/agents toggle.
+    fn render_header(&mut self, snap: &TileSnap, cx: &mut Context<Self>) -> gpui::AnyElement {
         let fonts = snap.fonts;
-        let accent = snap.accent;
-        let px_size = |v: f32| px(v);
+        let close_store = self.store.clone();
+        let close_key = self.key.clone();
 
-        // external input changes (history, edit-queued) sync into the field
-        let composer_text_changed = snap.input != self.last_composer_text;
-        if snap.input != self.last_composer_text && self.composer.read(cx).value().as_ref() != snap.input {
-            let text = snap.input.clone();
-            self.composer.update(cx, |field, cx| field.set_value(text, window, cx));
+        let mut header_right = div().flex().items_center().gap_1p5();
+        // stream-status pill: amber while this tile's workspace pump retries
+        // its event stream, with a slow pulse like the busy dot
+        if snap.is_reconnecting {
+            let pulse = div()
+                .size(px(5.))
+                .rounded_full()
+                .bg(theme::WARN)
+                .with_animation("reconnect-pulse", gpui::Animation::new(std::time::Duration::from_millis(1200)).repeat(), |el, delta| {
+                    let opacity = 0.25f32 + 0.75f32 * (1.0f32 - (delta - 0.5).abs() * 2.0).max(0.0);
+                    el.opacity(opacity)
+                });
+            header_right = header_right.child(
+                tip(
+                    div()
+                        .id("reconnect-pill")
+                        .flex()
+                        .items_center()
+                        .gap_1p5()
+                        .px_2()
+                        .py_1()
+                        .rounded_lg()
+                        .bg(theme::WARN_BG),
+                    "Connection lost — retrying…",
+                )
+                .child(pulse)
+                .child(
+                    div()
+                        .text_size(px(fonts.font_small))
+                        .text_color(theme::WARN)
+                        .child("reconnecting"),
+                ),
+            );
         }
-        self.last_composer_text = snap.input.clone();
+        // context usage ring + numeric readout (no "Ctx" label)
+        if snap.has_ctx {
+            header_right = header_right.child(
+                tip(
+                    div().id("ctx-readout").flex().items_center().gap_1(),
+                    format!("Context used: {}", snap.ctx),
+                )
+                .child(context_ring(snap.ctx_frac))
+                .child(
+                    div()
+                        .max_w(px(160.))
+                        .text_size(px(fonts.font_micro))
+                        .text_color(theme::TEXT_FAINT)
+                        .truncate()
+                        .child(SharedString::from(snap.ctx.clone())),
+                ),
+            );
+        }
+        if snap.has_tasks_or_agents {
+            header_right = header_right.child(
+                tip(
+                    div()
+                        .id("tasks-btn")
+                        .relative()
+                        .flex()
+                        .items_center()
+                        .gap_1p5()
+                        .p_1()
+                        .rounded_md()
+                        .cursor_pointer()
+                        .hover(|s| s.bg(theme::HOVER))
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.flyout_open = !this.flyout_open;
+                            cx.notify();
+                        })),
+                    "Tasks & agents",
+                )
+                .when(snap.has_attention, |d| {
+                    d.child(crate::ui::icon("icons/warn.svg", px(fonts.icon_medium), theme::WARN))
+                })
+                .child(crate::ui::icon("icons/expand.svg", px(fonts.icon_medium), theme::TEXT)),
+            );
+        }
 
-        // slash-menu state rides the composer text: open while it starts with
-        // '/', closed as soon as it doesn't (deleting back past the '/'), and
-        // parked while a fill-in popover owns the field
-        if self.fill.is_some() || !snap.input.starts_with('/') {
-            self.slash_open = false;
-        } else if composer_text_changed && !self.slash_open {
-            self.slash_open = true;
-            self.slash_selected = 0;
-        }
-
-        // a live todo batch springs the flyout open
-        if snap.spring {
-            if !self.last_spring_seen {
-                self.flyout_open = true;
-                self.last_spring_seen = true;
-            }
-        } else {
-            self.last_spring_seen = false;
-        }
-
-        // transcript auto-scroll: keep pinned while content grows
-        let max_now = self.scroll.max_offset().y;
-        if self.pinned && max_now > self.last_max + px(0.5) && max_now > px(0.) {
-            self.scroll_target = None;
-            self.scroll.scroll_to_bottom();
-        }
-        if max_now != self.last_max {
-            self.last_max = max_now;
-        }
-
-        // moved out rather than cloned — snap's other fields stay usable
-        let items = std::mem::take(&mut snap.items);
-        let mut transcript = div()
-            .id("transcript")
-            .flex_1()
-            .min_h_0()
-            .overflow_hidden()
-            .track_scroll(&self.scroll.clone())
-            .on_scroll_wheel(cx.listener(|this, event: &gpui::ScrollWheelEvent, window, cx| {
-                // the wheel no longer scrolls natively (overflow_hidden keeps
-                // the handle-driven offset) — deltas accumulate into a target
-                // and a 60 fps animation glides the handle there
-                let delta = event.delta.pixel_delta(window.line_height()).y;
-                if delta == px(0.) {
-                    return;
-                }
-                let max = this.scroll.max_offset();
-                let base = this.scroll_target.unwrap_or_else(|| -this.scroll.offset().y);
-                // wheel deltas are positive-up; the target counts down
-                let target = (base - delta).clamp(px(0.), max.y);
-                this.pinned = target >= max.y - px(1.);
-                this.animate_scroll_to(target, cx);
-            }))
-            .p_1()
+        div()
             .flex()
-            .flex_col()
-            .gap_1();
-        for (item_id, item) in &items {
-            transcript = transcript.child(self.render_item(item_id, item, fonts, accent, window, cx));
-        }
-        // cache entries only live as long as the transcript/composer entries they serve
-        let mut live: HashSet<String> = items.iter().map(|(id, _)| id.clone()).collect();
-        live.extend(snap.attachments.iter().map(|a| format!("att{}", a.key)));
-        self.prune_caches(&live);
+            .items_center()
+            .gap_1()
+            .px_2p5()
+            .pt_2()
+            .child(
+                tip(
+                    div()
+                        .id("close-tile")
+                        .cursor_pointer()
+                        .p_1()
+                        .rounded_md()
+                        .hover(|s| s.bg(theme::HOVER))
+                        .on_click(move |_, _, cx| {
+                            close_store.update(cx, |s, cx| s.close_tile(&close_key, cx));
+                        }),
+                    "Close",
+                )
+                .child(crate::ui::icon("icons/close.svg", px(fonts.icon_xsmall), theme::TEXT_MUTED)),
+            )
+            .when(snap.is_busy, |d| {
+                let pulse = div()
+                    .size(px(5.))
+                    .rounded_full()
+                    .bg(theme::WORKING)
+                    .with_animation("pulse", gpui::Animation::new(std::time::Duration::from_secs(2)).repeat(), |el, delta| {
+                        let opacity = 0.2f32 + 0.8f32 * (1.0f32 - (delta - 0.5).abs() * 2.0).max(0.0);
+                        el.opacity(opacity)
+                    });
+                d.child(div().ml_1().child(pulse))
+            })
+            .child(
+                div()
+                    .ml_2()
+                    .flex_1()
+                    .min_w_0()
+                    .text_size(px(fonts.font_body))
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .text_color(theme::TEXT)
+                    .truncate()
+                    .child(SharedString::from(snap.title.clone())),
+            )
+            .child(header_right)
+            .into_any_element()
+    }
 
-        let jump_visible = !self.pinned && snap.has_messages;
-
-        // ---- queue rows ----
+    /// Queued messages: Warp-style full-width rows with Steer / Edit / Remove.
+    fn render_queue_strip(&mut self, snap: &TileSnap) -> gpui::AnyElement {
+        let fonts = snap.fonts;
         let mut queue_rows_el = div().flex().flex_col().gap_1();
         for qkey in &snap.queue_keys {
             if let Some(entry) = snap.queue.iter().find(|e| e.key == *qkey) {
@@ -1849,78 +1767,90 @@ impl Render for TileView {
                                 .gap_0p5()
                                 .child(
                                     div()
-                                        .text_size(px_size(fonts.font_body_large))
+                                        .text_size(px(fonts.font_body_large))
                                         .text_color(theme::TEXT)
                                         .child(SharedString::from(text)),
                                 )
                                 .when(count > 0, |d| {
                                     d.child(
                                         div()
-                                            .text_size(px_size(fonts.font_xsmall))
-                                            .text_color(theme::TEXT_MUTED)
-                                            .opacity(0.6)
+                                            .text_size(px(fonts.font_xsmall))
+                                            .text_color(theme::TEXT_FAINT)
                                             .child(format!("{count} attachment(s)")),
                                     )
                                 }),
                         )
                         .child(
-                            div()
-                                .id(gpui::ElementId::NamedInteger("steer".into(), steer_key as u64))
-                                .px_2()
-                                .py_1()
-                                .rounded_md()
-                                .bg(theme::CHIP)
-                                .hover(|s| s.bg(theme::QUEUED_BORDER))
-                                .cursor_pointer()
-                                .text_size(px_size(fonts.font_xsmall))
-                                .text_color(theme::TEXT)
-                                .flex()
-                                .items_center()
-                                .gap_1()
-                                .child(crate::ui::icon("icons/arrow-up.svg", px_size(fonts.icon_tiny), theme::TEXT))
-                                .child("Steer")
-                                .on_click({
-                                    let store = store_handle.clone();
-                                    move |_, _, cx| {
-                                        store.update(cx, |s, cx| s.steer_queued(steer_key, cx));
-                                    }
-                                }),
+                            tip(
+                                div()
+                                    .id(gpui::ElementId::NamedInteger("steer".into(), steer_key as u64))
+                                    .px_2()
+                                    .py_1()
+                                    .rounded_md()
+                                    .bg(theme::CHIP)
+                                    .hover(|s| s.bg(theme::QUEUED_BORDER))
+                                    .cursor_pointer()
+                                    .text_size(px(fonts.font_xsmall))
+                                    .text_color(theme::TEXT)
+                                    .flex()
+                                    .items_center()
+                                    .gap_1(),
+                                "Abort the running turn and send this next",
+                            )
+                            .child(crate::ui::icon("icons/arrow-up.svg", px(fonts.icon_tiny), theme::TEXT))
+                            .child("Steer")
+                            .on_click({
+                                let store = store_handle.clone();
+                                move |_, _, cx| {
+                                    store.update(cx, |s, cx| s.steer_queued(steer_key, cx));
+                                }
+                            }),
                         )
                         .child(
-                            div()
-                                .id(gpui::ElementId::NamedInteger("qedit".into(), edit_key as u64))
-                                .cursor_pointer()
-                                .p_1()
-                                .rounded_sm()
-                                .hover(|s| s.bg(theme::HOVER))
-                                .on_click({
-                                    let store = store_handle.clone();
-                                    move |_, _, cx| {
-                                        store.update(cx, |s, cx| s.edit_queued(edit_key, cx));
-                                    }
-                                })
-                                .child(crate::ui::icon("icons/edit.svg", px_size(fonts.icon_small), theme::TEXT_MUTED)),
+                            tip(
+                                div()
+                                    .id(gpui::ElementId::NamedInteger("qedit".into(), edit_key as u64))
+                                    .cursor_pointer()
+                                    .p_1()
+                                    .rounded_sm()
+                                    .hover(|s| s.bg(theme::HOVER)),
+                                "Edit in the composer",
+                            )
+                            .on_click({
+                                let store = store_handle.clone();
+                                move |_, _, cx| {
+                                    store.update(cx, |s, cx| s.edit_queued(edit_key, cx));
+                                }
+                            })
+                            .child(crate::ui::icon("icons/edit.svg", px(fonts.icon_xsmall), theme::TEXT_MUTED)),
                         )
                         .child(
-                            div()
-                                .id(gpui::ElementId::NamedInteger("qrm".into(), remove_key as u64))
-                                .cursor_pointer()
-                                .p_1()
-                                .rounded_sm()
-                                .hover(|s| s.bg(theme::HOVER))
-                                .on_click({
-                                    let store = store_handle.clone();
-                                    move |_, _, cx| {
-                                        store.update(cx, |s, cx| s.remove_queued(remove_key, cx));
-                                    }
-                                })
-                                .child(crate::ui::icon("icons/close.svg", px_size(fonts.icon_xsmall), theme::TEXT_MUTED)),
+                            tip(
+                                div()
+                                    .id(gpui::ElementId::NamedInteger("qrm".into(), remove_key as u64))
+                                    .cursor_pointer()
+                                    .p_1()
+                                    .rounded_sm()
+                                    .hover(|s| s.bg(theme::HOVER)),
+                                "Remove from the queue",
+                            )
+                            .on_click({
+                                let store = store_handle.clone();
+                                move |_, _, cx| {
+                                    store.update(cx, |s, cx| s.remove_queued(remove_key, cx));
+                                }
+                            })
+                            .child(crate::ui::icon("icons/close.svg", px(fonts.icon_xsmall), theme::TEXT_MUTED)),
                         ),
                 );
             }
         }
+        queue_rows_el.into_any_element()
+    }
 
-        // ---- attachments strip ----
+    /// Composer attachment chips: thumbnail or doc glyph, with a remove X.
+    fn render_attachments(&mut self, snap: &TileSnap) -> gpui::AnyElement {
+        let fonts = snap.fonts;
         let mut attachments_el = div();
         if !snap.attachments.is_empty() {
             let mut strip = div().flex().gap_1p5();
@@ -1956,173 +1886,119 @@ impl Render for TileView {
                                 store_handle.update(cx, move |s, cx| s.remove_attachment(&key, akey, cx));
                             }
                         })
-                        .child(crate::ui::icon("icons/close.svg", px_size(fonts.icon_xsmall), theme::TEXT_MUTED)),
+                        .child(crate::ui::icon("icons/close.svg", px(fonts.icon_xsmall), theme::TEXT_MUTED)),
                 );
                 strip = strip.child(chip);
             }
             attachments_el = strip;
         }
+        attachments_el.into_any_element()
+    }
 
-        // ---- bottom row ----
-        let allow_on = snap.allow_on;
-        let composer_focus_is = self.composer.read(cx).focus_handle(cx).is_focused(window);
+    /// The chrome-less selector pills: agent, model and variant.
+    fn render_pills(&mut self, snap: &TileSnap, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let fonts = snap.fonts;
+        let accent = snap.accent;
         let mut pills = div().flex().items_center().gap_1();
         if snap.has_agents {
             pills = pills.child(
-                div()
-                    .id("pill-agent")
-                    .flex()
-                    .items_center()
-                    .gap_1()
-                    .px_2()
-                    .py_1()
-                    .rounded_lg()
-                    .cursor_pointer()
-                    .text_color(theme::TEXT_MUTED)
-                    .hover(|s| s.bg(theme::HOVER).text_color(accent))
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.picker = if matches!(this.picker, Some(PickerKind::Agent)) { None } else { Some(PickerKind::Agent) };
-                        cx.notify();
-                    }))
-                    .child(div().text_size(px_size(fonts.font_small)).child(SharedString::from(
-                        if snap.selected_agent.is_empty() {
-                            crate::store::DEFAULT_AGENT_ENTRY.to_string()
-                        } else {
-                            snap.selected_agent.clone()
-                        },
-                    )))
-                    .child(crate::ui::icon("icons/chevron-down.svg", px_size(fonts.icon_tiny), theme::TEXT_MUTED)),
+                tip(
+                    div()
+                        .id("pill-agent")
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .px_2()
+                        .py_1()
+                        .rounded_lg()
+                        .cursor_pointer()
+                        .text_color(theme::TEXT_MUTED)
+                        .hover(|s| s.bg(theme::HOVER).text_color(accent)),
+                    "Agent",
+                )
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.picker = if matches!(this.picker, Some(PickerKind::Agent)) { None } else { Some(PickerKind::Agent) };
+                    cx.notify();
+                }))
+                .child(div().text_size(px(fonts.font_small)).child(SharedString::from(
+                    if snap.selected_agent.is_empty() {
+                        crate::store::DEFAULT_AGENT_ENTRY.to_string()
+                    } else {
+                        snap.selected_agent.clone()
+                    },
+                )))
+                .child(crate::ui::icon("icons/chevron-down.svg", px(fonts.icon_tiny), theme::TEXT_MUTED)),
             );
         }
         pills = pills
             .child(
-                div()
-                    .id("pill-model")
-                    .flex()
-                    .items_center()
-                    .gap_1()
-                    .px_2()
-                    .py_1()
-                    .rounded_lg()
-                    .cursor_pointer()
-                    .text_color(theme::TEXT_MUTED)
-                    .hover(|s| s.bg(theme::HOVER).text_color(accent))
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.picker = if matches!(this.picker, Some(PickerKind::Model)) { None } else { Some(PickerKind::Model) };
+                tip(
+                    div()
+                        .id("pill-model")
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .px_2()
+                        .py_1()
+                        .rounded_lg()
+                        .cursor_pointer()
+                        .text_color(theme::TEXT_MUTED)
+                        .hover(|s| s.bg(theme::HOVER).text_color(accent)),
+                    "Model",
+                )
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.picker = if matches!(this.picker, Some(PickerKind::Model)) { None } else { Some(PickerKind::Model) };
+                    cx.notify();
+                }))
+                .child(div().text_size(px(fonts.font_small)).child(SharedString::from(
+                    if snap.selected_model_short.is_empty() {
+                        crate::store::DEFAULT_MODEL_ENTRY.to_string()
+                    } else {
+                        snap.selected_model_short.clone()
+                    },
+                )))
+                .child(crate::ui::icon("icons/chevron-down.svg", px(fonts.icon_tiny), theme::TEXT_MUTED)),
+            )
+            .child(
+                tip(
+                    div()
+                        .id("pill-variant")
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .px_2()
+                        .py_1()
+                        .rounded_lg()
+                        .cursor_pointer()
+                        .when(snap.has_variants, |d| {
+                            d.text_color(theme::TEXT_MUTED).hover(|s| s.bg(theme::HOVER).text_color(accent))
+                        })
+                        .when(!snap.has_variants, |d| d.opacity(0.4)),
+                    "Response variant",
+                )
+                .on_click(cx.listener(|this, _, _, cx| {
+                    if this.store.read(cx).tile_by_key(&this.key).map(|t| t.has_variants()).unwrap_or(false) {
+                        this.picker = if matches!(this.picker, Some(PickerKind::Variant)) { None } else { Some(PickerKind::Variant) };
                         cx.notify();
-                    }))
-                    .child(div().text_size(px_size(fonts.font_small)).child(SharedString::from(
-                        if snap.selected_model_short.is_empty() {
-                            crate::store::DEFAULT_MODEL_ENTRY.to_string()
-                        } else {
-                            snap.selected_model_short.clone()
-                        },
-                    )))
-                    .child(crate::ui::icon("icons/chevron-down.svg", px_size(fonts.icon_tiny), theme::TEXT_MUTED)),
-            )
-            .child(
-                div()
-                    .id("pill-variant")
-                    .flex()
-                    .items_center()
-                    .gap_1()
-                    .px_2()
-                    .py_1()
-                    .rounded_lg()
-                    .cursor_pointer()
-                    .when(snap.has_variants, |d| {
-                        d.text_color(theme::TEXT_MUTED).hover(|s| s.bg(theme::HOVER).text_color(accent))
-                    })
-                    .when(!snap.has_variants, |d| d.opacity(0.4))
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        if this.store.read(cx).tile_by_key(&this.key).map(|t| t.has_variants()).unwrap_or(false) {
-                            this.picker = if matches!(this.picker, Some(PickerKind::Variant)) { None } else { Some(PickerKind::Variant) };
-                            cx.notify();
-                        }
-                    }))
-                    .child(crate::ui::icon("icons/gauge.svg", px_size(fonts.icon_body), theme::TEXT_MUTED))
-                    .child(div().text_size(px_size(fonts.font_small)).child(SharedString::from(snap.selected_variant.clone())))
-                    .child(crate::ui::icon("icons/chevron-down.svg", px_size(fonts.icon_tiny), theme::TEXT_MUTED)),
+                    }
+                }))
+                .child(crate::ui::icon("icons/gauge.svg", px(fonts.icon_body), theme::TEXT_MUTED))
+                .child(div().text_size(px(fonts.font_small)).child(SharedString::from(snap.selected_variant.clone())))
+                .child(crate::ui::icon("icons/chevron-down.svg", px(fonts.icon_tiny), theme::TEXT_MUTED)),
             );
 
-        // "↻ last prompt": with the composer empty and sent messages on record,
-        // offer the newest one back into the field for review — muted until
-        // hovered, never auto-sends
-        if snap.has_sent_prompts && snap.input.trim().is_empty() {
-            pills = pills.child(
-                div()
-                    .id("pill-last-prompt")
-                    .flex()
-                    .items_center()
-                    .gap_1()
-                    .px_2()
-                    .py_1()
-                    .rounded_lg()
-                    .cursor_pointer()
-                    .text_color(theme::TEXT_MUTED)
-                    .hover(|s| s.bg(theme::HOVER).text_color(accent))
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        let key = this.key.clone();
-                        this.store.update(cx, |s, cx| s.recall_last_prompt(&key, cx));
-                    }))
-                    .child(div().text_size(px_size(fonts.font_small)).child("↻ last prompt")),
-            );
-        }
+        pills.into_any_element()
+    }
 
-        let send_store = self.store.clone();
-        let send_key = self.key.clone();
-        let abort_store = self.store.clone();
-        let abort_key = self.key.clone();
-
-        let bottom_row = div()
-            .flex()
-            .items_center()
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_1()
-                    .child(
-                        div()
-                            .id("attach")
-                            .cursor_pointer()
-                            .p_1()
-                            .rounded_md()
-                            .text_color(theme::TEXT_MUTED)
-                            .hover(|s| s.text_color(accent))
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.pick_files(window, cx);
-                            }))
-                            .child(crate::ui::icon("icons/plus.svg", px_size(fonts.icon_medium), theme::TEXT_MUTED)),
-                    )
-                    .child(
-                        div()
-                            .id("allow-toggle")
-                            .cursor_pointer()
-                            .p_1()
-                            .rounded_md()
-                            .hover(|s| s.bg(theme::HOVER))
-                            .on_click({
-                                let store = self.store.clone();
-                                move |_, _, cx| {
-                                    store.update(cx, |s, cx| {
-                                        s.auto_allow = !s.auto_allow;
-                                        s.ui.auto_allow_always = Some(s.auto_allow);
-                                        s.save_state();
-                                        cx.notify();
-                                    });
-                                }
-                            })
-                            .child(if allow_on {
-                                crate::ui::icon("icons/shield-filled.svg", px_size(fonts.icon_medium), theme::WARN)
-                            } else {
-                                crate::ui::icon("icons/shield.svg", px_size(fonts.icon_medium), theme::TEXT_MUTED)
-                            }),
-                    ),
-            )
-            .child(div().flex_1())
-            .child(pills)
-            .child(if snap.is_busy {
+    /// The 34px send/stop square: stop while busy, otherwise send (muted out
+    /// while the workspace is disconnected).
+    fn render_send_button(&self, snap: &TileSnap) -> gpui::AnyElement {
+        let fonts = snap.fonts;
+        let accent = snap.accent;
+        if snap.is_busy {
+            let store = self.store.clone();
+            let key = self.key.clone();
+            tip(
                 div()
                     .id("stop")
                     .size(px(34.))
@@ -2134,11 +2010,16 @@ impl Render for TileView {
                     .text_color(theme::TEXT_MUTED)
                     .hover(|s| s.bg(theme::HOVER).text_color(theme::DANGER))
                     .on_click(move |_, _, cx| {
-                        abort_store.update(cx, |s, cx| s.abort_tile(&abort_key, cx));
-                    })
-                    .child(crate::ui::icon("icons/stop.svg", px_size(fonts.icon_medium), theme::TEXT_MUTED))
-                    .into_any_element()
-            } else {
+                        store.update(cx, |s, cx| s.abort_tile(&key, cx));
+                    }),
+                "Stop",
+            )
+            .child(crate::ui::icon("icons/stop.svg", px(fonts.icon_medium), theme::TEXT_MUTED))
+            .into_any_element()
+        } else {
+            let store = self.store.clone();
+            let key = self.key.clone();
+            tip(
                 div()
                     .id("send")
                     .size(px(34.))
@@ -2153,117 +2034,19 @@ impl Render for TileView {
                     })
                     .when(!snap.is_connected, |d| d.opacity(0.4))
                     .on_click(move |_, _, cx| {
-                        send_store.update(cx, |s, cx| s.send_from_tile(&send_key, cx));
-                    })
-                    .child(crate::ui::icon("icons/arrow-up.svg", px_size(fonts.icon_xl), theme::TEXT_MUTED))
-                    .into_any_element()
-            });
-
-        // ---- header ----
-        let close_store = self.store.clone();
-        let close_key = self.key.clone();
-
-        let mut header_right = div().flex().items_center().gap_1p5();
-        // stream-status pill, same chrome-less family as the model/agent pills:
-        // amber while this tile's workspace pump retries its event stream
-        if snap.is_reconnecting {
-            header_right = header_right.child(
-                div()
-                    .flex()
-                    .items_center()
-                    .px_2()
-                    .py_1()
-                    .rounded_lg()
-                    .text_size(px_size(fonts.font_small))
-                    .text_color(theme::WARN)
-                    .child("reconnecting"),
-            );
-        }
-        // context usage ring + numeric readout (no "Ctx" label)
-        if snap.has_ctx {
-            header_right = header_right.child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_1()
-                    .child(context_ring(snap.ctx_frac))
-                    .child(
-                        div()
-                            .max_w(px(160.))
-                            .text_size(px_size(fonts.font_micro))
-                            .text_color(theme::TEXT_MUTED)
-                            .opacity(0.5)
-                            .truncate()
-                            .child(SharedString::from(snap.ctx.clone())),
-                    ),
-            );
-        }
-        if snap.has_tasks_or_agents {
-            header_right = header_right.child(
-                div()
-                    .id("tasks-btn")
-                    .relative()
-                    .flex()
-                    .items_center()
-                    .gap_1p5()
-                    .p_1()
-                    .rounded_md()
-                    .cursor_pointer()
-                    .hover(|s| s.bg(theme::HOVER))
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.flyout_open = !this.flyout_open;
-                        cx.notify();
-                    }))
-                    .when(snap.has_attention, |d| {
-                        d.child(crate::ui::icon("icons/warn.svg", px_size(fonts.icon_xsmall), theme::WARN))
-                    })
-                    .child(crate::ui::icon("icons/expand.svg", px_size(fonts.icon_xsmall), theme::TEXT)),
-            );
-        }
-
-        let header = div()
-            .flex()
-            .items_center()
-            .gap_1()
-            .px_2p5()
-            .pt_2()
-            .child(
-                div()
-                    .id("close-tile")
-                    .cursor_pointer()
-                    .p_1()
-                    .rounded_md()
-                    .hover(|s| s.bg(theme::HOVER))
-                    .on_click(move |_, _, cx| {
-                        close_store.update(cx, |s, cx| s.close_tile(&close_key, cx));
-                    })
-                    .child(crate::ui::icon("icons/close.svg", px_size(fonts.icon_xsmall), theme::TEXT_MUTED)),
+                        store.update(cx, |s, cx| s.send_from_tile(&key, cx));
+                    }),
+                "Send",
             )
-            .when(snap.is_busy, |d| {
-                let pulse = div()
-                    .size(px(5.))
-                    .rounded_full()
-                    .bg(theme::WORKING)
-                    .with_animation("pulse", gpui::Animation::new(std::time::Duration::from_secs(2)).repeat(), |el, delta| {
-                        let opacity = 0.2f32 + 0.8f32 * (1.0f32 - (delta - 0.5).abs() * 2.0).max(0.0);
-                        el.opacity(opacity)
-                    });
-                d.child(div().ml_1().child(pulse))
-            })
-            .child(
-                div()
-                    .ml_2()
-                    .flex_1()
-                    .min_w_0()
-                    .text_size(px_size(fonts.font_body))
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .text_color(theme::TEXT)
-                    .truncate()
-                    .child(SharedString::from(snap.title.clone())),
-            )
-            .child(header_right);
+            .child(crate::ui::icon("icons/arrow-up.svg", px(fonts.icon_xl), theme::TEXT_MUTED))
+            .into_any_element()
+        }
+    }
 
-        // ---- flyout ----
+    /// The tasks/agents flyout, anchored under the header toggle.
+    fn render_flyout(&self, snap: &TileSnap) -> gpui::AnyElement {
+        let fonts = snap.fonts;
+        let accent = snap.accent;
         let mut flyout = div();
         if self.flyout_open && snap.has_tasks_or_agents {
             let mut content = div().flex().flex_col().gap_2().min_w(px(300.)).max_w(px(440.));
@@ -2276,32 +2059,32 @@ impl Render for TileView {
                             .items_center()
                             .child(
                                 div()
-                                    .text_size(px_size(fonts.font_body_large))
+                                    .text_size(px(fonts.font_body_large))
                                     .font_weight(gpui::FontWeight::SEMIBOLD)
                                     .text_color(theme::TEXT)
                                     .child("Progress"),
                             )
                             .child(
                                 div()
-                                    .text_size(px_size(fonts.font_detail))
-                                    .text_color(theme::TEXT_MUTED)
-                                    .opacity(0.6)
+                                    .text_size(px(fonts.font_detail))
+                                    .text_color(theme::TEXT_FAINT)
                                     .child(SharedString::from(snap.tasks_progress.clone())),
                             ),
                     )
                     .child({
                         let mut list = div().flex().flex_col();
                         for task in &snap.tasks {
-                            let icon: gpui::AnyElement = if task.completed() {
-                                crate::ui::icon("icons/circle-check.svg", px_size(fonts.icon_body), accent).into_any_element()
+                            // all-gray rows; status reads from brightness:
+                            // active row brightest, finished dimmest
+                            let (icon, text) = if task.completed() {
+                                (crate::ui::icon("icons/circle-check.svg", px(fonts.icon_body), theme::TEXT_MUTED), theme::TEXT_MUTED)
                             } else if task.in_progress() {
-                                crate::ui::icon("icons/play.svg", px_size(fonts.icon_xsmall), accent).into_any_element()
+                                (crate::ui::icon("icons/play.svg", px(fonts.icon_body), theme::TEXT_DIM), theme::TEXT)
                             } else if task.cancelled() {
-                                crate::ui::icon("icons/dash.svg", px_size(fonts.icon_body), theme::TEXT_MUTED).into_any_element()
+                                (crate::ui::icon("icons/dash.svg", px(fonts.icon_body), theme::TEXT_FAINT), theme::TEXT_FAINT)
                             } else {
-                                crate::ui::icon("icons/circle.svg", px_size(fonts.icon_body), theme::TEXT_MUTED).into_any_element()
+                                (crate::ui::icon("icons/circle.svg", px(fonts.icon_body), theme::TEXT_FAINT), theme::TEXT_DIM)
                             };
-                            let done = task.done();
                             list = list.child(
                                 div()
                                     .flex()
@@ -2311,9 +2094,8 @@ impl Render for TileView {
                                     .child(icon)
                                     .child(
                                         div()
-                                            .text_size(px_size(fonts.font_body))
-                                            .text_color(theme::TEXT)
-                                            .when(done, |d| d.opacity(0.5))
+                                            .text_size(px(fonts.font_body))
+                                            .text_color(text)
                                             .child(SharedString::from(task.content.clone())),
                                     ),
                             );
@@ -2333,16 +2115,15 @@ impl Render for TileView {
                             .items_center()
                             .child(
                                 div()
-                                    .text_size(px_size(fonts.font_body_large))
+                                    .text_size(px(fonts.font_body_large))
                                     .font_weight(gpui::FontWeight::SEMIBOLD)
                                     .text_color(theme::TEXT)
                                     .child("Agents"),
                             )
                             .child(
                                 div()
-                                    .text_size(px_size(fonts.font_detail))
-                                    .text_color(theme::TEXT_MUTED)
-                                    .opacity(0.6)
+                                    .text_size(px(fonts.font_detail))
+                                    .text_color(theme::TEXT_FAINT)
                                     .child(SharedString::from(snap.agents_summary.clone())),
                             ),
                     )
@@ -2379,10 +2160,10 @@ impl Render for TileView {
                                     })
                                     .child(div().size(px(5.)).rounded_full().bg(accent))
                                     .when(agent.is_subagent, |d| {
-                                        d.child(crate::ui::icon("icons/play.svg", px_size(fonts.icon_nano), accent))
+                                        d.child(crate::ui::icon("icons/play.svg", px(fonts.icon_nano), accent))
                                     })
                                     .when(agent.needs_attention, |d| {
-                                        d.child(crate::ui::icon("icons/warn.svg", px_size(fonts.icon_body), theme::WARN))
+                                        d.child(crate::ui::icon("icons/warn.svg", px(fonts.icon_body), theme::WARN))
                                     })
                                     .child(
                                         div()
@@ -2391,7 +2172,7 @@ impl Render for TileView {
                                             .child(
                                                 div()
                                                     .max_w(px(220.))
-                                                    .text_size(px_size(fonts.font_body))
+                                                    .text_size(px(fonts.font_body))
                                                     .text_color(theme::TEXT)
                                                     .truncate()
                                                     .child(SharedString::from(agent.title.clone())),
@@ -2399,15 +2180,14 @@ impl Render for TileView {
                                             .when(snap.multiple_workspaces, |d| {
                                                 d.child(
                                                     div()
-                                                        .text_size(px_size(fonts.font_micro))
-                                                        .text_color(theme::TEXT_MUTED)
-                                                        .opacity(0.5)
+                                                        .text_size(px(fonts.font_micro))
+                                                        .text_color(theme::TEXT_FAINT)
                                                         .child(SharedString::from(agent.workspace.clone())),
                                                 )
                                             }),
                                     )
                                     .child(div().flex_1())
-                                    .child(crate::ui::icon("icons/chevron-right.svg", px_size(fonts.icon_tiny), theme::TEXT_MUTED))
+                                    .child(crate::ui::icon("icons/chevron-right.svg", px(fonts.icon_tiny), theme::TEXT_MUTED))
                                     .child(
                                         div()
                                             .id(gpui::ElementId::NamedInteger("stop-agent".into(), TileView::hash(&sid_stop)))
@@ -2422,7 +2202,7 @@ impl Render for TileView {
                                                     store.update(cx, |s, cx| s.stop_running(&sid_stop, cx));
                                                 }
                                             })
-                                            .child(crate::ui::icon("icons/stop.svg", px_size(fonts.icon_xsmall), theme::TEXT_MUTED)),
+                                            .child(crate::ui::icon("icons/stop.svg", px(fonts.icon_xsmall), theme::TEXT_MUTED)),
                                     ),
                             );
                         }
@@ -2443,8 +2223,12 @@ impl Render for TileView {
                     .child(content),
             );
         }
+        flyout.into_any_element()
+    }
 
-        // ---- pickers (model/variant/agent dropdowns) ----
+    /// Model/variant/agent dropdown, anchored above the composer's right side.
+    fn render_picker(&mut self, snap: &TileSnap, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let fonts = snap.fonts;
         let mut picker_el = div();
         if let Some(kind) = &self.picker {
             let entries: Vec<String> = match kind {
@@ -2477,50 +2261,49 @@ impl Render for TileView {
                         .px_2()
                         .py_1()
                         .rounded_md()
-                        .text_size(px_size(fonts.font_small))
+                        .text_size(px(fonts.font_small))
                         .text_color(theme::TEXT)
                         .cursor_pointer()
                         .hover(|s| s.bg(theme::HOVER))
                         .on_click({
                             let value = value.clone();
                             cx.listener(move |this, _, _, cx| {
-                            let kind = this.picker.take();
-                            let key = this.key.clone();
-                            let store = this.store.clone();
-                            let value = value.clone();
-                            store.update(cx, move |s, _| {
-                                match kind {
-                                    Some(PickerKind::Model) => {
-                                        s.set_tile_model(&key, if is_sentinel { Some("(server default)".into()) } else { Some(value) });
+                                let kind = this.picker.take();
+                                let key = this.key.clone();
+                                let store = this.store.clone();
+                                let value = value.clone();
+                                store.update(cx, move |s, _| {
+                                    match kind {
+                                        Some(PickerKind::Model) => {
+                                            s.set_tile_model(&key, if is_sentinel { Some("(server default)".into()) } else { Some(value) });
+                                        }
+                                        Some(PickerKind::Variant) => {
+                                            s.set_tile_variant(&key, if is_sentinel { Some("(default)".into()) } else { Some(value) });
+                                        }
+                                        Some(PickerKind::Agent) => {
+                                            s.set_tile_agent(&key, if is_sentinel { Some("(default build)".into()) } else { Some(value) });
+                                        }
+                                        None => {}
                                     }
-                                    Some(PickerKind::Variant) => {
-                                        s.set_tile_variant(&key, if is_sentinel { Some("(default)".into()) } else { Some(value) });
-                                    }
-                                    Some(PickerKind::Agent) => {
-                                        s.set_tile_agent(&key, if is_sentinel { Some("(default build)".into()) } else { Some(value) });
-                                    }
-                                    None => {}
-                                }
-                            });
-                            cx.notify();
+                                });
+                                cx.notify();
                             })
                         })
                         .child(SharedString::from(value)),
                 );
             }
-            picker_el = div().absolute().bottom_10().right_8().child(
-                div()
-                    .rounded_lg()
-                    .border_1()
-                    .border_color(theme::HAIRLINE)
-                    .bg(theme::SETTINGS_BG)
-                    .p_1()
-                    .shadow_lg()
-                    .child(menu),
-            );
+            picker_el = div()
+                .absolute()
+                .bottom_10()
+                .right_8()
+                .child(popover_card().child(menu));
         }
+        picker_el.into_any_element()
+    }
 
-        // context menu overlay
+    /// The right-click context menu over transcript items.
+    fn render_menu(&mut self, snap: &TileSnap, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let fonts = snap.fonts;
         let tile_entity = cx.entity();
         let menu_owner_key = self.key.clone();
         let mut menu_el: gpui::AnyElement = div().into_any_element();
@@ -2545,64 +2328,58 @@ impl Render for TileView {
                 let menu_owner_key = menu_owner_key.clone();
                 let composer_handle = composer_handle.clone();
                 let item = item.clone();
-                rows = rows.child(
-                    div()
-                        .id(gpui::ElementId::NamedInteger("menu-row".into(), ix as u64))
-                        .px_2()
-                        .py_1()
-                        .rounded_md()
-                        .text_size(px_size(fonts.font_small))
-                        .text_color(theme::TEXT)
-                        .cursor_pointer()
-                        .hover(|s| s.bg(theme::HOVER))
-                        .on_click(move |_, window, cx| {
-                            match &item {
-                                ContextMenu::Copy(text) => {
-                                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(text.to_string()));
-                                }
-                                ContextMenu::EditInput(text) => {
-                                    let text = text.clone();
-                                    // the tile that showed the menu, not wherever focus happens to be
-                                    let key = menu_owner_key.clone();
-                                    let composer = composer_handle.clone();
-                                    store_handle.update(cx, {
-                                        let text = text.clone();
-                                        move |s, _| {
-                                            if let Some(tile) = s.tile_by_key_mut(&key) {
-                                                tile.input = text.to_string();
-                                                tile.reset_history();
-                                            }
-                                        }
-                                    });
-                                    // set_value emits no Change, so the store copy above stands
-                                    composer.update(cx, |field, cx| field.set_value(text.as_ref(), window, cx));
-                                }
-                                ContextMenu::Reprompt(text) => {
-                                    let key = menu_owner_key.clone();
-                                    let text = text.to_string();
-                                    store_handle.update(cx, move |s, cx| s.reprompt(&key, &text, cx));
-                                }
-                                ContextMenu::ForkFromHere(msg_key) => {
-                                    let key = menu_owner_key.clone();
-                                    let msg_key = *msg_key;
-                                    store_handle.update(cx, move |s, cx| s.fork_from_message(&key, msg_key, cx));
-                                }
-                                ContextMenu::CopyImage { file_name: _, png } => {
-                                    let image = gpui::Image {
-                                        format: ImageFormat::Png,
-                                        bytes: png.as_ref().clone(),
-                                        id: 0,
-                                    };
-                                    cx.write_to_clipboard(gpui::ClipboardItem::new_image(&image));
-                                }
+                rows = rows.child(menu_row(
+                    gpui::ElementId::NamedInteger("menu-row".into(), ix as u64),
+                    label,
+                    false,
+                    fonts.font_small,
+                    move |_, window, cx| {
+                        match &item {
+                            ContextMenu::Copy(text) => {
+                                cx.write_to_clipboard(gpui::ClipboardItem::new_string(text.to_string()));
                             }
-                            tile_entity.update(cx, |tv, cx| {
-                                tv.menu = None;
-                                cx.notify();
-                            });
-                        })
-                        .child(label),
-                );
+                            ContextMenu::EditInput(text) => {
+                                let text = text.clone();
+                                // the tile that showed the menu, not wherever focus happens to be
+                                let key = menu_owner_key.clone();
+                                let composer = composer_handle.clone();
+                                store_handle.update(cx, {
+                                    let text = text.clone();
+                                    move |s, _| {
+                                        if let Some(tile) = s.tile_by_key_mut(&key) {
+                                            tile.input = text.to_string();
+                                            tile.reset_history();
+                                        }
+                                    }
+                                });
+                                // set_value emits no Change, so the store copy above stands
+                                composer.update(cx, |field, cx| field.set_value(text.as_ref(), window, cx));
+                            }
+                            ContextMenu::Reprompt(text) => {
+                                let key = menu_owner_key.clone();
+                                let text = text.to_string();
+                                store_handle.update(cx, move |s, cx| s.reprompt(&key, &text, cx));
+                            }
+                            ContextMenu::ForkFromHere(msg_key) => {
+                                let key = menu_owner_key.clone();
+                                let msg_key = *msg_key;
+                                store_handle.update(cx, move |s, cx| s.fork_from_message(&key, msg_key, cx));
+                            }
+                            ContextMenu::CopyImage { file_name: _, png } => {
+                                let image = gpui::Image {
+                                    format: ImageFormat::Png,
+                                    bytes: png.as_ref().clone(),
+                                    id: 0,
+                                };
+                                cx.write_to_clipboard(gpui::ClipboardItem::new_image(&image));
+                            }
+                        }
+                        tile_entity.update(cx, |tv, cx| {
+                            tv.menu = None;
+                            cx.notify();
+                        });
+                    },
+                ));
             }
             menu_el = div()
                 .id("menu-catcher")
@@ -2615,31 +2392,468 @@ impl Render for TileView {
                     });
                 })
                 .child(
+                    div()
+                        .absolute()
+                        .left(px(menu.x))
+                        .top(px(menu.y))
+                        .child(popover_card().min_w(px(180.)).child(rows)),
+                )
+                .into_any_element();
+        }
+        menu_el
+    }
+
+    /// The composer frame: attachment strip, textarea, bottom row, and the
+    /// slash/fill popovers anchored above it.
+    fn render_composer_frame(&mut self, snap: &TileSnap, window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let fonts = snap.fonts;
+        let accent = snap.accent;
+        let composer = self.composer.clone();
+        let attachments_el = self.render_attachments(snap);
+        let pills = self.render_pills(snap, cx);
+        let composer_focus_is = self.composer.read(cx).focus_handle(cx).is_focused(window);
+
+        let bottom_row = div()
+            .flex()
+            .items_center()
+            .child(
                 div()
-                    .absolute()
-                    .left(px(menu.x))
-                    .top(px(menu.y))
+                    .flex()
+                    .items_center()
+                    .gap_1()
                     .child(
-                div()
-                    .rounded_lg()
-                    .border_1()
-                    .border_color(theme::HAIRLINE)
-                    .bg(theme::SETTINGS_BG)
-                    .p_1()
-                    .shadow_lg()
-                    .min_w(px(160.))
-                    .child(rows),
-            ),
+                        tip(
+                            div()
+                                .id("attach")
+                                .cursor_pointer()
+                                .p_1()
+                                .rounded_md()
+                                .text_color(theme::TEXT_MUTED)
+                                .hover(|s| s.text_color(accent))
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.pick_files(window, cx);
+                                })),
+                            "Attach files",
+                        )
+                        .child(crate::ui::icon("icons/plus.svg", px(fonts.icon_medium), theme::TEXT_MUTED)),
+                    )
+                    .child(
+                        tip(
+                            div()
+                                .id("allow-toggle")
+                                .cursor_pointer()
+                                .p_1()
+                                .rounded_md()
+                                .hover(|s| s.bg(theme::HOVER))
+                                .on_click({
+                                    let store = self.store.clone();
+                                    move |_, _, cx| {
+                                        store.update(cx, |s, cx| {
+                                            s.auto_allow = !s.auto_allow;
+                                            s.ui.auto_allow_always = Some(s.auto_allow);
+                                            s.save_state();
+                                            cx.notify();
+                                        });
+                                    }
+                                }),
+                            "Auto-allow tool permissions",
+                        )
+                        .child(if snap.allow_on {
+                            crate::ui::icon("icons/shield-filled.svg", px(fonts.icon_medium), theme::WARN)
+                        } else {
+                            crate::ui::icon("icons/shield.svg", px(fonts.icon_medium), theme::TEXT_MUTED)
+                        }),
+                    ),
             )
-            .into_any_element();
+            .child(div().flex_1())
+            .child(pills)
+            .child(self.render_send_button(snap));
+
+        // slash-menu / fill-in popovers hover above the composer frame; built
+        // before the frame chain (they borrow self and cx)
+        let slash_el = self.render_suggest_menu(&snap.input, fonts, accent, cx);
+
+        div()
+            .mx_1()
+            .mb_1()
+            // anchors the popovers and scopes the slash-menu key
+            // bindings ("Composer > Input") to this frame only
+            .relative()
+            .key_context("Composer")
+            .rounded_xl()
+            .border_1()
+            .when(composer_focus_is, |d| d.border_color(accent))
+            .when(!composer_focus_is, |d| d.border_color(theme::HAIRLINE))
+            .bg(theme::INPUT)
+            .p_1p5()
+            .flex()
+            .flex_col()
+            .gap_1p5()
+            // files dragged from the file manager land here as attachments
+            .drag_over::<gpui::ExternalPaths>(move |style, _, _, _| style.border_color(accent))
+            .on_drop({
+                let store = self.store.clone();
+                let key = self.key.clone();
+                move |paths: &gpui::ExternalPaths, _, cx| {
+                    let paths: Vec<std::path::PathBuf> = paths.paths().to_vec();
+                    let key = key.clone();
+                    store.update(cx, move |s, cx| s.attach_paths(&key, &paths, cx));
+                }
+            })
+            .on_mouse_down(MouseButton::Left, {
+                let composer = self.composer.clone();
+                move |_, window, cx| {
+                    let handle = composer.read(cx).focus_handle(cx).clone();
+                    window.focus(&handle, cx);
+                }
+            })
+            .child(attachments_el)
+            .child(
+                div().flex_1().min_h_0().child(
+                    // chrome-less inside: the composer frame (border/bg)
+                    // is ours, the textarea only edits.
+                    // image paste → attachment instead of text insertion
+                    Textarea::new(&composer).appearance(false).bordered(false).on_paste({
+                        let store = self.store.clone();
+                        let key = self.key.clone();
+                        move |item: &gpui::ClipboardItem, _, cx| {
+                            let image = item.entries().iter().find_map(|entry| match entry {
+                                gpui::ClipboardEntry::Image(image) => Some(image),
+                                _ => None,
+                            });
+                            if let Some(image) = image {
+                                let png = image.bytes.clone();
+                                let key = key.clone();
+                                store.update(cx, move |s, _| s.attach_image(&key, png));
+                                true
+                            } else {
+                                false
+                            }
+                        }
+                    }),
+                ),
+            )
+            .child(bottom_row)
+            .child(slash_el)
+            .into_any_element()
+    }
+
+    fn action_composer_up(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let state = self.composer.clone();
+        if !state.read(cx).focus_handle(cx).is_focused(window) {
+            return;
+        }
+        let before = state.read(cx).cursor();
+        let focus = state.read(cx).focus_handle(cx).clone();
+        focus.dispatch_action(&MoveUp, window, cx);
+        let moved = state.read(cx).cursor() != before;
+        if !moved {
+            let key = self.key.clone();
+            self.store.update(cx, |s, _| s.cycle_prompt_history(&key, true));
+        }
+    }
+
+    fn action_composer_down(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let state = self.composer.clone();
+        if !state.read(cx).focus_handle(cx).is_focused(window) {
+            return;
+        }
+        let before = state.read(cx).cursor();
+        let focus = state.read(cx).focus_handle(cx).clone();
+        focus.dispatch_action(&MoveDown, window, cx);
+        let moved = state.read(cx).cursor() != before;
+        if !moved {
+            let key = self.key.clone();
+            self.store.update(cx, |s, _| s.cycle_prompt_history(&key, false));
+        }
+    }
+
+    fn action_cycle_agent(&mut self, cx: &mut Context<Self>) {
+        let key = self.key.clone();
+        self.store.update(cx, |s, _| s.cycle_agent(&key));
+    }
+
+    /// Visible row count of the live menu: commands match the typed prefix,
+    /// files are the stored answer for the active @query (0 while in flight).
+    fn suggest_visible(&self, text: &str, cx: &App) -> usize {
+        match self.suggest_mode {
+            SuggestMode::Commands => self.command_matches(text, cx).len().min(SLASH_MENU_VISIBLE),
+            SuggestMode::Files => self
+                .store
+                .read(cx)
+                .file_results_for(&self.key, &self.at_query)
+                .map(|p| p.len().min(SLASH_MENU_VISIBLE))
+                .unwrap_or(0),
+        }
+    }
+
+    fn action_slash_up(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.suggest_open {
+            let text = self.composer.read(cx).value().to_string();
+            let count = self.suggest_visible(&text, cx);
+            if count > 0 {
+                // wrap so the ends loop like the history cycle does
+                self.suggest_selected = if self.suggest_selected == 0 { count - 1 } else { self.suggest_selected - 1 };
+                cx.notify();
+            }
+            return;
+        }
+        // stock composer up-key: caret move, else per-tile history
+        self.action_composer_up(window, cx);
+    }
+
+    fn action_slash_down(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.suggest_open {
+            let text = self.composer.read(cx).value().to_string();
+            let count = self.suggest_visible(&text, cx);
+            if count > 0 {
+                self.suggest_selected = (self.suggest_selected + 1) % count;
+                cx.notify();
+            }
+            return;
+        }
+        self.action_composer_down(window, cx);
+    }
+
+    fn action_slash_enter(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.suggest_open {
+            self.accept_suggest(window, cx);
+            return;
+        }
+        let state = self.composer.clone();
+        if state.read(cx).focus_handle(cx).is_focused(window) {
+            let focus = state.read(cx).focus_handle(cx).clone();
+            focus.dispatch_action(&Enter { secondary: false, shift: false }, window, cx);
+        }
+    }
+
+    fn action_slash_escape(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.suggest_open {
+            // close and leave the typed text as-is; the menu stays closed
+            // until the text changes, and the inserted-body case re-arms via
+            // accept_suggest the same way
+            self.suggest_open = false;
+            self.suggest_dismissed = true;
+            cx.notify();
+            return;
+        }
+        let state = self.composer.clone();
+        if state.read(cx).focus_handle(cx).is_focused(window) {
+            let focus = state.read(cx).focus_handle(cx).clone();
+            focus.dispatch_action(&Escape, window, cx);
+        }
+    }
+}
+
+impl Render for TileView {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl gpui::IntoElement {
+        let mut snap = {
+            let store = self.store.read(cx);
+            let Some(tile) = store.tile_by_key(&self.key) else {
+                return div().into_any_element();
+            };
+            TileSnap {
+                fonts: store.fonts,
+                accent: store.accent.accent,
+                input: tile.input.clone(),
+                is_busy: tile.is_busy(store),
+                is_connected: tile
+                    .session_id
+                    .as_ref()
+                    .map(|id| store.has_runtime(id))
+                    .unwrap_or(store.is_server_running),
+                is_reconnecting: store.stream_reconnecting(tile.session_id.as_deref()),
+                is_focused: tile.is_focused,
+                title: tile.title.clone(),
+                ctx: tile.context_text.clone().unwrap_or_default(),
+                ctx_frac: tile.context_frac,
+                has_ctx: tile.has_context(),
+                // Arc'd items: this snapshot is pointer copies, the payloads stay put
+                items: tile.items.iter().map(|i| (i.id(), Arc::clone(i))).collect(),
+                queue_keys: tile.queue_rows.clone(),
+                queue: store.queue.clone(),
+                attachments: tile.attachments.clone(),
+                has_queue: tile.has_queue_rows(),
+                has_messages: tile.has_messages(),
+                has_variants: tile.has_variants(),
+                selected_variant: tile.selected_variant.clone().unwrap_or_default(),
+                selected_model_short: tile.selected_model_short(),
+                selected_agent: tile.selected_agent.clone().unwrap_or_default(),
+                has_agents: store.has_agents(),
+                has_tasks_or_agents: tile.has_tasks_or_agents(),
+                has_tasks: tile.has_tasks(),
+                tasks_progress: tile.tasks_progress(),
+                tasks: tile.tasks.clone(),
+                has_tile_agents: tile.has_tile_agents(),
+                agents_summary: tile.tile_agents_summary(),
+                tile_agents: tile.tile_agents.clone(),
+                multiple_workspaces: store.multiple_workspaces(),
+                has_attention: store.has_attention_needed(),
+                allow_on: store.auto_allow,
+                spring: store.todos_spring.as_deref() == Some(self.key.as_str()),
+            }
+        };
+        let fonts = snap.fonts;
+        let accent = snap.accent;
+
+        // external input changes (history, edit-queued) sync into the field
+        let composer_text_changed = snap.input != self.last_composer_text;
+        if snap.input != self.last_composer_text && self.composer.read(cx).value().as_ref() != snap.input {
+            let text = snap.input.clone();
+            self.composer.update(cx, |field, cx| field.set_value(text, window, cx));
+        }
+        self.last_composer_text = snap.input.clone();
+
+        // suggestion-menu state rides the composer text: a leading `/` opens
+        // the command menu, an active `@token` anywhere opens the file menu.
+        // No trigger, an escaped menu (until the text changes), or an
+        // unfocused composer keeps both closed. A fresh open refreshes the
+        // command list; a changed @query fires a new file search.
+        let at = at_token_start(&snap.input);
+        let want = if snap.input.starts_with('/') {
+            Some(SuggestMode::Commands)
+        } else if at.is_some() {
+            Some(SuggestMode::Files)
+        } else {
+            None
+        };
+        let composer_focused = self.composer.read(cx).focus_handle(cx).is_focused(window);
+        let menu_wanted = match want {
+            Some(mode) if composer_focused && (!self.suggest_dismissed || composer_text_changed) => Some(mode),
+            _ => None,
+        };
+        let tile_key = self.key.clone();
+        match (menu_wanted, want) {
+            (Some(mode), _) => {
+                if !self.suggest_open || self.suggest_mode != mode {
+                    self.suggest_open = true;
+                    self.suggest_mode = mode;
+                    self.suggest_selected = 0;
+                    self.find_requested = None;
+                    if mode == SuggestMode::Commands {
+                        self.store.update(cx, |s, _| s.refresh_commands(&tile_key));
+                    }
+                }
+                self.suggest_dismissed = false;
+                if mode == SuggestMode::Files {
+                    let (start, query) = at.unwrap();
+                    self.at_start = start;
+                    if self.at_query != query {
+                        self.at_query = query.clone();
+                        self.suggest_selected = 0;
+                    }
+                    if self.find_requested.as_deref() != Some(query.as_str()) {
+                        self.find_requested = Some(query.clone());
+                        let key = tile_key.clone();
+                        self.store.update(cx, |s, _| s.search_files(&key, &query));
+                    }
+                }
+            }
+            _ => {
+                self.suggest_open = false;
+                self.find_requested = None;
+            }
         }
 
-        // ---- compose ----
-        let composer = self.composer.clone();
-        // slash-menu / fill-in popovers hover above the composer frame; built
-        // before the root chain (they borrow self and cx)
-        let slash_el = self.render_slash_menu(&snap.input, fonts, accent, cx);
-        let fill_el = self.render_fill_popover(fonts, accent, cx);
+        // a live todo batch springs the flyout open
+        if snap.spring {
+            if !self.last_spring_seen {
+                self.flyout_open = true;
+                self.last_spring_seen = true;
+            }
+        } else {
+            self.last_spring_seen = false;
+        }
+
+        // transcript auto-scroll: keep pinned while content grows
+        let max_now = self.scroll.max_offset().y;
+        if self.pinned && max_now > self.last_max + px(0.5) && max_now > px(0.) {
+            self.scroll_target = None;
+            self.scroll.scroll_to_bottom();
+        }
+        if max_now != self.last_max {
+            self.last_max = max_now;
+        }
+
+        // moved out rather than cloned — snap's other fields stay usable
+        let items = std::mem::take(&mut snap.items);
+        self.question_keys_seen.clear();
+        let mut transcript = div()
+            .id("transcript")
+            .flex_1()
+            .min_h_0()
+            .overflow_hidden()
+            .track_scroll(&self.scroll.clone())
+            .on_scroll_wheel(cx.listener(|this, event: &gpui::ScrollWheelEvent, window, cx| {
+                // the wheel no longer scrolls natively (overflow_hidden keeps
+                // the handle-driven offset) — deltas accumulate into a target
+                // and a 60 fps animation glides the handle there
+                let delta = event.delta.pixel_delta(window.line_height()).y;
+                if delta == px(0.) {
+                    return;
+                }
+                let max = this.scroll.max_offset();
+                let base = this.scroll_target.unwrap_or_else(|| -this.scroll.offset().y);
+                // wheel deltas are positive-up; the target counts down
+                let target = (base - delta).clamp(px(0.), max.y);
+                this.pinned = target >= max.y - px(1.);
+                this.animate_scroll_to(target, cx);
+            }))
+            .p_1()
+            .flex()
+            .flex_col()
+            .gap_1();
+        for (item_id, item) in &items {
+            transcript = transcript.child(self.render_item(item_id, item, fonts, accent, window, cx));
+        }
+        let transcript_empty = items.is_empty();
+        // cache entries only live as long as the transcript/composer entries
+        // they serve; question inputs die with their question
+        let mut live: HashSet<String> = items.iter().map(|(id, _)| id.clone()).collect();
+        live.extend(snap.attachments.iter().map(|a| format!("att{}", a.key)));
+        self.prune_caches(&live);
+        self.question_inputs.retain(|k, _| self.question_keys_seen.contains(k));
+
+        let jump_visible = !self.pinned && snap.has_messages;
+
+        let header = self.render_header(&snap, cx);
+        let queue_el = self.render_queue_strip(&snap);
+        let flyout = self.render_flyout(&snap);
+        let picker_el = self.render_picker(&snap, cx);
+        let menu_el = self.render_menu(&snap, cx);
+        let composer_frame = self.render_composer_frame(&snap, window, cx);
+
+        // an opened chat with no messages yet still explains itself; the hint
+        // is a plain overlay (no handlers), so wheel events reach the
+        // scroll-tracked transcript underneath
+        let transcript_area = div()
+            .relative()
+            .flex_1()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .child(transcript)
+            .when(transcript_empty, |d| {
+                d.child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .flex()
+                        .flex_col()
+                        .items_center()
+                        .justify_center()
+                        .gap_2()
+                        .child(crate::ui::icon("icons/spark.svg", px(28.), theme::TEXT_FAINT))
+                        .child(
+                            div()
+                                .text_size(px(fonts.font_small))
+                                .italic()
+                                .text_color(theme::TEXT_FAINT)
+                                .child("Nothing here yet — say hello, or / for commands · @ for files"),
+                        ),
+                )
+            });
+
         let root = div()
             .id(gpui::ElementId::NamedInteger("tile".into(), TileView::hash(&self.key)))
             .relative()
@@ -2654,120 +2868,17 @@ impl Render for TileView {
             .when(!snap.is_focused, |d| d.border_color(theme::HAIRLINE))
             .bg(theme::CARD)
             .overflow_hidden()
-            // composer-only key overrides (bound over the kit's "Input" context):
-            // forward up/down to the editor, and when the caret cannot move
-            // anymore cycle the prompt history instead — Warp-style
-            .on_action(cx.listener(|this, _: &ComposerUp, window, cx| {
-                let state = this.composer.clone();
-                if !state.read(cx).focus_handle(cx).is_focused(window) {
-                    return;
-                }
-                let before = state.read(cx).cursor();
-                let focus = state.read(cx).focus_handle(cx).clone();
-                focus.dispatch_action(&MoveUp, window, cx);
-                let moved = state.read(cx).cursor() != before;
-                if !moved {
-                    let key = this.key.clone();
-                    this.store.update(cx, |s, _| s.cycle_prompt_history(&key, true));
-                }
-            }))
-            .on_action(cx.listener(|this, _: &ComposerDown, window, cx| {
-                let state = this.composer.clone();
-                if !state.read(cx).focus_handle(cx).is_focused(window) {
-                    return;
-                }
-                let before = state.read(cx).cursor();
-                let focus = state.read(cx).focus_handle(cx).clone();
-                focus.dispatch_action(&MoveDown, window, cx);
-                let moved = state.read(cx).cursor() != before;
-                if !moved {
-                    let key = this.key.clone();
-                    this.store.update(cx, |s, _| s.cycle_prompt_history(&key, false));
-                }
-            }))
-            .on_action(cx.listener(|this, _: &ComposerCycleAgent, _window, cx| {
-                let key = this.key.clone();
-                this.store.update(cx, |s, _| s.cycle_agent(&key));
-            }))
-            // slash-menu keys (bound over "Composer Input", see main.rs): while
+            // composer-only key overrides (bound over the kit's "Input" context)
+            .on_action(cx.listener(|this, _: &ComposerUp, window, cx| this.action_composer_up(window, cx)))
+            .on_action(cx.listener(|this, _: &ComposerDown, window, cx| this.action_composer_down(window, cx)))
+            .on_action(cx.listener(|this, _: &ComposerCycleAgent, _window, cx| this.action_cycle_agent(cx)))
+            // slash-menu keys (bound over "Composer > Input", see main.rs): while
             // the menu is open they own up/down/enter/escape; closed they fall
             // through to the exact stock behavior
-            .on_action(cx.listener(|this, _: &ComposerSlashUp, window, cx| {
-                if this.slash_open {
-                    let text = this.composer.read(cx).value().to_string();
-                    let count = this.slash_matches(&text, cx).len().min(SLASH_MENU_VISIBLE);
-                    if count > 0 {
-                        // wrap so the ends loop like the history cycle does
-                        this.slash_selected = if this.slash_selected == 0 { count - 1 } else { this.slash_selected - 1 };
-                        cx.notify();
-                    }
-                    return;
-                }
-                // stock composer up-key: caret move, else per-tile history
-                let state = this.composer.clone();
-                if state.read(cx).focus_handle(cx).is_focused(window) {
-                    let focus = state.read(cx).focus_handle(cx).clone();
-                    focus.dispatch_action(&ComposerUp, window, cx);
-                }
-            }))
-            .on_action(cx.listener(|this, _: &ComposerSlashDown, window, cx| {
-                if this.slash_open {
-                    let text = this.composer.read(cx).value().to_string();
-                    let count = this.slash_matches(&text, cx).len().min(SLASH_MENU_VISIBLE);
-                    if count > 0 {
-                        this.slash_selected = (this.slash_selected + 1) % count;
-                        cx.notify();
-                    }
-                    return;
-                }
-                let state = this.composer.clone();
-                if state.read(cx).focus_handle(cx).is_focused(window) {
-                    let focus = state.read(cx).focus_handle(cx).clone();
-                    focus.dispatch_action(&ComposerDown, window, cx);
-                }
-            }))
-            .on_action(cx.listener(|this, _: &ComposerSlashEnter, window, cx| {
-                // fill-in popover first: enter advances through the fields,
-                // the last one confirms; with no fill field focused it still
-                // confirms rather than falling through to a send
-                if this.fill.is_some() {
-                    if !this.fill_enter(window, cx) {
-                        this.confirm_fill(window, cx);
-                    }
-                    return;
-                }
-                if this.slash_open {
-                    this.accept_slash(window, cx);
-                    return;
-                }
-                let state = this.composer.clone();
-                if state.read(cx).focus_handle(cx).is_focused(window) {
-                    let focus = state.read(cx).focus_handle(cx).clone();
-                    focus.dispatch_action(&Enter { secondary: false, shift: false }, window, cx);
-                }
-            }))
-            .on_action(cx.listener(|this, _: &ComposerSlashEscape, window, cx| {
-                if this.fill.take().is_some() {
-                    // back to the still-typed /query, menu reopens
-                    this.slash_open = true;
-                    this.slash_selected = 0;
-                    let focus = this.composer.read(cx).focus_handle(cx).clone();
-                    window.focus(&focus, cx);
-                    cx.notify();
-                    return;
-                }
-                if this.slash_open {
-                    // close and leave the typed text as-is
-                    this.slash_open = false;
-                    cx.notify();
-                    return;
-                }
-                let state = this.composer.clone();
-                if state.read(cx).focus_handle(cx).is_focused(window) {
-                    let focus = state.read(cx).focus_handle(cx).clone();
-                    focus.dispatch_action(&Escape, window, cx);
-                }
-            }))
+            .on_action(cx.listener(|this, _: &ComposerSlashUp, window, cx| this.action_slash_up(window, cx)))
+            .on_action(cx.listener(|this, _: &ComposerSlashDown, window, cx| this.action_slash_down(window, cx)))
+            .on_action(cx.listener(|this, _: &ComposerSlashEnter, window, cx| this.action_slash_enter(window, cx)))
+            .on_action(cx.listener(|this, _: &ComposerSlashEscape, window, cx| this.action_slash_escape(window, cx)))
             .on_mouse_down(MouseButton::Left, {
                 let store = self.store.clone();
                 let key = self.key.clone();
@@ -2796,96 +2907,35 @@ impl Render for TileView {
             })
             .child(header)
             .child(div().h(px(1.)).mt_1p5().mx_2p5().bg(theme::TILE_HEADER_SEPARATOR))
-            .child(transcript)
+            .child(transcript_area)
             .when(jump_visible, |d| {
                 d.child(
-                    div()
-                        .absolute()
-                        .bottom(px(120.))
-                        .right_2()
-                        .id("jump")
-                        .rounded_full()
-                        .border_1()
-                        .border_color(theme::HAIRLINE)
-                        .bg(theme::CHIP)
-                        .p_2()
-                        .cursor_pointer()
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.pinned = true;
-                            let target = this.scroll.max_offset().y;
-                            this.animate_scroll_to(target, cx);
-                        }))
-                        .child(crate::ui::icon("icons/arrow-down.svg", px_size(fonts.icon_small), theme::TEXT)),
+                    tip(
+                        div()
+                            .absolute()
+                            .bottom(px(150.))
+                            .right_2()
+                            .id("jump")
+                            .rounded_full()
+                            .border_1()
+                            .border_color(theme::HAIRLINE)
+                            .bg(theme::CHIP)
+                            .p_2()
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.pinned = true;
+                                let target = this.scroll.max_offset().y;
+                                this.animate_scroll_to(target, cx);
+                            })),
+                        "Jump to latest",
+                    )
+                    .child(crate::ui::icon("icons/arrow-down.svg", px(fonts.icon_medium), theme::TEXT)),
                 )
             })
             .when(snap.has_queue, |d| {
-                d.child(div().id("queue-strip").max_h(px(150.)).mx_1().mb_0p5().overflow_y_scroll().child(queue_rows_el))
+                d.child(div().id("queue-strip").max_h(px(150.)).mx_1().mb_0p5().overflow_y_scroll().child(queue_el))
             })
-            .child(
-                div()
-                    .mx_1()
-                    .mb_1()
-                    // anchors the popovers and scopes the slash-menu key
-                    // bindings ("Composer Input") to this frame only
-                    .relative()
-                    .key_context("Composer")
-                    .rounded_xl()
-                    .border_1()
-                    .when(composer_focus_is, |d| d.border_color(accent))
-                    .when(!composer_focus_is, |d| d.border_color(theme::HAIRLINE))
-                    .bg(theme::INPUT)
-                    .p_1p5()
-                    .flex()
-                    .flex_col()
-                    .gap_1p5()
-                    // files dragged from the file manager land here as attachments
-                    .drag_over::<gpui::ExternalPaths>(move |style, _, _, _| style.border_color(accent))
-                    .on_drop({
-                        let store = self.store.clone();
-                        let key = self.key.clone();
-                        move |paths: &gpui::ExternalPaths, _, cx| {
-                            let paths: Vec<std::path::PathBuf> = paths.paths().to_vec();
-                            let key = key.clone();
-                            store.update(cx, move |s, cx| s.attach_paths(&key, &paths, cx));
-                        }
-                    })
-                    .on_mouse_down(MouseButton::Left, {
-                        let composer = self.composer.clone();
-                        move |_, window, cx| {
-                            let handle = composer.read(cx).focus_handle(cx).clone();
-                            window.focus(&handle, cx);
-                        }
-                    })
-                    .child(attachments_el)
-                    .child(
-                        div().flex_1().min_h_0().child(
-                            // chrome-less inside: the composer frame (border/bg)
-                            // is ours, the textarea only edits.
-                            // image paste → attachment instead of text insertion
-                            Textarea::new(&composer).appearance(false).bordered(false).on_paste({
-                                let store = self.store.clone();
-                                let key = self.key.clone();
-                                move |item: &gpui::ClipboardItem, _, cx| {
-                                    let image = item.entries().iter().find_map(|entry| match entry {
-                                        gpui::ClipboardEntry::Image(image) => Some(image),
-                                        _ => None,
-                                    });
-                                    if let Some(image) = image {
-                                        let png = image.bytes.clone();
-                                        let key = key.clone();
-                                        store.update(cx, move |s, _| s.attach_image(&key, png));
-                                        true
-                                    } else {
-                                        false
-                                    }
-                                }
-                            }),
-                        ),
-                    )
-                    .child(bottom_row)
-                    .child(slash_el)
-                    .child(fill_el),
-            )
+            .child(composer_frame)
             .child(flyout)
             .child(picker_el)
             .child(menu_el);

@@ -1,20 +1,9 @@
-//! Small view helpers: icons and the unified diff renderer (DiffTextBlock port).
+//! Small view helper: the unified diff renderer (DiffTextBlock port).
 
-use crate::store;
 use crate::theme;
 use gpui::prelude::*;
-use gpui::{
-    div, px, AbsoluteLength, AnyElement, HighlightStyle, Pixels, StyledText, TextStyle, Window,
-};
+use gpui::{div, px, AbsoluteLength, AnyElement, HighlightStyle, StyledText, Window};
 use std::ops::Range;
-
-/// A tinted svg icon.
-pub fn icon(path: &'static str, size: Pixels, color: impl Into<gpui::Hsla>) -> gpui::Svg {
-    gpui::svg()
-        .path(path)
-        .size(size)
-        .text_color(color.into())
-}
 
 /// Renders a unified diff GitHub-style: muted old/new line-number gutter,
 /// green/red per-line background tints, gray @@ hunk separators, muted metadata.
@@ -61,14 +50,14 @@ pub fn render_diff(text: &str, font_detail: f32, window: &mut Window) -> AnyElem
         ));
     };
 
-    let gutter: gpui::Rgba = gpui::rgba(0x559A9A9A);
+    let gutter: gpui::Rgba = theme::DIFF_GUTTER;
     let add_fg: gpui::Rgba = theme::ADD;
     let del_fg: gpui::Rgba = theme::DEL;
     let muted: gpui::Rgba = theme::TEXT_MUTED;
     let text_fg: gpui::Rgba = theme::CODE_FG;
-    let add_bg = gpui::hsla(0.36, 0.44, 0.55, 0.15);
-    let del_bg = gpui::hsla(0.02, 0.83, 0.68, 0.15);
-    let hunk_bg = gpui::hsla(0.0, 0.0, 0.6, 0.12);
+    let add_bg = theme::DIFF_ADD_BG;
+    let del_bg = theme::DIFF_DEL_BG;
+    let hunk_bg = theme::DIFF_HUNK_BG;
 
     let mut old: usize = 0;
     let mut cur: usize = 0;

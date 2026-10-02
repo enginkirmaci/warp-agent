@@ -7,3 +7,4 @@
 
 # ZCode workspace
 .zcode/
+.zcodeignore

@@ -605,8 +605,7 @@ impl ChatTile {
         self.context_limit = self
             .last_used_model
             .as_ref()
-            .and_then(|key| store.context_limit_by_model.get(key))
-            .copied()
+            .and_then(|key| lookup_context_limit(&store.context_limit_by_model, key))
             .unwrap_or(0);
     }
 
@@ -959,6 +958,22 @@ impl ChatTile {
 }
 
 // ---- JSON shape parsing (ChatParsing port) -------------------------------
+
+/// Context limit for a model key: exact `provider/model` match first, then a
+/// model-name-only match — message info (`providerID`) and the provider list
+/// can disagree on the provider segment (custom providers, forks). 0 when the
+/// model is unknown to every running server.
+fn lookup_context_limit(limits: &HashMap<String, i64>, key: &str) -> Option<i64> {
+    if let Some(limit) = limits.get(key) {
+        return if *limit > 0 { Some(*limit) } else { None };
+    }
+    let name = key.rsplit('/').next()?;
+    limits
+        .iter()
+        .filter(|(k, _)| k.rsplit('/').next() == Some(name))
+        .map(|(_, limit)| *limit)
+        .find(|limit| *limit > 0)
+}
 
 pub fn read_token_total(info: &serde_json::Value) -> i64 {
     let Some(tokens) = info.get("tokens").and_then(serde_json::Value::as_object) else {
@@ -2329,6 +2344,18 @@ impl Store {
                         if !self.models.contains(&m.key) {
                             self.models.push(m.key);
                         }
+                    }
+                    // tiles restored before this list arrived computed their
+                    // context fraction against an empty map — re-resolve the
+                    // limit and the % readout for every open tile now
+                    let limits = self.context_limit_by_model.clone();
+                    for tile in &mut self.open_tiles {
+                        tile.context_limit = tile
+                            .last_used_model
+                            .as_ref()
+                            .and_then(|key| lookup_context_limit(&limits, key))
+                            .unwrap_or(0);
+                        tile.update_context_text();
                     }
                     let known_models = self.models.clone();
                     let variants_by_model = self.variants_by_model.clone();

@@ -78,8 +78,9 @@ pub struct TileView {
     scroll: ScrollHandle,
     /// wheel animation target; None when the scroll is at rest
     scroll_target: Option<Pixels>,
-    /// whether the smooth-scroll animation loop is running
-    scroll_anim: bool,
+    /// wall clock of the last glide advance; eases per-frame with real dt
+    /// so the glide feel is identical at any display refresh rate
+    glide_last: std::time::Instant,
     pinned: bool,
     last_max: Pixels,
     expanded: HashSet<String>, // fold state by item id
@@ -160,6 +161,24 @@ impl TileView {
         let fresh = SharedString::from(text.to_string());
         self.md_cache.insert(item_id.to_string(), fresh.clone());
         fresh
+    }
+
+    /// Selectable markdown text for a transcript sub-surface (tool title /
+    /// details, question text, notes): pointer-stable text through md_text
+    /// plus a stable per-surface element id, so the kit neither re-parses on
+    /// every render nor collides element ids between surfaces.
+    fn selectable_text(
+        &mut self,
+        cache_key: &str,
+        text: &str,
+        id_name: &'static str,
+    ) -> gpui_kit::base::text::TextView {
+        let stable = self.md_text(cache_key, text);
+        gpui_kit::base::text::TextView::markdown(
+            gpui::ElementId::NamedInteger(id_name.into(), Self::hash(cache_key)),
+            stable,
+        )
+        .selectable(true)
     }
 
     /// Decoded image for a transcript item or composer attachment, cached by a
@@ -300,7 +319,7 @@ impl TileView {
             store,
             scroll: ScrollHandle::new(),
             scroll_target: None,
-            scroll_anim: false,
+            glide_last: std::time::Instant::now(),
             pinned: true,
             last_max: px(0.),
             expanded: HashSet::new(),
@@ -604,53 +623,17 @@ impl TileView {
             .into_any_element()
     }
 
-    /// Glides the transcript toward `target_y` with exponential smoothing
-    /// (~60 fps steps). Safe to call per wheel event: the target updates and
-    /// a single animation loop drives the handle until it settles.
+    /// Sets (or retargets) the glide target toward `target_y`. The glide
+    /// itself advances once per displayed frame from `render`, kept alive by
+    /// `Window::request_animation_frame` — a fixed 16 ms timer drifts against
+    /// the compositor vsync and reads as periodic stutter. Safe to call per
+    /// wheel event: while gliding only the target moves.
     fn animate_scroll_to(&mut self, target_y: Pixels, cx: &mut Context<Self>) {
-        self.scroll_target = Some(target_y);
-        if self.scroll_anim {
-            return;
+        if self.scroll_target.is_none() {
+            self.glide_last = std::time::Instant::now();
         }
-        self.scroll_anim = true;
-        cx.spawn(async move |this, cx| {
-            loop {
-                cx.background_executor()
-                    .timer(std::time::Duration::from_millis(16))
-                    .await;
-                let settled = this.update(cx, |this, cx| {
-                    let Some(target) = this.scroll_target else {
-                        this.scroll_anim = false;
-                        return true;
-                    };
-                    let max = this.scroll.max_offset();
-                    let target_y = target.min(max.y);
-                    let offset = this.scroll.offset();
-                    // gpui stores the handle offset negative-down (0 at top,
-                    // -max at bottom); scroll_target counts distance scrolled
-                    let current = -offset.y;
-                    let diff = target_y - current;
-                    if diff.abs() < px(1.) {
-                        this.scroll.set_offset(gpui::point(offset.x, -target_y));
-                        this.scroll_target = None;
-                        this.scroll_anim = false;
-                        this.pinned = target_y >= max.y - px(1.);
-                    } else {
-                        this.scroll
-                            .set_offset(gpui::point(offset.x, -(current + diff * 0.35)));
-                    }
-                    cx.notify();
-                    // the loop keeps gliding while the animation flag is set;
-                    // it reads as "settled" only once it has been cleared
-                    !this.scroll_anim
-                });
-                let Ok(settled) = settled else { break };
-                if settled {
-                    break;
-                }
-            }
-        })
-        .detach();
+        self.scroll_target = Some(target_y);
+        cx.notify();
     }
 
     fn render_item(
@@ -664,8 +647,9 @@ impl TileView {
     ) -> gpui::AnyElement {
         match item {
             ChatItem::UserMessage { key: msg_key, text, created_ms, .. } => {
-                // one backing allocation per render; the clones below are refcounts
-                let text = SharedString::from(text.as_str());
+                // cached, pointer-stable: keeps the kit from re-parsing the
+                // bubble's TextView on every render (same contract as md_text)
+                let text = self.md_text(item_id, text);
                 let time = crate::store::message_time_label(*created_ms);
                 let copy_text = text.clone();
                 let flash_key = item_id.to_string();
@@ -709,10 +693,21 @@ impl TileView {
                             .flex_col()
                             .gap_1()
                             .child(
+                                // selectable TextView (not plain div text) so
+                                // the user's own message can be mouse-selected
                                 div()
                                     .text_size(px(fonts.font_body_large))
                                     .text_color(theme::TEXT)
-                                    .child(text.clone()),
+                                    .child(
+                                        gpui_kit::base::text::TextView::markdown(
+                                            gpui::ElementId::NamedInteger(
+                                                "utext".into(),
+                                                TileView::hash(item_id),
+                                            ),
+                                            text.clone(),
+                                        )
+                                        .selectable(true),
+                                    ),
                             )
                             .child(
                                 // copy button shares the time line: pinned left,
@@ -837,7 +832,7 @@ impl TileView {
             }
             ChatItem::Reasoning { text, .. } => {
                 let open = self.expanded.contains(item_id);
-                let body = SharedString::from(text.as_str());
+                let body = self.md_text(item_id, text);
                 div()
                     .w_full()
                     .flex()
@@ -851,7 +846,16 @@ impl TileView {
                             ))
                             .text_size(px(fonts.font_detail))
                             .text_color(theme::TEXT_DIM)
-                            .child(body),
+                            .child(
+                                gpui_kit::base::text::TextView::markdown(
+                                    gpui::ElementId::NamedInteger(
+                                        "rtext".into(),
+                                        TileView::hash(item_id),
+                                    ),
+                                    body,
+                                )
+                                .selectable(true),
+                            ),
                         )
                     })
                     .into_any_element()
@@ -961,7 +965,9 @@ impl TileView {
                                             div()
                                                 .text_size(px(fonts.font_small))
                                                 .text_color(theme::DANGER)
-                                                .child(SharedString::from(text.clone())),
+                                                .child(
+                                                    self.selectable_text(item_id, text, "errnote"),
+                                                ),
                                         ),
                                 ),
                         )
@@ -974,7 +980,7 @@ impl TileView {
                         .text_color(theme::TEXT_MUTED)
                         .italic()
                         .py_0p5()
-                        .child(SharedString::from(text.clone()))
+                        .child(self.selectable_text(item_id, text, "sysnote"))
                         .into_any_element()
                 }
             }
@@ -1034,7 +1040,10 @@ impl TileView {
                             .text_size(px(fonts.font_body))
                             .text_color(theme::TEXT_DIM)
                             .truncate()
-                            .child(SharedString::from(tool.title.clone())),
+                            .child(
+                                self.selectable_text(&format!("{item_id}:title"), &tool.title, "tooltitle")
+                                    .max_lines(1),
+                            ),
                     )
                     .child(
                         div()
@@ -1078,7 +1087,9 @@ impl TileView {
                                 .text_size(px(fonts.font_detail))
                                 .font_family(theme::code_font())
                                 .text_color(theme::TEXT_DIM)
-                                .child(SharedString::from(details)),
+                                .child(
+                                    self.selectable_text(&format!("{item_id}:details"), &details, "tooldetails"),
+                                ),
                         )
                     },
                 )
@@ -1381,7 +1392,7 @@ impl TileView {
                     .italic()
                     .text_size(px(fonts.font_small))
                     .text_color(theme::TEXT_FAINT)
-                    .child(SharedString::from(resolution.clone())),
+                    .child(self.selectable_text(&format!("{item_id}:res"), resolution, "qres")),
             );
         }
         div()
@@ -1453,7 +1464,9 @@ impl TileView {
                 div()
                     .text_size(px(fonts.font_body))
                     .text_color(theme::TEXT)
-                    .child(SharedString::from(entry.question.clone())),
+                    .child(
+                        self.selectable_text(&format!("{item_id}#{qi}"), &entry.question, "qtext"),
+                    ),
             );
         for (oi, option) in entry.options.iter().enumerate() {
             let store = self.store.clone();
@@ -1872,7 +1885,7 @@ impl TileView {
                         );
                     }
                 } else {
-                    chip = chip.child(crate::ui::icon("icons/doc.svg", px(56.), theme::TEXT_MUTED));
+                    chip = chip.child(crate::ui::icon("icons/doc.svg", px(64.), theme::TEXT_MUTED));
                 }
                 chip = chip.child(
                     div()
@@ -2214,6 +2227,8 @@ impl TileView {
                     .rounded_xl()
                     .border_1()
                     .border_color(theme::HAIRLINE)
+                    // translucent gray: chat shows through faintly, without
+                    // the old near-black stain
                     .bg(theme::FLYOUT_SURFACE)
                     .p_3()
                     .shadow_lg()
@@ -2765,6 +2780,32 @@ impl Render for TileView {
             self.last_spring_seen = false;
         }
 
+        // advance the wheel glide one step per displayed frame; eased by the
+        // real frame delta so the motion is identical on 60/120/144 Hz panels
+        if let Some(target) = self.scroll_target {
+            let max = self.scroll.max_offset();
+            let target = target.min(max.y);
+            let x = self.scroll.offset().x;
+            // gpui stores the handle offset negative-down (0 at top, -max at
+            // bottom); scroll_target counts distance scrolled
+            let current = -self.scroll.offset().y;
+            if cx.reduce_motion() || (target - current).abs() < px(1.) {
+                self.scroll.set_offset(gpui::point(x, -target));
+                self.scroll_target = None;
+                self.pinned = target >= max.y - px(1.);
+            } else {
+                let now = std::time::Instant::now();
+                let dt = now - self.glide_last;
+                self.glide_last = now;
+                // 1 - e^(-dt/τ): ~0.34 per 16.7 ms frame, rate-independent
+                let alpha = 1. - (-(dt.as_secs_f32() / 0.04)).exp();
+                let next = current + (target - current) * alpha;
+                self.scroll.set_offset(gpui::point(x, -next));
+                // keep the frame loop running until the glide settles
+                window.request_animation_frame();
+            }
+        }
+
         // transcript auto-scroll: keep pinned while content grows
         let max_now = self.scroll.max_offset().y;
         if self.pinned && max_now > self.last_max + px(0.5) && max_now > px(0.) {
@@ -2787,7 +2828,7 @@ impl Render for TileView {
             .on_scroll_wheel(cx.listener(|this, event: &gpui::ScrollWheelEvent, window, cx| {
                 // the wheel no longer scrolls natively (overflow_hidden keeps
                 // the handle-driven offset) — deltas accumulate into a target
-                // and a 60 fps animation glides the handle there
+                // and render advances a frame-locked glide toward it
                 let delta = event.delta.pixel_delta(window.line_height()).y;
                 if delta == px(0.) {
                     return;
@@ -2810,6 +2851,26 @@ impl Render for TileView {
         // cache entries only live as long as the transcript/composer entries
         // they serve; question inputs die with their question
         let mut live: HashSet<String> = items.iter().map(|(id, _)| id.clone()).collect();
+        // sub-surface selectable texts key off derived ids — keep those too
+        for (id, item) in &items {
+            match item.as_ref() {
+                ChatItem::Tool(tool) => {
+                    live.insert(format!("{id}:title"));
+                    if tool.has_details() {
+                        live.insert(format!("{id}:details"));
+                    }
+                }
+                ChatItem::Question(q) => {
+                    for qi in 0..q.questions.len() {
+                        live.insert(format!("{id}#{qi}"));
+                    }
+                    if q.resolution.is_some() {
+                        live.insert(format!("{id}:res"));
+                    }
+                }
+                _ => {}
+            }
+        }
         live.extend(snap.attachments.iter().map(|a| format!("att{}", a.key)));
         self.prune_caches(&live);
         self.question_inputs.retain(|k, _| self.question_keys_seen.contains(k));
@@ -2843,7 +2904,7 @@ impl Render for TileView {
                         .items_center()
                         .justify_center()
                         .gap_2()
-                        .child(crate::ui::icon("icons/spark.svg", px(28.), theme::TEXT_FAINT))
+                        .child(crate::ui::icon("icons/spark.svg", px(32.), theme::TEXT_FAINT))
                         .child(
                             div()
                                 .text_size(px(fonts.font_small))

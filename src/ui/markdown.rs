@@ -40,7 +40,15 @@ pub fn render_markdown(
     // keys only stay stable because the tile re-calls render_markdown on every
     // render, giving each pass a fresh counter fed in fenced-block order
     let block_index = std::sync::atomic::AtomicUsize::new(0);
-    TextView::markdown(ElementId::CodeLocation(*std::panic::Location::caller()), text)
+    // flash_base (= transcript item id) makes the element id unique per
+    // message: a constant id here gave every assistant TextView in the
+    // transcript the SAME global element id, so their kit states and
+    // selection participants collided — selection only worked with a
+    // single message
+    TextView::markdown(
+        ElementId::NamedInteger("md".into(), TileView::hash(&flash_base)),
+        text,
+    )
         .selectable(true)
         .shared_code_block_highlighter(crate::ui::code_highlight::shared_highlighter(cx))
         .code_block_actions(move |block, _, _| {

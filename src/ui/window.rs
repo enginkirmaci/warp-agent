@@ -196,6 +196,22 @@ impl Render for WarpWindow {
             .bg(theme::WINDOW_CHROME)
             .text_color(theme::TEXT)
             .font_family(theme::ui_font())
+            // mounts the window's selection machinery: without this layer the
+            // kit's global mouse handlers never register and selectable
+            // TextViews (chat transcripts) ignore drags entirely
+            .child(gpui_kit::base::TextSelectionLayer)
+            // Ctrl+C fallback for transcript selections when no input is
+            // focused (mirrors gpui-base's Root)
+            .on_action(|_: &gpui_kit::base::input::Copy, window, cx| {
+                let text = gpui_kit::base::TextSelection::selected_text(window, cx)
+                    .trim()
+                    .to_string();
+                if text.is_empty() {
+                    cx.propagate();
+                    return;
+                }
+                cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+            })
             .child(self.render_titlebar(window, cx))
             .child(content);
 
@@ -250,22 +266,22 @@ impl Render for WarpWindow {
 /// stroke doubles as the server-health gauge: its color follows the running
 /// workspaces (amber reconnecting, salmon unhealthy, neutral otherwise).
 fn zoom_icon(maximized: bool, color: gpui::Rgba) -> gpui::AnyElement {
-    let stroke = 1.0_f32;
-    let s = 8.0_f32;
-    // one Bounds per painted edge: [x, y, w, h] in the 12x12 icon box
+    let stroke = 1.1_f32;
+    let s = 9.5_f32;
+    // one Bounds per painted edge: [x, y, w, h] in the 14x14 icon box
     let mut edges: Vec<(f32, f32, f32, f32)> = Vec::new();
     if maximized {
         // back square offset up-right; only its top and right edges peek out
-        edges.push((3., 1., s, stroke));
-        edges.push((3. + s - stroke, 1., stroke, s));
+        edges.push((3.5, 1., s, stroke));
+        edges.push((3.5 + s - stroke, 1., stroke, s));
         // front square offset down-left
-        let (fx, fy) = (1., 3.5);
+        let (fx, fy) = (1.25, 4.);
         edges.push((fx, fy, s, stroke));
         edges.push((fx, fy + s - stroke, s, stroke));
         edges.push((fx, fy, stroke, s));
         edges.push((fx + s - stroke, fy, stroke, s));
     } else {
-        let (x, y) = (2., 2.);
+        let (x, y) = (2.25, 2.25);
         edges.push((x, y, s, stroke));
         edges.push((x, y + s - stroke, s, stroke));
         edges.push((x, y, stroke, s));
@@ -289,7 +305,7 @@ fn zoom_icon(maximized: bool, color: gpui::Rgba) -> gpui::AnyElement {
             }
         },
     );
-    div().size(px(12.)).child(gauge).into_any_element()
+    div().size(px(14.)).child(gauge).into_any_element()
 }
 
 impl WarpWindow {
@@ -636,9 +652,19 @@ impl WarpWindow {
                     .truncate()
                     .child(SharedString::from(ws.name.clone())),
             )
-            // running dot + chat count pinned to the right edge; hovering the
-            // row fades them out while the kebab/new-chat buttons fade in at
-            // the same spot (both layers overlap, so nothing shifts)
+            // chat count in parentheses right after the name, before the
+            // flex_1 spacer takes the row's free width
+            .when(ws.has_chats(), |d| {
+                d.child(
+                    div()
+                        .flex_shrink_0()
+                        .text_size(px(fonts.font_small))
+                        .text_color(theme::TEXT_FAINT)
+                        .child(SharedString::from(format!("({})", ws.chats.len()))),
+                )
+            })
+            // running dot pinned to the right edge; hovering the row fades it
+            // out while the kebab/new-chat buttons fade in at the same spot
             .child(
                 div()
                     .absolute()
@@ -651,14 +677,6 @@ impl WarpWindow {
                     .group_hover("wsrow", |s| s.opacity(0.))
                     .when(ws.is_running, |d| {
                         d.child(div().size(px(6.)).rounded_full().bg(theme::WORKING))
-                    })
-                    .when(ws.has_chats(), |d| {
-                        d.child(
-                            div()
-                                .text_size(px(fonts.font_micro))
-                                .text_color(theme::TEXT_FAINT)
-                                .child(format!("{}", ws.chats.len())),
-                        )
                     }),
             )
             .child(
@@ -1185,10 +1203,14 @@ impl WarpWindow {
         }
         self.tile_views.retain(|key, _| keys.contains(key));
 
-        let tile_columns = self.store.read(cx).tile_columns();
+        let tile_columns = self.store.read(cx).tile_columns().max(1);
+        // explicit equal rows: implicit grid rows are content-sized (auto),
+        // which let a second-row tile end up shorter than the first-row pair
+        let tile_rows = keys.len().div_ceil(tile_columns).max(1) as u16;
         let mut grid = div()
             .grid()
-            .grid_cols(tile_columns.max(1) as u16)
+            .grid_cols(tile_columns as u16)
+            .grid_rows(tile_rows)
             .gap_2()
             .flex_1()
             .min_h_0()
@@ -1239,7 +1261,7 @@ impl WarpWindow {
                         .flex_col()
                         .items_center()
                         .justify_center()
-                            .child(div().mb_4().child(crate::ui::icon("icons/spark.svg", px(56.), theme::TEXT)))
+                            .child(div().mb_4().child(crate::ui::icon("icons/spark.svg", px(64.), theme::TEXT)))
                             .child(
                                 div()
                                     .text_size(px(fonts.font_small))
@@ -1323,10 +1345,7 @@ impl WarpWindow {
 
     fn render_settings(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
         let fonts = self.store.read(cx).fonts;
-        let accent = self.store.read(cx).accent.accent;
         let buffers = self.settings_buffers.clone();
-        let close_store = self.store.clone();
-        let save_store = self.store.clone();
         // built before the page chain: the builder borrows cx mutably below
         let model_dropdown = if self.settings_model_open {
             Some(self.settings_model_dropdown(&fonts, cx))
@@ -1360,9 +1379,12 @@ impl WarpWindow {
                                 .p_1()
                                 .rounded_md()
                                 .hover(|s| s.bg(theme::HOVER))
-                                .on_click(move |_, _, cx| {
-                                    close_store.update(cx, |s, _| s.is_settings_open = false);
-                                })
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    // leaving the page commits: text fields land
+                                    // in the buffers, then persist like Save did
+                                    this.commit_settings(cx);
+                                    this.store.update(cx, |s, _| s.is_settings_open = false);
+                                }))
                                 .child(crate::ui::icon("icons/arrow-left.svg", px(fonts.icon_medium), theme::TEXT_MUTED)),
                         )
                         .child(
@@ -1377,8 +1399,7 @@ impl WarpWindow {
                     div()
                         .grid()
                         .grid_cols(2)
-                        .gap_4()
-                        .child(
+                        .gap_4()                        .child(
                             div().flex().flex_col().gap_4()
                                 .child(self.settings_section("Server", &fonts))
                                 .child(self.settings_card(vec![
@@ -1505,43 +1526,35 @@ impl WarpWindow {
                                     self.settings_card(perm_rows)
                                 }),
                         ),
-                )
-                .child(controls::button(
-                    "settings-save",
-                    "Save",
-                    BtnKind::Outline,
-                    accent,
-                    fonts.font_body,
-                    true,
-                    {
-                        let fields = self.settings_fields.clone();
-                        let buffers = self.settings_buffers.clone();
-                        move |_, _, cx| {
-                            let mut buffers = buffers.clone();
-                            for (key, field) in &fields {
-                                let text = field.read(cx).value().to_string();
-                                match *key {
-                                    "executable" => buffers.open_code_executable = text,
-                                    "model" => buffers.default_model = text,
-                                    "variant" => buffers.default_variant = text,
-                                    "agent" => buffers.default_agent = text,
-                                    "min" => buffers.auto_allow_default_min = text,
-                                    "max" => buffers.auto_allow_default_max = text,
-                                    "awaymin" => buffers.auto_allow_away_min = text,
-                                    "awaymax" => buffers.auto_allow_away_max = text,
-                                    "lunchstart" => buffers.lunch_start = text,
-                                    "lunchend" => buffers.lunch_end = text,
-                                    "offstart" => buffers.off_hours_start = text,
-                                    "workdaystart" => buffers.workday_start = text,
-                                    _ => {}
-                                }
-                            }
-                            buffers.save(&save_store, cx);
-                        }
-                    },
-                )),
+                ),
         );
         page.into_any_element()
+    }
+
+    /// Persists the settings page: text fields land in the buffers, then the
+    /// buffers parse and push into live state. Runs when the page closes —
+    /// there is no separate Save button.
+    fn commit_settings(&self, cx: &mut App) {
+        let mut buffers = self.settings_buffers.clone();
+        for (key, field) in &self.settings_fields {
+            let text = field.read(cx).value().to_string();
+            match *key {
+                "executable" => buffers.open_code_executable = text,
+                "model" => buffers.default_model = text,
+                "variant" => buffers.default_variant = text,
+                "agent" => buffers.default_agent = text,
+                "min" => buffers.auto_allow_default_min = text,
+                "max" => buffers.auto_allow_default_max = text,
+                "awaymin" => buffers.auto_allow_away_min = text,
+                "awaymax" => buffers.auto_allow_away_max = text,
+                "lunchstart" => buffers.lunch_start = text,
+                "lunchend" => buffers.lunch_end = text,
+                "offstart" => buffers.off_hours_start = text,
+                "workdaystart" => buffers.workday_start = text,
+                _ => {}
+            }
+        }
+        buffers.save(&self.store, cx);
     }
 
 }

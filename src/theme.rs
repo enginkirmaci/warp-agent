@@ -136,7 +136,7 @@ pub const BUBBLE_ASSISTANT: Rgba = c(0x282828FF);
 pub const Q_OPT_SELECTED: Rgba = c(0x333333FF);
 pub const BUBBLE_QUEUED: Rgba = c(0x272727FF);
 pub const QUEUED_BORDER: Rgba = c(0x4E4E4EFF);
-pub const FLYOUT_SURFACE: Rgba = c(0xB3121212); // 0.7 alpha over the chat
+pub const FLYOUT_SURFACE: Rgba = c(0x1C1C1CB3); // dark gray at 0.7 alpha over the chat
 
 // ---- fixed semantic colors (never follow the accent preset) --------------
 
@@ -268,14 +268,16 @@ const BASE_TOKENS: FontTokens = FontTokens {
     font_h2: 16.0,
     font_h3: 14.5,
     font_title: 19.0,
-    icon_nano: 9.0,
-    icon_tiny: 10.0,
-    icon_xsmall: 11.0,
-    icon_small: 12.0,
-    icon_body: 13.0,
-    icon_medium: 14.0,
-    icon_large: 15.0,
-    icon_xl: 17.0,
+    // icon ladder runs ~+2 over the 2026-09 baseline (user found the old
+    // sizes too quiet); nano only +1 so the check glyph fits its 13px box
+    icon_nano: 10.0,
+    icon_tiny: 12.0,
+    icon_xsmall: 13.0,
+    icon_small: 14.0,
+    icon_body: 15.0,
+    icon_medium: 16.0,
+    icon_large: 17.0,
+    icon_xl: 20.0,
 };
 
 pub const FONT_COMPACT: &str = "compact";

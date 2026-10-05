@@ -1,5 +1,6 @@
 //! ui module: shared helpers + the main window.
 
+pub mod bits;
 pub mod code_highlight;
 pub mod controls;
 pub mod diff;

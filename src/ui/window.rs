@@ -9,7 +9,7 @@ use crate::ui::settings::SettingsBuffers;
 use crate::ui::tile::TileView;
 use crate::ui::tooltip::{self, tip};
 use gpui::prelude::*;
-use gpui::{canvas, div, px, AnimationExt, App, Context, Entity, MouseButton, Render, SharedString, Window, WindowControlArea};
+use gpui::{canvas, div, px, App, Context, Entity, MouseButton, Render, SharedString, Window, WindowControlArea};
 use std::collections::HashMap;
 
 #[derive(Clone)]
@@ -85,6 +85,10 @@ fn chat_menu_rows(store: &Store, id: &str) -> Vec<SideMenuAction> {
 pub struct WarpWindow {
     pub store: Entity<Store>,
     tile_views: HashMap<String, Entity<TileView>>,
+    /// running-session spinner dots as leaf view entities (see ui::bits):
+    /// the animation notify repaints only the dot, not this whole window;
+    /// pruned to currently-running sessions each sidebar render
+    spinners: HashMap<String, Entity<crate::ui::bits::Pulse>>,
     /// the app's tooltip overlay (also reachable via the TooltipHost global);
     /// rendered as the last child so popups paint above everything
     tooltip_overlay: Entity<gpui_kit::base::TooltipOverlay>,
@@ -118,6 +122,7 @@ impl WarpWindow {
         Self {
             store,
             tile_views: HashMap::new(),
+            spinners: HashMap::new(),
             tooltip_overlay,
             menu_sender_cell: menu_tx,
             menu_receiver: menu_rx,
@@ -465,6 +470,19 @@ impl WarpWindow {
     // ---- sidebar ---------------------------------------------------------------
 
     fn render_sidebar(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        // spinner entities exist only for currently-running sessions; sessions
+        // that stopped or closed drop theirs (an unmounted leaf costs nothing)
+        let running: Vec<String> = self
+            .store
+            .read(cx)
+            .workspaces
+            .iter()
+            .flat_map(|w| w.chats.iter())
+            .filter(|c| c.is_running)
+            .map(|c| c.id.clone())
+            .collect();
+        self.spinners.retain(|k, _| running.contains(k));
+
         let (fonts, width) = {
             let store = self.store.read(cx);
             (store.fonts, store.sidebar_shown_width)
@@ -753,12 +771,18 @@ impl WarpWindow {
         let store_del = self.store.clone();
         let id_del = id.clone();
         let gutter: gpui::AnyElement = if chat.is_running {
-            let spin = div().child(crate::ui::icon("icons/spinner.svg", px(fonts.icon_small), theme::WORKING)).with_animation(
-                gpui::ElementId::NamedInteger("spin".into(), TileView::hash(&id)),
-                gpui::Animation::new(std::time::Duration::from_millis(1200)).repeat(),
-                |el, delta| el.opacity(0.25f32 + 0.75f32 * (1.0f32 - (delta - 0.5).abs() * 2.0).max(0.0)),
-            );
-            div().child(spin).into_any_element()
+            let spin = self.spinners.entry(id.clone()).or_insert_with(|| {
+                cx.new(|_| {
+                    crate::ui::bits::Pulse::icon(
+                        "icons/spinner.svg",
+                        px(fonts.icon_small),
+                        theme::WORKING,
+                        std::time::Duration::from_millis(1200),
+                        0.25,
+                    )
+                })
+            });
+            div().child(spin.clone()).into_any_element()
         } else if chat.pin_visible() {
             crate::ui::icon("icons/pin.svg", px(fonts.icon_xsmall), theme::TEXT_MUTED).into_any_element()
         } else {

@@ -11,7 +11,7 @@ use crate::ui::markdown::render_markdown;
 use crate::ui::tooltip::tip;
 use gpui::prelude::*;
 use gpui::{
-    canvas, div, img, px, relative, actions, App, AnimationExt, Context, Entity, Focusable,
+    canvas, div, img, px, relative, actions, App, Context, Entity, Focusable,
     ImageFormat, MouseButton, Pixels, Render, ScrollHandle, SharedString, Window,
 };
 use gpui_kit::component::input::{
@@ -122,6 +122,10 @@ pub struct TileView {
     /// decoded images by item id / attachment key — PNG decode is far too
     /// expensive to repeat on every repaint; evicted with the transcript
     img_cache: HashMap<String, Arc<gpui::RenderImage>>,
+    /// busy/reconnect pulse dots as leaf view entities: the animation notify
+    /// then re-renders only the dot, not this whole tile (see ui::bits)
+    busy_pulse: Option<Entity<crate::ui::bits::Pulse>>,
+    reconnect_pulse: Option<Entity<crate::ui::bits::Pulse>>,
 }
 
 impl TileView {
@@ -342,6 +346,8 @@ impl TileView {
             copied_flash: None,
             md_cache: HashMap::new(),
             img_cache: HashMap::new(),
+            busy_pulse: None,
+            reconnect_pulse: None,
         }
     }
 
@@ -1690,14 +1696,12 @@ impl TileView {
         // stream-status pill: amber while this tile's workspace pump retries
         // its event stream, with a slow pulse like the busy dot
         if snap.is_reconnecting {
-            let pulse = div()
-                .size(px(5.))
-                .rounded_full()
-                .bg(theme::WARN)
-                .with_animation("reconnect-pulse", gpui::Animation::new(std::time::Duration::from_millis(1200)).repeat(), |el, delta| {
-                    let opacity = 0.25f32 + 0.75f32 * (1.0f32 - (delta - 0.5).abs() * 2.0).max(0.0);
-                    el.opacity(opacity)
-                });
+            let pulse = self.reconnect_pulse.get_or_insert_with(|| {
+                cx.new(|_| {
+                    crate::ui::bits::Pulse::dot(theme::WARN, std::time::Duration::from_millis(1200), 0.25)
+                })
+            })
+            .clone();
             header_right = header_right.child(
                 tip(
                     div()
@@ -1786,15 +1790,12 @@ impl TileView {
                 .child(crate::ui::icon("icons/close.svg", px(fonts.icon_xsmall), theme::TEXT_MUTED)),
             )
             .when(snap.is_busy, |d| {
-                let pulse = div()
-                    .size(px(5.))
-                    .rounded_full()
-                    .bg(theme::WORKING)
-                    .with_animation("pulse", gpui::Animation::new(std::time::Duration::from_secs(2)).repeat(), |el, delta| {
-                        let opacity = 0.2f32 + 0.8f32 * (1.0f32 - (delta - 0.5).abs() * 2.0).max(0.0);
-                        el.opacity(opacity)
-                    });
-                d.child(div().ml_1().child(pulse))
+                let dot = self.busy_pulse.get_or_insert_with(|| {
+                    cx.new(|_| {
+                        crate::ui::bits::Pulse::dot(theme::WORKING, std::time::Duration::from_secs(2), 0.2)
+                    })
+                });
+                d.child(div().ml_1().child(dot.clone()))
             })
             .child(
                 div()

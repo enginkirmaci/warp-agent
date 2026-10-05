@@ -1097,6 +1097,69 @@ impl TileView {
             .into_any_element()
     }
 
+    /// A run of ≥2 consecutive tool calls collapses into one disclosure row so
+    /// a queued turn reads as one line instead of a wall of pending chips.
+    fn render_tool_group(
+        &mut self,
+        run: &[(String, Arc<ChatItem>)],
+        group_key: &str,
+        open: bool,
+        fonts: theme::FontTokens,
+        accent: gpui::Rgba,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let mut adds = 0i64;
+        let mut dels = 0i64;
+        let mut running = 0usize;
+        let mut pending = 0usize;
+        let mut failed = 0usize;
+        for (_, item) in run {
+            let ChatItem::Tool(tool) = item.as_ref() else { continue };
+            if tool.is_running() {
+                running += 1;
+            } else if tool.status == "pending" {
+                pending += 1;
+            }
+            if tool.is_error {
+                failed += 1;
+            }
+            if let Some(n) = &tool.numstat {
+                adds += n.additions;
+                dels += n.deletions;
+            }
+        }
+        let state_word = if running > 0 {
+            "running".to_string()
+        } else if pending > 0 {
+            format!("{pending} pending")
+        } else if failed > 0 {
+            format!("{failed} failed")
+        } else {
+            "done".to_string()
+        };
+        let label = format!("{} tool calls · {}", run.len(), state_word);
+        let numstat = (adds > 0 || dels > 0).then_some((adds, dels));
+        let mut group = div()
+            .w_full()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .child(self.fold_header(group_key, &label, numstat, open, fonts, cx));
+        if open {
+            let mut body =
+                fold_body(gpui::ElementId::NamedInteger("fold-tools".into(), Self::hash(group_key)))
+                    .flex()
+                    .flex_col()
+                    .gap_1();
+            for (member_id, member) in run {
+                body = body.child(self.render_item(member_id, member.as_ref(), fonts, accent, window, cx));
+            }
+            group = group.child(body);
+        }
+        group.into_any_element()
+    }
+
     /// A disclosure row: chevron + label, full row is the click target.
     fn fold_header(
         &self,
@@ -2844,17 +2907,48 @@ impl Render for TileView {
             .flex()
             .flex_col()
             .gap_1();
-        for (item_id, item) in &items {
-            transcript = transcript.child(self.render_item(item_id, item, fonts, accent, window, cx));
+        // consecutive tool calls collapse into one disclosure row; the run is
+        // split by anything non-tool (permission cards, notes) in between.
+        // visible_tools feeds the cache-prune set below: members hidden inside
+        // a collapsed group drop their selectable-text cache slots
+        let mut visible_tools: HashSet<String> = HashSet::new();
+        let mut idx = 0;
+        while idx < items.len() {
+            let (item_id, item) = &items[idx];
+            if matches!(item.as_ref(), ChatItem::Tool(_)) {
+                let mut end = idx + 1;
+                while end < items.len() && matches!(items[end].1.as_ref(), ChatItem::Tool(_)) {
+                    end += 1;
+                }
+                let run = &items[idx..end];
+                if run.len() >= 2 {
+                    let group_key = format!("toolgroup:{item_id}");
+                    let open = self.expanded.contains(&group_key);
+                    if open {
+                        visible_tools.extend(run.iter().map(|(id, _)| id.clone()));
+                    }
+                    transcript =
+                        transcript.child(self.render_tool_group(run, &group_key, open, fonts, accent, window, cx));
+                    idx = end;
+                    continue;
+                }
+                visible_tools.insert(item_id.clone());
+            }
+            transcript = transcript.child(self.render_item(item_id, item.as_ref(), fonts, accent, window, cx));
+            idx += 1;
         }
         let transcript_empty = items.is_empty();
         // cache entries only live as long as the transcript/composer entries
         // they serve; question inputs die with their question
         let mut live: HashSet<String> = items.iter().map(|(id, _)| id.clone()).collect();
-        // sub-surface selectable texts key off derived ids — keep those too
+        // sub-surface selectable texts key off derived ids — keep those too;
+        // members hidden inside a collapsed tool group are not mounted
         for (id, item) in &items {
             match item.as_ref() {
                 ChatItem::Tool(tool) => {
+                    if !visible_tools.contains(id) {
+                        continue;
+                    }
                     live.insert(format!("{id}:title"));
                     if tool.has_details() {
                         live.insert(format!("{id}:details"));

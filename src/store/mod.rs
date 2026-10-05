@@ -166,7 +166,9 @@ pub struct Numstat {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct ToolItem {
-    pub key: usize,
+    /// opencode part id — item identity must match the "t{id}" lookup in
+    /// on_part_updated or every stream snapshot re-pushes the row
+    pub part_id: String,
     pub tool: String,
     pub status: String,
     pub title: String,
@@ -354,7 +356,7 @@ impl ChatItem {
             ChatItem::UserMessage { key, .. } => format!("u{key}"),
             ChatItem::AssistantText { key, .. } => format!("a{key}"),
             ChatItem::Reasoning { key, .. } => format!("r{key}"),
-            ChatItem::Tool(t) => format!("t{}", t.key),
+            ChatItem::Tool(t) => format!("t{}", t.part_id),
             ChatItem::Image { key, .. } => format!("i{key}"),
             ChatItem::Permission(p) => format!("p{}", p.id),
             ChatItem::Question(q) => format!("q{}", q.id),
@@ -684,7 +686,7 @@ impl ChatTile {
     /// Applies a `message.part.updated` event; returns whether anything the
     /// transcript shows actually changed — the caller skips the repaint when
     /// the stream re-sends an unchanged part.
-    pub fn on_part_updated(&mut self, data: &serde_json::Value, next_key: &mut usize) -> bool {
+    pub fn on_part_updated(&mut self, data: &serde_json::Value) -> bool {
         let Some(part) = data.get("part") else { return false };
         let Some(id) = part.get("id").and_then(serde_json::Value::as_str) else { return false };
         let part_type = part.get("type").and_then(serde_json::Value::as_str).unwrap_or("");
@@ -753,7 +755,7 @@ impl ChatTile {
                 if self.find_item_index(&item_id).is_none() {
                     let tool_name = part.get("tool").and_then(serde_json::Value::as_str).unwrap_or("tool");
                     self.items.push(Arc::new(ChatItem::Tool(ToolItem {
-                        key: *next_key,
+                        part_id: id.to_string(),
                         tool: tool_name.into(),
                         status: "pending".into(),
                         title: tool_name.into(),
@@ -764,7 +766,6 @@ impl ChatTile {
                         error_preview: String::new(),
                         details: String::new(),
                     })));
-                    *next_key += 1;
                 }
                 let Some(state) = part.get("state") else { return true };
                 let Some(index) = self.find_item_index(&item_id) else { return false };
@@ -903,7 +904,7 @@ impl ChatTile {
                     "tool" => {
                         let tool_name = part.get("tool").and_then(serde_json::Value::as_str).unwrap_or("tool");
                         let mut tool = ToolItem {
-                            key: *next_key,
+                            part_id: id.into(),
                             tool: tool_name.into(),
                             status: "pending".into(),
                             title: tool_name.into(),
@@ -914,7 +915,6 @@ impl ChatTile {
                             error_preview: String::new(),
                             details: String::new(),
                         };
-                        *next_key += 1;
                         if let Some(state) = part.get("state") {
                             apply_tool_state(state, &mut tool);
                             apply_tool_metadata(state, &mut tool);
@@ -1062,6 +1062,68 @@ fn build_tool_details(input: &str, output: &str, error: &str) -> String {
     out
 }
 
+/// Short label for a tool call for the stretch before the server sends a
+/// state.title: the first meaningful value from state.input (command, file
+/// path, pattern, …) so a pending row says more than the tool name.
+fn tool_label_from_input(state: &serde_json::Value) -> Option<String> {
+    let input = state.get("input").and_then(serde_json::Value::as_object)?;
+    const CANDIDATES: [&str; 12] = [
+        "command",
+        "filePath",
+        "file_path",
+        "path",
+        "pattern",
+        "query",
+        "url",
+        "description",
+        "prompt",
+        "args",
+        "skill",
+        "name",
+    ];
+    let mut pick: Option<String> = None;
+    for key in CANDIDATES {
+        let Some(value) = input.get(key) else { continue };
+        let text = match value {
+            serde_json::Value::String(s) => Some(s.trim().to_string()),
+            serde_json::Value::Number(n) => Some(n.to_string()),
+            serde_json::Value::Array(a) => Some(
+                a.iter()
+                    .filter_map(|x| x.as_str())
+                    .collect::<Vec<_>>()
+                    .join(" ")
+                    .trim()
+                    .to_string(),
+            ),
+            _ => None,
+        };
+        if text.as_deref().is_some_and(|t| !t.is_empty()) {
+            pick = text;
+            break;
+        }
+    }
+    let pick = pick.or_else(|| {
+        input
+            .values()
+            .filter_map(|v| v.as_str())
+            .map(str::trim)
+            .find(|s| !s.is_empty())
+            .map(String::from)
+    })?;
+    let label = pick.split_whitespace().collect::<Vec<_>>().join(" ");
+    if label.is_empty() {
+        return None;
+    }
+    if label.len() <= 120 {
+        return Some(label);
+    }
+    let mut cut = 120;
+    while cut > 0 && !label.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    Some(format!("{}…", &label[..cut]))
+}
+
 fn apply_tool_state(state: &serde_json::Value, tool: &mut ToolItem) {
     if let Some(status) = state.get("status").and_then(serde_json::Value::as_str) {
         tool.status = status.into();
@@ -1071,6 +1133,8 @@ fn apply_tool_state(state: &serde_json::Value, tool: &mut ToolItem) {
         if !title.is_empty() {
             tool.title = title.into();
         }
+    } else if let Some(label) = tool_label_from_input(state) {
+        tool.title = label;
     }
     let input = describe_part(state, "input");
     let output = describe_part(state, "output");
@@ -3570,7 +3634,7 @@ impl Store {
                 let changed = self
                     .tile_from_data(data, ws_key)
                     .and_then(|tile_key| {
-                        self.with_tile(&tile_key, |tile, _store, next_key| tile.on_part_updated(data, next_key))
+                        self.with_tile(&tile_key, |tile, _store, _| tile.on_part_updated(data))
                     })
                     .unwrap_or(false);
                 if changed {

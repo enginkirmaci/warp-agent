@@ -10,6 +10,7 @@ pub struct SettingsBuffers {
     pub open_code_executable: String,
     pub default_model: String,
     pub default_variant: String,
+    pub variant_highest: bool,
     pub default_agent: String,
     pub auto_allow: bool,
     pub auto_allow_instant: bool,
@@ -39,6 +40,7 @@ impl SettingsBuffers {
             open_code_executable: s.open_code_executable.clone(),
             default_model: s.default_model.clone().unwrap_or_default(),
             default_variant: s.default_variant.clone().unwrap_or_default(),
+            variant_highest: s.default_variant_highest,
             default_agent: s.default_agent.clone().unwrap_or_default(),
             auto_allow: s.auto_allow_always.unwrap_or(true),
             auto_allow_instant: s.auto_allow_instant,
@@ -82,6 +84,7 @@ impl SettingsBuffers {
             };
             set.default_model = null_if_blank(&self.default_model);
             set.default_variant = null_if_blank(&self.default_variant);
+            set.default_variant_highest = self.variant_highest;
             set.default_agent = null_if_blank(&self.default_agent);
             set.auto_allow_always = Some(self.auto_allow);
             set.auto_allow_instant = self.auto_allow_instant;

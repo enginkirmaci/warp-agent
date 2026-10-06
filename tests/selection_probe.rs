@@ -3,12 +3,11 @@
 //! offset) around selectable kit TextViews, then drags over them with
 //! simulated mouse events the way gpui-kit's own selection tests do.
 
-use gpui_kit::base::text::{TextView, TextViewState};
+use gpui_kit::base::text::TextView;
 use gpui_kit::base::{TextSelection, TextSelectionLayer};
 use gpui_kit::gpui::prelude::*;
 use gpui_kit::gpui::{
-    div, point, px, AppContext, Entity, MouseButton, Modifiers, Pixels, Point, ScrollHandle,
-    TestAppContext, Window,
+    div, point, px, MouseButton, Modifiers, Pixels, Point, ScrollHandle, TestAppContext, Window,
 };
 
 fn tall_text() -> String {
@@ -121,7 +120,7 @@ fn drag(cx: &mut gpui_kit::gpui::VisualTestContext, from: Point<Pixels>, to: Poi
         cx.simulate_mouse_move(p, MouseButton::Left, Modifiers::default());
     }
     cx.simulate_mouse_up(to, MouseButton::Left, Modifiers::default());
-    cx.update(|window, cx| window.draw(cx));
+    cx.update(|window, cx| drop(window.draw(cx)));
 }
 
 #[gpui_kit::gpui::test]
@@ -129,7 +128,7 @@ fn selection_works_in_single_scrolled_tile(cx: &mut TestAppContext) {
     cx.update(gpui_kit::init);
     let (_root, cx) = cx.add_window_view(|_, _| Probe::single(tall_text(), true));
     cx.run_until_parked();
-    cx.update(|window, cx| window.draw(cx));
+    cx.update(|window, cx| drop(window.draw(cx)));
 
     drag(cx, Point::new(px(20.), px(300.)), Point::new(px(380.), px(330.)));
 
@@ -159,7 +158,7 @@ fn duplicate_markdown_ids_break_selection(cx: &mut TestAppContext) {
             shared_markdown_id: !distinct,
         });
         cx.run_until_parked();
-        cx.update(|window, cx| window.draw(cx));
+        cx.update(|window, cx| drop(window.draw(cx)));
 
         // vertical drags so the band must cross text lines, not paragraph gaps
         for (drag_label, y0, y1) in [
@@ -198,7 +197,7 @@ fn selection_works_in_second_of_two_tiles(cx: &mut TestAppContext) {
         shared_markdown_id: false,
     });
     cx.run_until_parked();
-    cx.update(|window, cx| window.draw(cx));
+    cx.update(|window, cx| drop(window.draw(cx)));
     let width = cx.update(|window, _| window.bounds().size.width);
 
     // vertical drags: the right tile's first message, and a cross-message

@@ -3,7 +3,7 @@
 
 use crate::store::Store;
 use gpui::{App, Entity};
-use async_channel::{bounded, Receiver};
+use async_channel::bounded;
 
 /// Spawns a terminal emulator running the opencode TUI in a folder.
 /// Terminal detection probes PATH for the usual suspects and picks the first hit.
@@ -17,7 +17,7 @@ pub fn launch_in_terminal(folder: &str, executable: &str) -> Result<(), String> 
         ("wezterm", |dir, exe| vec!["start".into(), "--cwd".into(), dir.into(), "--".into(), exe.into()]),
         ("gnome-terminal", |dir, exe| vec![format!("--working-directory={dir}"), "--".into(), exe.into()]),
         ("konsole", |dir, exe| vec!["--workdir".into(), dir.into(), "-e".into(), exe.into()]),
-        ("xterm", |dir, exe| vec!["-e".into(), exe.into()]),
+        ("xterm", |_dir, exe| vec!["-e".into(), exe.into()]),
     ];
     for (name, args) in terminals {
         if let Some(path) = resolve_on_path(name) {

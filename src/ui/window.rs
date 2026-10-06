@@ -245,6 +245,9 @@ impl Render for WarpWindow {
                 .id("menu-catcher")
                 .absolute()
                 .inset_0()
+                // hitbox hover is geometric in gpui: without occlusion the
+                // sidebar row under a menu item receives the same click
+                .occlude()
                 // dismiss on full click, not mouse-down: a down-handler here
                 // unmounts the menu rows before their on_click (mouse-up) runs
                 .on_click(cx.listener(|this, _, _, cx| {
@@ -368,6 +371,10 @@ impl WarpWindow {
             .items_center()
             .px_2()
             .gap_1()
+            // titlebar chrome owns no selectable text either (see sidebar note)
+            .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                gpui_kit::base::GlobalState::suppress_text_selection(cx);
+            })
             .child(
                 div()
                     .flex()
@@ -518,6 +525,12 @@ impl WarpWindow {
             .flex_col()
             .px_2p5()
             .pb_2()
+            // the sidebar owns no selectable text: a press here (row, + button)
+            // must not seed a window drag-selection — otherwise the gesture
+            // that starts on a row can land on transcript text and select it
+            .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                gpui_kit::base::GlobalState::suppress_text_selection(cx);
+            })
             .child(
                 div()
                     .group("wsheader")
@@ -950,7 +963,7 @@ impl WarpWindow {
             prompt: Some("Workspace folder for opencode".into()),
         });
         let tx = self.add_folder_sender.clone();
-        cx.spawn(async move |_this, cx| {
+        cx.spawn(async move |_this, _cx| {
             if let Ok(Ok(Some(paths))) = task.await {
                 if let Some(path) = paths.first() {
                     let _ = tx.send_blocking(path.display().to_string());
@@ -1010,10 +1023,12 @@ impl WarpWindow {
     }
 
     fn settings_field_wrap(&self, key: &str) -> gpui::AnyElement {
+        // the Variant default is inert while "always highest" is checked
+        let disabled = key == "variant" && self.settings_buffers.variant_highest;
         self.settings_fields
             .iter()
             .find(|(k, _)| *k == key)
-            .map(|(_, f)| div().flex_1().min_w_0().child(Input::new(f)).into_any_element())
+            .map(|(_, f)| div().flex_1().min_w_0().child(Input::new(f).disabled(disabled)).into_any_element())
             .unwrap_or_else(|| div().into_any_element())
     }
 
@@ -1377,7 +1392,7 @@ impl WarpWindow {
             None
         };
 
-        let mut page = div()
+        let page = div()
             .id("settings-page")
             .absolute()
             .inset_0()
@@ -1461,6 +1476,13 @@ impl WarpWindow {
                                     div().flex().items_center().gap_2p5()
                                         .child(self.settings_label("Variant", &fonts))
                                         .child(self.settings_field_wrap("variant")).into_any_element(),
+                                    self.check_row(
+                                        "Always select the highest variant by default",
+                                        buffers.variant_highest,
+                                        &fonts,
+                                        |b| b.variant_highest = !b.variant_highest,
+                                        cx,
+                                    ),
                                     div().flex().items_center().gap_2p5()
                                         .child(self.settings_label("Agent", &fonts))
                                         .child(self.settings_field_wrap("agent")).into_any_element(),
@@ -1486,10 +1508,11 @@ impl WarpWindow {
                                         .into_any_element(),
                                     self.settings_hint("Applied across the app as soon as it's saved.", &fonts),
                                     div().h(px(1.)).bg(theme::HAIRLINE).into_any_element(),
-                                    div().flex().items_center().gap_2p5()
+                                    div().flex().flex_wrap().items_center().gap_2p5()
                                         .child(self.settings_label("Accent", &fonts))
                                         .child({
-                                            let mut swatches = div().flex().gap_2p5();
+                                            // wrap keeps all presets reachable at any card width
+                                            let mut swatches = div().flex().flex_wrap().gap_2p5();
                                             for preset in theme::ACCENT_PRESETS.iter() {
                                                 let key = preset.key.to_string();
                                                 let selected = buffers.accent_key == preset.key;
@@ -1497,6 +1520,7 @@ impl WarpWindow {
                                                     div()
                                                         .id(gpui::ElementId::NamedInteger("accent".into(), TileView::hash(preset.key)))
                                                         .size(px(24.))
+                                                        .flex_shrink_0()
                                                         .rounded_full()
                                                         .bg(theme::rgba_u32(preset.accent))
                                                         .when(selected, |d| d.border_2().border_color(theme::TEXT_MUTED))

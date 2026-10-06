@@ -3,7 +3,7 @@
 //! files migrate over, so workspaces, pins and settings survive the move.
 
 use std::path::PathBuf;
-use std::{fs, io};
+use std::fs;
 
 pub struct AppPaths;
 
@@ -61,8 +61,4 @@ fn dirs_home_opt() -> Option<PathBuf> {
         .or_else(|| std::env::var_os("USERPROFILE"))
         .filter(|h| !h.is_empty())
         .map(PathBuf::from)
-}
-
-pub fn ensure_dir(path: &PathBuf) -> io::Result<()> {
-    fs::create_dir_all(path)
 }

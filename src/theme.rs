@@ -150,12 +150,7 @@ pub const WORKING: Rgba = c(0x4AC265FF); // pulse dot + sidebar spinner stay gre
 
 // ---- code ----------------------------------------------------------------
 
-pub const CODE_BLOCK: Rgba = c(0x171717FF);
 pub const CODE_FG: Rgba = c(0xE4E4E4FF);
-pub const SYN_KEYWORD: Rgba = c(0xA9A9A9FF);
-pub const SYN_STRING: Rgba = c(0x93B585FF);
-pub const SYN_COMMENT: Rgba = c(0x6F6F6FFF);
-pub const SYN_NUMBER: Rgba = c(0xC9986EFF);
 
 // ---- diffs (the renderer in ui/diff.rs draws from here) -------------------
 
@@ -164,15 +159,10 @@ pub const DIFF_ADD_BG: Hsla = hsla(0.36, 0.44, 0.55, 0.15);
 pub const DIFF_DEL_BG: Hsla = hsla(0.02, 0.83, 0.68, 0.15);
 pub const DIFF_HUNK_BG: Hsla = hsla(0.0, 0.0, 0.6, 0.12);
 
-// ---- overlays ------------------------------------------------------------
-
-pub const OVERLAY_SCRIM: Hsla = hsla(0.0, 0.0, 0.0, 0.65); // #A6000000
-
 // ---- accent presets ------------------------------------------------------
 
 pub struct AccentPreset {
     pub key: &'static str,
-    pub label: &'static str,
     /// rgb hex, one shared by accent + success
     pub accent: u32,
     pub dim: u32,
@@ -181,14 +171,14 @@ pub struct AccentPreset {
 }
 
 pub const ACCENT_PRESETS: [AccentPreset; 8] = [
-    AccentPreset { key: "green", label: "Green", accent: 0x4AC265, dim: 0x223322, on: 0x0C140C, success_dim: 0x1D3122 },
-    AccentPreset { key: "blue", label: "Blue", accent: 0x4C8EFF, dim: 0x1E2C42, on: 0x0C1219, success_dim: 0x1C2E45 },
-    AccentPreset { key: "amber", label: "Amber", accent: 0xE8A348, dim: 0x33270F, on: 0x171006, success_dim: 0x382B12 },
-    AccentPreset { key: "salmon", label: "Salmon", accent: 0xF47067, dim: 0x38201D, on: 0x1A0B09, success_dim: 0x3B2523 },
-    AccentPreset { key: "gray", label: "Gray", accent: 0xA8A8A8, dim: 0x262626, on: 0x101010, success_dim: 0x2F2F2F },
-    AccentPreset { key: "silver", label: "Silver", accent: 0xC9C9C9, dim: 0x303030, on: 0x141010, success_dim: 0x383838 },
-    AccentPreset { key: "graphite", label: "Graphite", accent: 0x7A7A7A, dim: 0x1F1F1F, on: 0x0E0E0E, success_dim: 0x292929 },
-    AccentPreset { key: "charcoal", label: "Charcoal", accent: 0x505050, dim: 0x1A1A1A, on: 0x0C0C0C, success_dim: 0x232323 },
+    AccentPreset { key: "green", accent: 0x4AC265, dim: 0x223322, on: 0x0C140C, success_dim: 0x1D3122 },
+    AccentPreset { key: "blue", accent: 0x4C8EFF, dim: 0x1E2C42, on: 0x0C1219, success_dim: 0x1C2E45 },
+    AccentPreset { key: "amber", accent: 0xE8A348, dim: 0x33270F, on: 0x171006, success_dim: 0x382B12 },
+    AccentPreset { key: "salmon", accent: 0xF47067, dim: 0x38201D, on: 0x1A0B09, success_dim: 0x3B2523 },
+    AccentPreset { key: "gray", accent: 0xA8A8A8, dim: 0x262626, on: 0x101010, success_dim: 0x2F2F2F },
+    AccentPreset { key: "silver", accent: 0xC9C9C9, dim: 0x303030, on: 0x141010, success_dim: 0x383838 },
+    AccentPreset { key: "graphite", accent: 0x7A7A7A, dim: 0x1F1F1F, on: 0x0E0E0E, success_dim: 0x292929 },
+    AccentPreset { key: "charcoal", accent: 0x505050, dim: 0x1A1A1A, on: 0x0C0C0C, success_dim: 0x232323 },
 ];
 
 pub fn normalize_accent(accent: Option<&str>) -> &'static AccentPreset {
@@ -223,13 +213,6 @@ impl AccentColors {
         }
     }
 }
-
-pub const GREEN_ACCENT: AccentColors = AccentColors {
-    accent: c(0x4AC265FF),
-    dim: c(0x223322FF),
-    on: c(0x0C140CFF),
-    success_dim: c(0x1D3122FF),
-};
 
 // ---- font scale ----------------------------------------------------------
 

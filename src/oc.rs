@@ -32,7 +32,6 @@ const HEALTH_POLL_INTERVAL: Duration = Duration::from_secs(10);
 pub struct SessionInfo {
     pub id: String,
     pub title: String,
-    pub directory: Option<String>,
     pub updated_ms: i64,
     pub parent_id: Option<String>,
 }
@@ -56,7 +55,6 @@ pub struct ModelInfo {
 #[derive(Clone, Debug)]
 pub struct AgentInfo {
     pub name: String,
-    pub description: String,
     pub mode: String,
     pub hidden: bool,
 }
@@ -71,8 +69,6 @@ pub struct CommandInfo {
     /// "command" (built-in / user markdown) or "skill"
     pub source: String,
     pub template: String,
-    /// commands flagged subtask run as a background task in the TUI
-    pub subtask: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -101,7 +97,6 @@ pub struct QuestionRequestInfo {
 
 pub struct ServerProcess {
     pub base_url: String,
-    pub spawned: bool,
     child: Option<tokio::process::Child>,
 }
 
@@ -114,7 +109,7 @@ impl ServerProcess {
         if is_healthy(&client, &base_url).await {
             tracing::info!("attached to a healthy opencode server at {base_url}");
             on_log(format!("attaching to a healthy opencode server at {base_url}"));
-            return Ok(ServerProcess { base_url, spawned: false, child: None });
+            return Ok(ServerProcess { base_url, child: None });
         }
 
         let mut command = tokio::process::Command::new(executable);
@@ -166,7 +161,7 @@ impl ServerProcess {
             });
         }
 
-        let process = ServerProcess { base_url: base_url.clone(), spawned: true, child: Some(child) };
+        let process = ServerProcess { base_url: base_url.clone(), child: Some(child) };
 
         let deadline = std::time::Instant::now() + Duration::from_secs(25);
         let mut process = process;
@@ -423,7 +418,6 @@ impl ApiClient {
                 };
                 agents.push(AgentInfo {
                     name: name.to_string(),
-                    description: a.get("description").and_then(Value::as_str).unwrap_or("").into(),
                     mode: a.get("mode").and_then(Value::as_str).unwrap_or("").into(),
                     hidden: a.get("hidden").and_then(Value::as_bool).unwrap_or(false),
                 });
@@ -447,7 +441,6 @@ impl ApiClient {
                     description: c.get("description").and_then(Value::as_str).unwrap_or("").into(),
                     source: c.get("source").and_then(Value::as_str).unwrap_or("command").into(),
                     template: c.get("template").and_then(Value::as_str).unwrap_or("").into(),
-                    subtask: c.get("subtask").and_then(Value::as_bool).unwrap_or(false),
                 });
             }
         }
@@ -496,7 +489,8 @@ impl ApiClient {
                         .and_then(Value::as_object)
                         .map(|v| v.keys().cloned().collect())
                         .unwrap_or_default();
-                    variants.sort_by_key(|v| v.to_lowercase());
+                    // picker order = effort tiers low→max, not alphabetical
+                    variants.sort_by_key(|v| (crate::store::variant_rank(v), v.to_lowercase()));
                     let context_limit = m
                         .pointer("/limit/context")
                         .and_then(Value::as_i64)
@@ -589,7 +583,6 @@ fn read_session(s: &Value) -> SessionInfo {
     SessionInfo {
         id: s.get("id").and_then(Value::as_str).unwrap_or("").into(),
         title: s.get("title").and_then(Value::as_str).unwrap_or("").into(),
-        directory: s.get("directory").and_then(Value::as_str).map(String::from),
         updated_ms: s.pointer("/time/updated").and_then(Value::as_i64).unwrap_or(0),
         parent_id: s.get("parentID").and_then(Value::as_str).map(String::from),
     }
@@ -701,7 +694,7 @@ pub enum StreamStatus {
 /// Everything the UI learns from the network thread arrives as one of these.
 pub enum UiEvent {
     ServerStarted { ws_key: String, result: Result<()> },
-    ServerStopped { ws_key: String },
+    ServerStopped,
     Event { ws_key: String, event: Value },
     StreamStatus { ws_key: String, status: StreamStatus },
     /// Latest /global/health answer; None until the first poll lands.
@@ -710,19 +703,19 @@ pub enum UiEvent {
     MessagesLoaded { ws_key: String, session_id: String, result: Result<Vec<StoredMessage>> },
     SessionCreated { ws_key: String, result: Result<SessionInfo> },
     ForkSessionCreated { ws_key: String, context: String, result: Result<SessionInfo> },
-    SessionRenamed { ws_key: String, session_id: String, result: Result<SessionInfo> },
-    SessionDeleted { ws_key: String, session_id: String, result: Result<()> },
+    SessionRenamed { session_id: String, result: Result<SessionInfo> },
+    SessionDeleted { session_id: String, result: Result<()> },
     Aborted { session_id: String, result: Result<()> },
     PermissionReplied { permission_id: String, response: String, is_auto: bool, result: Result<()> },
-    QuestionsPulled { for_session: String, ws_key: String, result: Result<Vec<QuestionRequestInfo>> },
+    QuestionsPulled { for_session: String, result: Result<Vec<QuestionRequestInfo>> },
     QuestionReplied { request_id: String, summary: String, result: Result<()> },
-    ModelsLoaded { ws_key: String, result: Result<Vec<ModelInfo>> },
-    AgentsLoaded { ws_key: String, result: Result<Vec<AgentInfo>> },
+    ModelsLoaded { result: Result<Vec<ModelInfo>> },
+    AgentsLoaded { result: Result<Vec<AgentInfo>> },
     CommandsLoaded { ws_key: String, result: Result<Vec<CommandInfo>> },
     /// Answer to a FindFiles request; the query rides along so stale answers
     /// can be told apart from the menu's current token.
     FilesFound { ws_key: String, query: String, result: Result<Vec<String>> },
-    MessageSendFailed { ws_key: String, session_id: String, error: String },
+    MessageSendFailed { session_id: String, error: String },
     Log { ws_key: String, line: String },
 }
 
@@ -794,7 +787,7 @@ async fn net_main(command_rx: async_channel::Receiver<NetCommand>, event_tx: asy
                     }
                 }
                 workspaces.remove(&ws_key);
-                let _ = event_tx.send(UiEvent::ServerStopped { ws_key }).await;
+                let _ = event_tx.send(UiEvent::ServerStopped).await;
             }
             NetCommand::Request { ws_key, request } => {
                 let Some(client) = workspaces.get(&ws_key).map(|ws| ws.api.clone()) else {
@@ -811,7 +804,6 @@ async fn net_main(command_rx: async_channel::Receiver<NetCommand>, event_tx: asy
                     // don't drop silently — the tile would sit "running" forever
                     let _ = event_tx
                         .send(UiEvent::MessageSendFailed {
-                            ws_key: ws_key.clone(),
                             session_id: session_id.clone(),
                             error: "this chat's workspace server is not running".into(),
                         })
@@ -824,7 +816,7 @@ async fn net_main(command_rx: async_channel::Receiver<NetCommand>, event_tx: asy
                         .send_message(&session_id, &text, model.as_deref(), variant.as_deref(), agent.as_deref(), &attachments)
                         .await;
                     if let Err(err) = result {
-                        let _ = event_tx.send(UiEvent::MessageSendFailed { ws_key, session_id, error: format!("{err:#}") }).await;
+                        let _ = event_tx.send(UiEvent::MessageSendFailed { session_id, error: format!("{err:#}") }).await;
                     }
                 });
             }
@@ -852,7 +844,7 @@ async fn start_workspace(
     let port = find_free_port()?;
     let log_tx = event_tx.clone();
     let key = ws_key.to_string();
-    let mut process = ServerProcess::start(
+    let process = ServerProcess::start(
         executable,
         folder,
         port,
@@ -978,11 +970,9 @@ async fn run_request(client: &ApiClient, ws_key: String, request: ApiRequest) ->
             result: client.list_sessions().await,
         },
         ApiRequest::ListModels => UiEvent::ModelsLoaded {
-            ws_key,
             result: client.get_models().await,
         },
         ApiRequest::ListAgents => UiEvent::AgentsLoaded {
-            ws_key,
             result: client.get_agents().await,
         },
         ApiRequest::GetMessages { session_id } => UiEvent::MessagesLoaded {
@@ -1001,11 +991,11 @@ async fn run_request(client: &ApiClient, ws_key: String, request: ApiRequest) ->
         },
         ApiRequest::RenameSession { session_id, title } => {
             let result = client.rename_session(&session_id, &title).await;
-            UiEvent::SessionRenamed { ws_key, session_id, result }
+            UiEvent::SessionRenamed { session_id, result }
         }
         ApiRequest::DeleteSession { session_id } => {
             let result = client.delete_session(&session_id).await;
-            UiEvent::SessionDeleted { ws_key, session_id, result }
+            UiEvent::SessionDeleted { session_id, result }
         }
         ApiRequest::Abort { session_id } => {
             let result = client.abort(&session_id).await;
@@ -1021,7 +1011,6 @@ async fn run_request(client: &ApiClient, ws_key: String, request: ApiRequest) ->
         }
         ApiRequest::GetQuestions { for_session } => UiEvent::QuestionsPulled {
             for_session,
-            ws_key,
             result: client.get_questions().await,
         },
         ApiRequest::ReplyQuestion { request_id, answers } => {

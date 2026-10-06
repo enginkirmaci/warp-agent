@@ -69,7 +69,7 @@ enum ContextMenu {
     /// user message (by item key) → new session seeded with the transcript up to here
     ForkFromHere(usize),
     /// copy image bytes
-    CopyImage { file_name: String, png: Arc<Vec<u8>> },
+    CopyImage { png: Arc<Vec<u8>> },
 }
 
 pub struct TileView {
@@ -866,7 +866,7 @@ impl TileView {
                     })
                     .into_any_element()
             }
-            ChatItem::Tool(tool) => self.render_tool(item_id, tool, fonts, accent, window, cx),
+            ChatItem::Tool(tool) => self.render_tool(item_id, tool, fonts, window, cx),
             ChatItem::Image { file_name, png, created_ms, .. } => {
                 let time = crate::store::message_time_label(*created_ms);
                 // decoded once per item; PNG decode on every repaint dominated
@@ -882,7 +882,6 @@ impl TileView {
                     );
                 }
                 let menu_png = png.clone();
-                let menu_name = file_name.clone();
                 div()
                     .w_full()
                     .flex()
@@ -900,10 +899,7 @@ impl TileView {
                                 cx.listener(move |this, event: &gpui::MouseDownEvent, _, cx| {
                                     let (x, y) = this.menu_anchor(event);
                                     this.menu = Some(TileMenu {
-                                        items: vec![ContextMenu::CopyImage {
-                                            file_name: menu_name.clone(),
-                                            png: menu_png.clone(),
-                                        }],
+                                        items: vec![ContextMenu::CopyImage { png: menu_png.clone() }],
                                         x,
                                         y,
                                     });
@@ -998,24 +994,15 @@ impl TileView {
         item_id: &str,
         tool: &ToolItem,
         fonts: theme::FontTokens,
-        accent: gpui::Rgba,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
-        let dot_color: gpui::Hsla = if tool.is_error {
-            theme::DANGER.into()
-        } else if tool.is_running() {
-            accent.into()
-        } else {
-            theme::TEXT_MUTED.into()
-        };
         let open_diff = self.expanded.contains(&format!("{item_id}:diff"));
         let open_details = self.expanded.contains(&format!("{item_id}:details"));
         let diff = tool.diff.clone().unwrap_or_default();
         let details = tool.details.clone();
         let has_diff = tool.has_diff();
         let has_details = tool.has_details();
-
         div()
             .w_full()
             .flex()
@@ -1027,7 +1014,6 @@ impl TileView {
                     .items_center()
                     .gap_2()
                     .mr_11()
-                    .child(div().size(px(7.)).rounded_full().bg(dot_color))
                     .child(
                         div()
                             .rounded_md()
@@ -1088,18 +1074,57 @@ impl TileView {
                 d.child(self.fold_header(&format!("{item_id}:details"), "details", None, open_details, fonts, cx)).when(
                     open_details,
                     |d| {
-                        d.child(
-                            fold_body(gpui::ElementId::NamedInteger("fold-details".into(), Self::hash(item_id)))
-                                .text_size(px(fonts.font_detail))
-                                .font_family(theme::code_font())
-                                .text_color(theme::TEXT_DIM)
-                                .child(
-                                    self.selectable_text(&format!("{item_id}:details"), &details, "tooldetails"),
-                                ),
-                        )
+                        let body = fold_body(gpui::ElementId::NamedInteger("fold-details".into(), Self::hash(item_id)))
+                            .flex()
+                            .flex_col()
+                            .gap_2p5();
+                        let body = body
+                            .when(!details.input.is_empty(), |d| {
+                                d.child(self.detail_section(&format!("{item_id}:input"), "input", &details.input, theme::TEXT_DIM, fonts))
+                            })
+                            .when(!details.output.is_empty(), |d| {
+                                d.child(self.detail_section(&format!("{item_id}:output"), "output", &details.output, theme::TEXT_DIM, fonts))
+                            })
+                            .when(!details.error.is_empty(), |d| {
+                                d.child(self.detail_section(&format!("{item_id}:error"), "error", &details.error, theme::DANGER, fonts))
+                            });
+                        d.child(body)
                     },
                 )
             })
+            .into_any_element()
+    }
+
+    /// One labeled block inside the details fold: small faint label over a
+    /// mono text block on the chip tint.
+    fn detail_section(
+        &mut self,
+        cache_key: &str,
+        label: &str,
+        text: &str,
+        color: gpui::Rgba,
+        fonts: theme::FontTokens,
+    ) -> gpui::AnyElement {
+        div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .child(
+                div()
+                    .text_size(px(fonts.font_xsmall))
+                    .text_color(theme::TEXT_FAINT)
+                    .child(SharedString::from(label.to_string())),
+            )
+            .child(
+                div()
+                    .rounded_md()
+                    .bg(theme::CHIP)
+                    .p_2()
+                    .text_size(px(fonts.font_detail))
+                    .font_family(theme::code_font())
+                    .text_color(color)
+                    .child(self.selectable_text(cache_key, text, "tooldetails")),
+            )
             .into_any_element()
     }
 
@@ -2080,6 +2105,8 @@ impl TileView {
                     .id("stop")
                     .size(px(34.))
                     .rounded_lg()
+                    .border_1()
+                    .border_color(theme::HAIRLINE)
                     .flex()
                     .items_center()
                     .justify_center()
@@ -2101,6 +2128,8 @@ impl TileView {
                     .id("send")
                     .size(px(34.))
                     .rounded_lg()
+                    .border_1()
+                    .border_color(theme::HAIRLINE)
                     .flex()
                     .items_center()
                     .justify_center()
@@ -2308,7 +2337,7 @@ impl TileView {
     /// Model/variant/agent dropdown, anchored above the composer's right side.
     fn render_picker(&mut self, snap: &TileSnap, cx: &mut Context<Self>) -> gpui::AnyElement {
         let fonts = snap.fonts;
-        let mut picker_el = div();
+        let mut picker_el: gpui::AnyElement = div().into_any_element();
         if let Some(kind) = &self.picker {
             let entries: Vec<String> = match kind {
                 PickerKind::Model => {
@@ -2372,12 +2401,28 @@ impl TileView {
                 );
             }
             picker_el = div()
+                .id("picker-catcher")
                 .absolute()
-                .bottom_10()
-                .right_8()
-                .child(popover_card().child(menu));
+                .inset_0()
+                // hitbox hover is geometric in gpui: without occlusion the
+                // composer/transcript under the dropdown keeps receiving clicks
+                .occlude()
+                // click-elsewhere dismiss; menu rows are children, so they
+                // stay above the catcher and keep working
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.picker = None;
+                    cx.notify();
+                }))
+                .child(
+                    div()
+                        .absolute()
+                        .bottom_10()
+                        .right_8()
+                        .child(popover_card().child(menu)),
+                )
+                .into_any_element();
         }
-        picker_el.into_any_element()
+        picker_el
     }
 
     /// The right-click context menu over transcript items.
@@ -2444,7 +2489,7 @@ impl TileView {
                                 let msg_key = *msg_key;
                                 store_handle.update(cx, move |s, cx| s.fork_from_message(&key, msg_key, cx));
                             }
-                            ContextMenu::CopyImage { file_name: _, png } => {
+                            ContextMenu::CopyImage { png } => {
                                 let image = gpui::Image {
                                     format: ImageFormat::Png,
                                     bytes: png.as_ref().clone(),
@@ -2464,6 +2509,9 @@ impl TileView {
                 .id("menu-catcher")
                 .absolute()
                 .inset_0()
+                // hitbox hover is geometric in gpui: without occlusion the
+                // message/composer under a menu item receives the same click
+                .occlude()
                 .on_click(move |_, _, cx| {
                     close_entity.update(cx, |tv, cx| {
                         tv.menu = None;

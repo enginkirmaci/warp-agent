@@ -17,6 +17,8 @@ pub struct AppSettings {
     pub default_model: Option<String>,
     #[serde(rename = "DefaultVariant", default)]
     pub default_variant: Option<String>,
+    #[serde(rename = "DefaultVariantHighest", default)]
+    pub default_variant_highest: bool,
     #[serde(rename = "DefaultAgent", default)]
     pub default_agent: Option<String>,
     #[serde(rename = "AutoAllowAlways", default)]
@@ -66,6 +68,7 @@ impl Default for AppSettings {
             open_code_executable: default_executable(),
             default_model: None,
             default_variant: None,
+            default_variant_highest: false,
             default_agent: None,
             auto_allow_always: None,
             auto_allow_instant: false,

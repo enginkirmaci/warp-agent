@@ -30,6 +30,26 @@ fn variant_list_for(variants_by_model: &HashMap<String, Vec<String>>, model: &Op
     variants
 }
 
+/// Effort rank for the variant names opencode serves (models.dev tiers):
+/// minimal/none < low < medium < high < xhigh < max; unknown names rank below
+/// everything. Ties break toward the later list entry (the list is sorted).
+pub(crate) fn variant_rank(v: &str) -> i32 {
+    match v.to_lowercase().as_str() {
+        "minimal" | "none" => 0,
+        "low" => 1,
+        "medium" | "mid" => 2,
+        "high" => 3,
+        "xhigh" => 4,
+        "max" => 5,
+        _ => -1,
+    }
+}
+
+/// The model's top-tier variant, for the "always highest variant" default.
+fn highest_variant(variants: &[String]) -> Option<String> {
+    variants.iter().max_by_key(|v| variant_rank(v)).cloned()
+}
+
 /// The tile's `@`-mention token: the last `@` that starts a token (text start
 /// or right after whitespace) with no whitespace between it and the end.
 /// Returns the byte index of the `@` and the query typed after it.
@@ -177,21 +197,30 @@ pub struct ToolItem {
     pub numstat: Option<Numstat>,
     pub is_error: bool,
     pub error_preview: String,
-    pub details: String,
+    pub details: ToolDetails,
+}
+
+/// Tool call detail sections; the details fold draws each as its own
+/// labeled block.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ToolDetails {
+    pub input: String,
+    pub output: String,
+    pub error: String,
+}
+
+impl ToolDetails {
+    pub fn is_empty(&self) -> bool {
+        self.input.is_empty() && self.output.is_empty() && self.error.is_empty()
+    }
 }
 
 impl ToolItem {
     pub fn is_running(&self) -> bool {
         self.status == "running"
     }
-    pub fn is_completed(&self) -> bool {
-        self.status == "completed"
-    }
     pub fn has_diff(&self) -> bool {
         self.diff.as_deref().is_some_and(|d| !d.is_empty())
-    }
-    pub fn has_numstat(&self) -> bool {
-        self.numstat.as_ref().is_some_and(|n| n.additions > 0 || n.deletions > 0)
     }
     pub fn has_details(&self) -> bool {
         !self.details.is_empty()
@@ -210,9 +239,6 @@ impl TaskItem {
     }
     pub fn in_progress(&self) -> bool {
         self.status == "in_progress"
-    }
-    pub fn pending(&self) -> bool {
-        !matches!(self.status.as_str(), "in_progress" | "completed" | "cancelled")
     }
     pub fn cancelled(&self) -> bool {
         self.status == "cancelled"
@@ -242,9 +268,6 @@ impl PermissionItem {
     }
     pub fn has_diff(&self) -> bool {
         self.diff.as_deref().is_some_and(|d| !d.is_empty())
-    }
-    pub fn title(&self) -> String {
-        format!("Permission required — {}", self.kind)
     }
     pub fn has_auto_countdown(&self) -> bool {
         self.is_pending() && self.auto_countdown.is_some_and(|c| c > 0)
@@ -330,7 +353,6 @@ pub enum ChatItem {
     Reasoning {
         key: String,
         text: String,
-        created_ms: i64,
     },
     Tool(ToolItem),
     Image {
@@ -429,12 +451,21 @@ impl ChatTile {
     /// Rebuild the variant picker list around the tile's model and keep the
     /// current pick when it still exists, else fall back to "(default)".
     /// Runs wherever the option list could have drifted: tile creation, the
-    /// ModelsLoaded restore, and (list-only) set_tile_model.
-    fn apply_variant_list(&mut self, variants_by_model: &HashMap<String, Vec<String>>) {
+    /// ModelsLoaded restore, and (list-only) set_tile_model. With
+    /// `prefer_highest` (the settings checkbox), an unset/default pick
+    /// upgrades to the model's top variant once real options are known.
+    fn apply_variant_list(&mut self, variants_by_model: &HashMap<String, Vec<String>>, prefer_highest: bool) {
         self.variants = variant_list_for(variants_by_model, &self.selected_model);
         let selected_ok = self.variants.iter().any(|v| Some(v.as_str()) == self.selected_variant.as_deref());
         if !selected_ok {
             self.selected_variant = Some(DEFAULT_VARIANT_ENTRY.into());
+        }
+        if prefer_highest && self.selected_variant.as_deref() == Some(DEFAULT_VARIANT_ENTRY) {
+            if let Some(model) = &self.selected_model {
+                if let Some(highest) = variants_by_model.get(model).and_then(|vs| highest_variant(vs)) {
+                    self.selected_variant = Some(highest);
+                }
+            }
         }
     }
 
@@ -543,16 +574,9 @@ impl ChatTile {
     pub fn has_tasks_or_agents(&self) -> bool {
         self.has_tasks() || self.has_tile_agents()
     }
-    pub fn has_tasks_and_agents(&self) -> bool {
-        self.has_tasks() && self.has_tile_agents()
-    }
     pub fn has_context(&self) -> bool {
         self.context_text.is_some()
     }
-    pub fn has_attachments(&self) -> bool {
-        !self.attachments.is_empty()
-    }
-
     /// Display-only name for the composer pill: the segment after the last '/'.
     pub fn selected_model_short(&self) -> String {
         match &self.selected_model {
@@ -565,21 +589,6 @@ impl ChatTile {
         self.suppress_history_reset = true;
         self.input = text;
         self.suppress_history_reset = false;
-    }
-
-    fn refresh_variants(&mut self, store: &Store, seed_from_settings: bool) {
-        self.variants.clear();
-        self.variants.push(DEFAULT_VARIANT_ENTRY.to_string());
-        if let Some(model) = &self.selected_model {
-            if let Some(variants) = store.variants_by_model.get(model) {
-                self.variants.extend(variants.iter().cloned());
-            }
-        }
-        self.selected_variant = if seed_from_settings {
-            store.seed_variant()
-        } else {
-            Some(DEFAULT_VARIANT_ENTRY.into())
-        };
     }
 
     fn update_context_text(&mut self) {
@@ -734,7 +743,6 @@ impl ChatTile {
                     self.items.push(Arc::new(ChatItem::Reasoning {
                         key: id.to_string(),
                         text: String::new(),
-                        created_ms: self.created_at_for(message_id.as_ref()),
                     }));
                 }
                 let text = part.get("text").and_then(serde_json::Value::as_str).unwrap_or("").to_string();
@@ -764,7 +772,7 @@ impl ChatTile {
                         numstat: None,
                         is_error: false,
                         error_preview: String::new(),
-                        details: String::new(),
+                        details: ToolDetails::default(),
                     })));
                 }
                 let Some(state) = part.get("state") else { return true };
@@ -899,7 +907,7 @@ impl ChatTile {
                     }
                     "reasoning" => {
                         let text = part.get("text").and_then(serde_json::Value::as_str).unwrap_or("").to_string();
-                        self.items.push(Arc::new(ChatItem::Reasoning { key: id.into(), text, created_ms: msg.created_ms }));
+                        self.items.push(Arc::new(ChatItem::Reasoning { key: id.into(), text }));
                     }
                     "tool" => {
                         let tool_name = part.get("tool").and_then(serde_json::Value::as_str).unwrap_or("tool");
@@ -913,7 +921,7 @@ impl ChatTile {
                             numstat: None,
                             is_error: false,
                             error_preview: String::new(),
-                            details: String::new(),
+                            details: ToolDetails::default(),
                         };
                         if let Some(state) = part.get("state") {
                             apply_tool_state(state, &mut tool);
@@ -1018,7 +1026,17 @@ fn describe_part(state: &serde_json::Value, name: &str) -> String {
         return String::new();
     }
     let text = if let Some(s) = value.as_str() {
-        s.to_string()
+        // string payloads that are themselves JSON (the server sometimes
+        // ships input encoded) pretty-print like structured ones
+        let trimmed = s.trim_start();
+        if trimmed.starts_with('{') || trimmed.starts_with('[') {
+            serde_json::from_str::<serde_json::Value>(s)
+                .ok()
+                .and_then(|v| serde_json::to_string_pretty(&v).ok())
+                .unwrap_or_else(|| s.to_string())
+        } else {
+            s.to_string()
+        }
     } else {
         serde_json::to_string_pretty(value).unwrap_or_default()
     };
@@ -1034,32 +1052,6 @@ fn describe_part(state: &serde_json::Value, name: &str) -> String {
         }
         format!("{}\n… (truncated)", &text[..cut])
     }
-}
-
-fn build_tool_details(input: &str, output: &str, error: &str) -> String {
-    let mut out = String::new();
-    if !input.is_empty() {
-        out.push_str("input:\n");
-        out.push_str(input);
-        out.push('\n');
-    }
-    if !output.is_empty() {
-        if !out.is_empty() {
-            out.push('\n');
-        }
-        out.push_str("output:\n");
-        out.push_str(output);
-        out.push('\n');
-    }
-    if !error.is_empty() {
-        if !out.is_empty() {
-            out.push('\n');
-        }
-        out.push_str("error:\n");
-        out.push_str(error);
-        out.push('\n');
-    }
-    out
 }
 
 /// Short label for a tool call for the stretch before the server sends a
@@ -1136,11 +1128,12 @@ fn apply_tool_state(state: &serde_json::Value, tool: &mut ToolItem) {
     } else if let Some(label) = tool_label_from_input(state) {
         tool.title = label;
     }
-    let input = describe_part(state, "input");
-    let output = describe_part(state, "output");
-    let error = describe_part(state, "error");
-    tool.error_preview = error.split('\n').next().unwrap_or("").to_string();
-    tool.details = build_tool_details(&input, &output, &error);
+    tool.details = ToolDetails {
+        input: describe_part(state, "input"),
+        output: describe_part(state, "output"),
+        error: describe_part(state, "error"),
+    };
+    tool.error_preview = tool.details.error.split('\n').next().unwrap_or("").to_string();
 }
 
 fn apply_tool_metadata(state: &serde_json::Value, tool: &mut ToolItem) {
@@ -1221,20 +1214,6 @@ pub fn decode_base64(input: &str) -> Option<Vec<u8>> {
     Some(out)
 }
 
-pub fn encode_base64(data: &[u8]) -> String {
-    const TABLE: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
-    for chunk in data.chunks(3) {
-        let b = [chunk[0], *chunk.get(1).unwrap_or(&0), *chunk.get(2).unwrap_or(&0)];
-        let n = ((b[0] as u32) << 16) | ((b[1] as u32) << 8) | b[2] as u32;
-        out.push(TABLE[(n >> 18) as usize & 63] as char);
-        out.push(TABLE[(n >> 12) as usize & 63] as char);
-        out.push(if chunk.len() > 1 { TABLE[(n >> 6) as usize & 63] as char } else { '=' });
-        out.push(if chunk.len() > 2 { TABLE[n as usize & 63] as char } else { '=' });
-    }
-    out
-}
-
 pub fn derive_title(text: &str) -> String {
     let mut first_line = text.split('\n').next().unwrap_or("").trim().to_string();
     for extra in ["\r", "\t"] {
@@ -1312,14 +1291,6 @@ impl WorkspaceItem {
         self.state.path == crate::paths::AppPaths::general_workspace_path().to_string_lossy()
     }
 
-    pub fn tooltip_text(&self) -> String {
-        if self.is_general() {
-            "General chat — not tied to a folder".into()
-        } else {
-            self.state.path.clone()
-        }
-    }
-
     pub fn is_expanded(&self) -> bool {
         !self.state.collapsed
     }
@@ -1361,7 +1332,6 @@ impl SessionItem {
 // ---- the store -----------------------------------------------------------
 
 struct WorkspaceRuntime {
-    events_running: bool,
     /// live state of the workspace's event pump: drives the tile
     /// "reconnecting" pill and the amber gauge leg
     stream_status: oc::StreamStatus,
@@ -1777,18 +1747,6 @@ impl Store {
         self.running_by_session.contains(session_id)
     }
 
-    pub fn any_busy(&self) -> bool {
-        !self.running_by_session.is_empty()
-    }
-
-    pub fn working_label(&self) -> String {
-        if self.any_busy() {
-            format!("{} working", self.running_by_session.len())
-        } else {
-            "working".into()
-        }
-    }
-
     pub fn tile_columns(&self) -> usize {
         ((self.open_tiles.len() as f64).sqrt().ceil() as usize).max(1)
     }
@@ -2063,7 +2021,7 @@ impl Store {
                     // status starts Connected to match the pump's first attach
                     self.runtimes.insert(
                         ws_key.clone(),
-                        WorkspaceRuntime { events_running: true, stream_status: oc::StreamStatus::Connected, healthy: None },
+                        WorkspaceRuntime { stream_status: oc::StreamStatus::Connected, healthy: None },
                     );
                     if let Some(ws) = self.workspace_by_path_mut(&ws_key) {
                         ws.is_running = true;
@@ -2162,7 +2120,7 @@ impl Store {
                     let key = format!("t{}", self.next_tile_key);
                     self.next_tile_key += 1;
                     let mut tile = ChatTile::new(key.clone(), self.seed_model(), self.seed_agent(), self.seed_variant());
-                    tile.apply_variant_list(&self.variants_by_model);
+                    tile.apply_variant_list(&self.variants_by_model, self.settings.default_variant_highest);
                     tile.session_id = Some(session_id.clone());
                     tile.title = title;
                     // restore the unsent composer draft, if one was saved
@@ -2258,7 +2216,7 @@ impl Store {
                     let key = format!("t{}", self.next_tile_key);
                     self.next_tile_key += 1;
                     let mut tile = ChatTile::new(key.clone(), self.seed_model(), self.seed_agent(), self.seed_variant());
-                    tile.apply_variant_list(&self.variants_by_model);
+                    tile.apply_variant_list(&self.variants_by_model, self.settings.default_variant_highest);
                     tile.session_id = Some(info.id.clone());
                     tile.title = info.title.clone();
                     tile.auto_title_pending = false; // the fork-point title stands
@@ -2423,6 +2381,7 @@ impl Store {
                     }
                     let known_models = self.models.clone();
                     let variants_by_model = self.variants_by_model.clone();
+                    let prefer_highest = self.settings.default_variant_highest;
                     for (key, model, variant) in restore {
                         if let Some(tile) = self.tile_by_key_mut(&key) {
                             tile.selected_model = match model {
@@ -2432,9 +2391,12 @@ impl Store {
                             // the model list just landed: rebuild this tile's
                             // variant options around its model, keep a
                             // still-valid pick, else fall back to "(default)"
-                            tile.apply_variant_list(&variants_by_model);
+                            // (upgraded to highest when the setting asks)
+                            tile.apply_variant_list(&variants_by_model, prefer_highest);
                             if let Some(saved_variant) = variant {
-                                if tile.variants.contains(&saved_variant) {
+                                // a saved "(default)" counts as unset: the
+                                // highest-default above already handled it
+                                if saved_variant != DEFAULT_VARIANT_ENTRY && tile.variants.contains(&saved_variant) {
                                     tile.selected_variant = Some(saved_variant);
                                 }
                             }
@@ -2495,7 +2457,7 @@ impl Store {
         let key = format!("t{}", self.next_tile_key);
         self.next_tile_key += 1;
         let mut tile = ChatTile::new(key.clone(), self.seed_model(), self.seed_agent(), self.seed_variant());
-        tile.apply_variant_list(&self.variants_by_model);
+        tile.apply_variant_list(&self.variants_by_model, self.settings.default_variant_highest);
         self.open_tiles.push(tile);
         self.tile_by_key_mut(&key).unwrap()
     }
@@ -3211,15 +3173,6 @@ impl Store {
                 chat.draft_title = text.clone();
             }
         }
-    }
-
-    pub fn cancel_rename(&mut self, session_id: &str, cx: &mut Context<Self>) {
-        for ws in &mut self.workspaces {
-            if let Some(chat) = ws.chats.iter_mut().find(|c| c.id == session_id) {
-                chat.is_editing = false;
-            }
-        }
-        let _ = cx;
     }
 
     pub fn commit_rename(&mut self, session_id: &str, cx: &mut Context<Self>) {
@@ -4285,10 +4238,15 @@ impl Store {
 
     pub fn set_tile_model(&mut self, tile_key: &str, model: Option<String>) {
         let variants_by_model = self.variants_by_model.clone();
+        let highest = if self.settings.default_variant_highest {
+            model.as_ref().and_then(|m| variants_by_model.get(m)).and_then(|vs| highest_variant(vs))
+        } else {
+            None
+        };
         let Some(tile) = self.tile_by_key_mut(tile_key) else { return };
         tile.selected_model = model;
         tile.variants = variant_list_for(&variants_by_model, &tile.selected_model);
-        tile.selected_variant = Some(DEFAULT_VARIANT_ENTRY.into());
+        tile.selected_variant = highest.or_else(|| Some(DEFAULT_VARIANT_ENTRY.into()));
         self.persist_composer();
     }
 
@@ -4307,16 +4265,6 @@ impl Store {
     }
 
     // ---- sidebar geometry ----
-
-    pub fn set_sidebar_width(&mut self, width: f32) {
-        let width = width.clamp(theme::SIDEBAR_MIN_WIDTH, theme::SIDEBAR_MAX_WIDTH);
-        if (self.sidebar_shown_width - width).abs() < 1.0 {
-            return;
-        }
-        self.sidebar_shown_width = width;
-        self.ui.sidebar_width = Some(width as f64);
-        self.ui.save();
-    }
 
     pub fn set_sidebar_visible(&mut self, visible: bool, cx: &mut Context<Self>) {
         if self.sidebar_visible == visible {
@@ -4485,7 +4433,7 @@ mod suggest_tests {
     use crate::oc::CommandInfo;
 
     fn cmd(name: &str, template: &str) -> CommandInfo {
-        CommandInfo { name: name.into(), description: "".into(), source: "command".into(), template: template.into(), subtask: false }
+        CommandInfo { name: name.into(), description: "".into(), source: "command".into(), template: template.into() }
     }
 
     #[test]

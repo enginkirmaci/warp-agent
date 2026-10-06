@@ -30,6 +30,20 @@ fn variant_list_for(variants_by_model: &HashMap<String, Vec<String>>, model: &Op
     variants
 }
 
+/// A session's own model + variant, read from its last assistant message —
+/// an old chat reopens with these instead of the global seeds. None when the
+/// chat has no assistant reply yet (or the message predates model metadata).
+fn session_chat_settings(messages: &[StoredMessage]) -> Option<(String, Option<String>)> {
+    let info = &messages.iter().rev().find(|m| m.role == "assistant")?.info;
+    let provider = info.get("providerID").and_then(serde_json::Value::as_str)?;
+    let model = info.get("modelID").and_then(serde_json::Value::as_str)?;
+    if provider.is_empty() || model.is_empty() {
+        return None;
+    }
+    let variant = info.get("variant").and_then(serde_json::Value::as_str).map(String::from);
+    Some((format!("{provider}/{model}"), variant))
+}
+
 /// Effort rank for the variant names opencode serves (models.dev tiers):
 /// minimal/none < low < medium < high < xhigh < max; unknown names rank below
 /// everything. Ties break toward the later list entry (the list is sorted).
@@ -457,7 +471,15 @@ impl ChatTile {
     fn apply_variant_list(&mut self, variants_by_model: &HashMap<String, Vec<String>>, prefer_highest: bool) {
         self.variants = variant_list_for(variants_by_model, &self.selected_model);
         let selected_ok = self.variants.iter().any(|v| Some(v.as_str()) == self.selected_variant.as_deref());
-        if !selected_ok {
+        // a real model missing from the map means its options aren't known yet
+        // (MessagesLoaded can outrun ModelsLoaded on a fresh server) — keep the
+        // pick pending instead of resetting it to the sentinel the later
+        // restore could not recover
+        let options_pending = self
+            .selected_model
+            .as_deref()
+            .is_some_and(|m| m != DEFAULT_MODEL_ENTRY && !variants_by_model.contains_key(m));
+        if !selected_ok && !options_pending {
             self.selected_variant = Some(DEFAULT_VARIANT_ENTRY.into());
         }
         if prefer_highest && self.selected_variant.as_deref() == Some(DEFAULT_VARIANT_ENTRY) {
@@ -2120,6 +2142,12 @@ impl Store {
                     let key = format!("t{}", self.next_tile_key);
                     self.next_tile_key += 1;
                     let mut tile = ChatTile::new(key.clone(), self.seed_model(), self.seed_agent(), self.seed_variant());
+                    // the chat reopens with the model/variant its last turn ran
+                    // on; the seeds only stand until the transcript says otherwise
+                    if let Some((model, variant)) = session_chat_settings(&messages) {
+                        tile.selected_model = Some(model);
+                        tile.selected_variant = Some(variant.unwrap_or_else(|| DEFAULT_VARIANT_ENTRY.into()));
+                    }
                     tile.apply_variant_list(&self.variants_by_model, self.settings.default_variant_highest);
                     tile.session_id = Some(session_id.clone());
                     tile.title = title;
@@ -4429,11 +4457,16 @@ fn rand_0_to(n: i64) -> i64 {
 
 #[cfg(test)]
 mod suggest_tests {
-    use super::{at_token_start, expand_slash_command};
-    use crate::oc::CommandInfo;
+    use super::{at_token_start, expand_slash_command, session_chat_settings};
+    use crate::oc::{CommandInfo, StoredMessage};
+    use serde_json::json;
 
     fn cmd(name: &str, template: &str) -> CommandInfo {
         CommandInfo { name: name.into(), description: "".into(), source: "command".into(), template: template.into() }
+    }
+
+    fn stored(id: &str, role: &str, info: serde_json::Value) -> StoredMessage {
+        StoredMessage { id: id.into(), role: role.into(), created_ms: 0, info, parts: Vec::new() }
     }
 
     #[test]
@@ -4458,5 +4491,27 @@ mod suggest_tests {
         // unknown command and non-slash text go out verbatim
         assert_eq!(expand_slash_command("/nope", &commands), "/nope");
         assert_eq!(expand_slash_command("plain text", &commands), "plain text");
+    }
+
+    #[test]
+    fn session_settings_come_from_last_assistant() {
+        // the last assistant turn wins, even with later user messages
+        let messages = vec![
+            stored("m1", "assistant", json!({"providerID": "a", "modelID": "old", "variant": "low"})),
+            stored("m2", "user", json!({})),
+            stored("m3", "assistant", json!({"providerID": "a", "modelID": "new", "variant": "max"})),
+            stored("m4", "user", json!({})),
+        ];
+        assert_eq!(session_chat_settings(&messages), Some(("a/new".into(), Some("max".into()))));
+        // a model without a variant pick reads as the "(default)" sentinel case
+        let messages = vec![stored("m1", "assistant", json!({"providerID": "a", "modelID": "new"}))];
+        assert_eq!(session_chat_settings(&messages), Some(("a/new".into(), None)));
+        // no assistant reply yet → keep the global seeds
+        let messages = vec![stored("m1", "user", json!({}))];
+        assert_eq!(session_chat_settings(&messages), None);
+        assert_eq!(session_chat_settings(&[]), None);
+        // malformed model fields fall back to the seeds too
+        let messages = vec![stored("m1", "assistant", json!({"providerID": "", "modelID": "new"}))];
+        assert_eq!(session_chat_settings(&messages), None);
     }
 }

@@ -1280,6 +1280,28 @@ fn fork_transcript(tile: &ChatTile, stop_key: usize, source_title: &str) -> Stri
 
 // ---- sidebar models ------------------------------------------------------
 
+/// Sidebar display name for a workspace folder: "General" for the built-in
+/// workspace, otherwise the folder's basename.
+fn workspace_display_name(path: &str) -> String {
+    if path == crate::paths::AppPaths::general_workspace_path().to_string_lossy() {
+        return "General".to_string();
+    }
+    std::path::Path::new(path)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .filter(|n| !n.is_empty())
+        .unwrap_or(path)
+        .to_string()
+}
+
+/// Sidebar order: General leads, the rest alphabetical by name (case-insensitive).
+fn sort_workspaces(workspaces: &mut Vec<WorkspaceState>) {
+    workspaces.sort_by_key(|w| {
+        let general = w.path == crate::paths::AppPaths::general_workspace_path().to_string_lossy();
+        (!general, workspace_display_name(&w.path).to_lowercase())
+    });
+}
+
 #[derive(Clone)]
 pub struct WorkspaceItem {
     pub state: WorkspaceState,
@@ -1291,17 +1313,7 @@ pub struct WorkspaceItem {
 
 impl WorkspaceItem {
     pub fn new(state: WorkspaceState) -> Self {
-        let general = state.path == crate::paths::AppPaths::general_workspace_path().to_string_lossy();
-        let name = if general {
-            "General".to_string()
-        } else {
-            std::path::Path::new(&state.path)
-                .file_name()
-                .and_then(|n| n.to_str())
-                .filter(|n| !n.is_empty())
-                .unwrap_or(&state.path)
-                .to_string()
-        };
+        let name = workspace_display_name(&state.path);
         Self { state, name, is_running: false, is_selected: false, chats: Vec::new() }
     }
 
@@ -1335,6 +1347,7 @@ pub struct SessionItem {
     pub id: String,
     pub title: String,
     pub updated_ms: i64,
+    pub created_ms: i64,
     pub is_pinned: bool,
     pub is_selected: bool,
     pub is_running: bool,
@@ -1349,6 +1362,12 @@ impl SessionItem {
     pub fn pin_visible(&self) -> bool {
         self.is_pinned && !self.is_running
     }
+}
+
+/// Sidebar chat order: pinned first, then newest first — by last activity,
+/// falling back to creation time when a server never fills `updated`.
+fn session_recency(s: &SessionItem) -> std::cmp::Reverse<(bool, i64, i64)> {
+    std::cmp::Reverse((s.is_pinned, s.updated_ms, s.created_ms))
 }
 
 // ---- the store -----------------------------------------------------------
@@ -1527,6 +1546,8 @@ impl Store {
             store.ui.workspaces.insert(0, general);
         }
         let _ = std::fs::create_dir_all(&general_path);
+
+        sort_workspaces(&mut store.ui.workspaces);
 
         // every launch starts with the workspace sections collapsed, whatever was saved
         for ws in &mut store.ui.workspaces {
@@ -1866,6 +1887,8 @@ impl Store {
         let item = WorkspaceItem::new(state);
         let path_key = item.folder_path().to_string();
         self.workspaces.push(item);
+        sort_workspaces(&mut self.ui.workspaces);
+        self.workspaces.sort_by_key(|w| (w.is_general(), w.name.to_lowercase()));
         self.save_state();
         self.select_workspace(&path_key, cx);
     }
@@ -2203,19 +2226,23 @@ impl Store {
                     if let Some(ws) = self.workspace_by_path_mut(&ws_key) {
                         ws.state.sessions.insert(0, info.id.clone());
                     }
-                    self.sessions.insert(
-                        0,
-                        SessionItem {
+                    // only the selected workspace's sidebar mirror lives in
+                    // self.sessions; other workspaces refill from their own
+                    // session list (session.idle triggers that refresh)
+                    if self.selected_workspace.as_deref() == Some(ws_key.as_str()) {
+                        self.sessions.push(SessionItem {
                             id: info.id.clone(),
                             title: info.title.clone(),
                             updated_ms: info.updated_ms,
+                            created_ms: info.created_ms,
                             is_pinned: false,
                             is_selected: false,
                             is_running: false,
                             is_editing: false,
                             draft_title: String::new(),
-                        },
-                    );
+                        });
+                        self.sessions.sort_by_key(session_recency);
+                    }
                     self.sync_workspace_chats(cx);
                     self.persist_tiles();
                     self.save_state();
@@ -2255,19 +2282,20 @@ impl Store {
                     }
                     self.tile_by_session.insert(info.id.clone(), key.clone());
                     self.open_tiles.push(tile);
-                    self.sessions.insert(
-                        0,
-                        SessionItem {
+                    if self.selected_workspace.as_deref() == Some(ws_key.as_str()) {
+                        self.sessions.push(SessionItem {
                             id: info.id.clone(),
                             title: info.title.clone(),
                             updated_ms: info.updated_ms,
+                            created_ms: info.created_ms,
                             is_pinned: false,
                             is_selected: false,
                             is_running: false,
                             is_editing: false,
                             draft_title: String::new(),
-                        },
-                    );
+                        });
+                        self.sessions.sort_by_key(session_recency);
+                    }
                     self.show_restore_prompt = false; // a tile is about to be on screen
                     self.sync_workspace_chats(cx);
                     self.persist_tiles();
@@ -2289,6 +2317,7 @@ impl Store {
                     if let Some(item) = self.sessions.iter_mut().find(|s| s.id == session_id) {
                         item.title = final_title;
                         item.updated_ms = info.updated_ms;
+                        item.created_ms = info.created_ms;
                     }
                     self.sort_sessions();
                     self.sync_workspace_chats(cx);
@@ -3042,6 +3071,7 @@ impl Store {
                     id: s.id.clone(),
                     title: s.title.clone(),
                     updated_ms: s.updated_ms,
+                    created_ms: s.created_ms,
                     is_pinned: pins.contains_key(&s.id),
                     is_selected: false,
                     is_running: self.running_by_session.contains(&s.id),
@@ -3049,7 +3079,7 @@ impl Store {
                     draft_title: String::new(),
                 })
                 .collect();
-            chats.sort_by_key(|s| std::cmp::Reverse((s.is_pinned, s.updated_ms)));
+            chats.sort_by_key(session_recency);
             if let Some(ws) = self.workspace_by_path_mut(ws_key) {
                 ws.chats = chats;
             }
@@ -3063,7 +3093,7 @@ impl Store {
             .filter(|s| state.sessions.contains(&s.id))
             .collect();
         mine.sort_by_key(|s| {
-            std::cmp::Reverse((pins.contains_key(&s.id), s.updated_ms))
+            std::cmp::Reverse((pins.contains_key(&s.id), s.updated_ms, s.created_ms))
         });
         let alive: HashSet<String> = mine.iter().map(|s| s.id.clone()).collect();
         // drop chats that no longer exist on the server
@@ -3108,6 +3138,7 @@ impl Store {
                 id: s.id.clone(),
                 title: s.title.clone(),
                 updated_ms: s.updated_ms,
+                created_ms: s.created_ms,
                 is_pinned: self.ui.pins.contains_key(&s.id),
                 is_selected: false,
                 is_running: self.running_by_session.contains(&s.id),
@@ -3133,9 +3164,7 @@ impl Store {
     }
 
     pub fn sort_sessions(&mut self) {
-        self.sessions.sort_by_key(|s| {
-            std::cmp::Reverse((s.is_pinned, s.updated_ms))
-        });
+        self.sessions.sort_by_key(session_recency);
     }
 
     fn sync_workspace_chats(&mut self, cx: &mut Context<Self>) {
@@ -3422,12 +3451,40 @@ impl Store {
         } else if let Some(index) = existing_index {
             self.running_agents.remove(index);
         }
+        if !running {
+            self.collapse_idle_workspace(session_id);
+        }
         self.update_sidebar_running();
         self.refresh_tile_agents();
     }
 
+    /// A stopped session folds its workspace's sidebar section back up — the
+    /// closed folder icon follows the collapsed state — but only once nothing
+    /// else in that workspace is still running.
+    fn collapse_idle_workspace(&mut self, session_id: &str) {
+        let Some(path) = self.workspace_by_session.get(session_id).cloned() else { return };
+        let still_running = self
+            .workspace_by_session
+            .iter()
+            .any(|(sid, ws_path)| *ws_path == path && self.running_by_session.contains(sid));
+        if still_running {
+            return;
+        }
+        if let Some(ws) = self.workspaces.iter_mut().find(|w| w.folder_path() == path) {
+            if ws.is_expanded() {
+                ws.set_expanded(false);
+            }
+        }
+    }
+
     fn update_sidebar_running(&mut self) {
         let running: HashSet<String> = self.running_by_session.clone();
+        // both mirrors must move together: sync_workspace_chats copies
+        // self.sessions over ws.chats (e.g. on the mid-turn auto-rename), so a
+        // stale flag there would kill the spinner while the chat still runs
+        for chat in &mut self.sessions {
+            chat.is_running = running.contains(&chat.id);
+        }
         for ws in &mut self.workspaces {
             for chat in &mut ws.chats {
                 chat.is_running = running.contains(&chat.id);

@@ -33,6 +33,7 @@ pub struct SessionInfo {
     pub id: String,
     pub title: String,
     pub updated_ms: i64,
+    pub created_ms: i64,
     pub parent_id: Option<String>,
 }
 
@@ -584,6 +585,7 @@ fn read_session(s: &Value) -> SessionInfo {
         id: s.get("id").and_then(Value::as_str).unwrap_or("").into(),
         title: s.get("title").and_then(Value::as_str).unwrap_or("").into(),
         updated_ms: s.pointer("/time/updated").and_then(Value::as_i64).unwrap_or(0),
+        created_ms: s.pointer("/time/created").and_then(Value::as_i64).unwrap_or(0),
         parent_id: s.get("parentID").and_then(Value::as_str).map(String::from),
     }
 }

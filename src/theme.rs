@@ -147,6 +147,7 @@ pub const WARN_BG: Rgba = c(0x3A2D1AFF);
 pub const ADD: Rgba = c(0x56C272FF);
 pub const DEL: Rgba = c(0xF47067FF);
 pub const WORKING: Rgba = c(0x4AC265FF); // pulse dot + sidebar spinner stay green
+pub const RUNNING: Rgba = c(0x56D364FF); // sidebar running indicators: brighter than WORKING
 
 // ---- code ----------------------------------------------------------------
 

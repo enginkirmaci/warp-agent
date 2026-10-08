@@ -673,9 +673,11 @@ impl WarpWindow {
                 menu_store.update(cx, |_, _| {});
             })
             .child(glyph)
+            // no flex_1: the row packs left so the count hugs the name; a long
+            // name shrinks (min_w_0) and truncates instead of pushing the
+            // count to the row's far edge
             .child(
                 div()
-                    .flex_1()
                     .min_w_0()
                     .ml_1p5()
                     .text_size(px(fonts.font_body))
@@ -683,19 +685,20 @@ impl WarpWindow {
                     .truncate()
                     .child(SharedString::from(ws.name.clone())),
             )
-            // chat count in parentheses right after the name, before the
-            // flex_1 spacer takes the row's free width
             .when(ws.has_chats(), |d| {
                 d.child(
                     div()
                         .flex_shrink_0()
+                        .ml_1p5()
                         .text_size(px(fonts.font_small))
                         .text_color(theme::TEXT_FAINT)
                         .child(SharedString::from(format!("({})", ws.chats.len()))),
                 )
             })
             // running dot pinned to the right edge; hovering the row fades it
-            // out while the kebab/new-chat buttons fade in at the same spot
+            // out while the kebab/new-chat buttons fade in at the same spot.
+            // Lit by RUNNING sessions in this workspace — server-up alone
+            // must not read as "work in progress"
             .child(
                 div()
                     .absolute()
@@ -706,8 +709,8 @@ impl WarpWindow {
                     .items_center()
                     .gap_1p5()
                     .group_hover("wsrow", |s| s.opacity(0.))
-                    .when(ws.is_running, |d| {
-                        d.child(div().size(px(6.)).rounded_full().bg(theme::WORKING))
+                    .when(ws.chats.iter().any(|c| c.is_running), |d| {
+                        d.child(div().size(px(6.)).rounded_full().bg(theme::RUNNING))
                     }),
             )
             .child(
@@ -789,7 +792,7 @@ impl WarpWindow {
                     crate::ui::bits::Pulse::icon(
                         "icons/spinner.svg",
                         px(fonts.icon_small),
-                        theme::WORKING,
+                        theme::RUNNING,
                         std::time::Duration::from_millis(1200),
                         0.25,
                     )

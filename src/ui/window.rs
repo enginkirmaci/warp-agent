@@ -142,7 +142,9 @@ impl WarpWindow {
 fn execute_menu_action(store: &Entity<Store>, action: &SideMenuAction, cx: &mut App) {
     store.update(cx, |s, cx| match action {
         SideMenuAction::OpenFolder(path) => {
-            let _ = std::process::Command::new("xdg-open").arg(path).spawn();
+            if let Err(err) = crate::services::open_folder(path) {
+                tracing::warn!("open folder failed: {err}");
+            }
         }
         SideMenuAction::OpenInOpenCode(path) => {
             let executable = s.settings.open_code_executable.clone();

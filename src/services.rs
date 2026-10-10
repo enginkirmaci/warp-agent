@@ -5,8 +5,50 @@ use crate::store::Store;
 use gpui::{App, Entity};
 use async_channel::bounded;
 
+/// Opens a folder in the platform file manager: explorer on Windows, xdg-open elsewhere.
+pub fn open_folder(path: &str) -> Result<(), String> {
+    #[cfg(windows)]
+    let mut command = std::process::Command::new("explorer");
+    #[cfg(not(windows))]
+    let mut command = std::process::Command::new("xdg-open");
+    command
+        .arg(path)
+        .spawn()
+        .map(|_| ())
+        .map_err(|err| err.to_string())
+}
+
 /// Spawns a terminal emulator running the opencode TUI in a folder.
-/// Terminal detection probes PATH for the usual suspects and picks the first hit.
+#[cfg(windows)]
+pub fn launch_in_terminal(folder: &str, executable: &str) -> Result<(), String> {
+    // Windows Terminal first: proper tab rooted in the folder; the TUI's exit
+    // closes it. The store-alias spawn can still fail (stub alias), so fall
+    // through to a plain console on any error.
+    if resolve_on_path("wt").is_some() {
+        let mut command = std::process::Command::new("wt");
+        command.args(["-d", folder, "cmd", "/C", executable]);
+        match command.spawn() {
+            Ok(_) => {
+                tracing::info!("launched Windows Terminal running {executable} in {folder}");
+                return Ok(());
+            }
+            Err(err) => tracing::warn!("Windows Terminal spawn failed ({err}); falling back to cmd"),
+        }
+    }
+    // Plain console rooted in the folder; /K keeps it open if the exe exits
+    // early so the error stays readable.
+    let mut command = std::process::Command::new("cmd");
+    command.args(["/K", executable]);
+    if std::path::Path::new(folder).exists() {
+        command.current_dir(folder);
+    }
+    command.spawn().map(|_| ()).map_err(|err| err.to_string())?;
+    tracing::info!("launched cmd console running {executable} in {folder}");
+    Ok(())
+}
+
+/// Unix terminal detection probes PATH for the usual suspects and picks the first hit.
+#[cfg(not(windows))]
 pub fn launch_in_terminal(folder: &str, executable: &str) -> Result<(), String> {
     type ArgsFn = fn(&str, &str) -> Vec<String>;
     let terminals: &[(&str, ArgsFn)] = &[

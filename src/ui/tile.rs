@@ -90,6 +90,18 @@ pub struct TileView {
     /// click positions into tile-local menu coordinates
     origin: std::rc::Rc<std::cell::Cell<(f32, f32, f32, f32)>>,
     composer: Entity<TextareaState>,
+    /// the same textarea state wrapped in a leaf view: a keystroke notifies
+    /// TextareaState, and any view that read the entity during its render
+    /// re-renders — embedding the kit element straight in TileView made every
+    /// keypress re-render the whole transcript. TileView keeps the state
+    /// handle for event-time reads (send, history, suggest).
+    composer_field: Entity<ComposerField>,
+    /// focus flag mirrored from InputEvent::Focus/Blur — reading the live
+    /// focus handle in render would re-create the per-keystroke dependency
+    composer_focused: bool,
+    /// field text as of the last Change event or programmatic set_value
+    /// (set_value emits no Change) — replaces render-time value reads
+    last_field_text: String,
     question_inputs: HashMap<String, Entity<InputState>>,
     /// question input keys touched by the current render pass — the prune
     /// after the transcript loop drops inputs of resolved/removed questions
@@ -259,6 +271,7 @@ impl TileView {
             .tile_by_key(&key)
             .map(|t| t.input.clone())
             .unwrap_or_default();
+        let initial_text = initial.clone();
         let composer = cx.new(|cx| {
             let mut state = TextareaState::new(window, cx)
                 .placeholder("Ask opencode…")
@@ -269,12 +282,18 @@ impl TileView {
             }
             state
         });
+        let composer_field = cx.new(|_| ComposerField {
+            state: composer.clone(),
+            store: store.clone(),
+            key: key.clone(),
+        });
 
         let store_handle = store.clone();
         let key_for_change = key.clone();
-        cx.subscribe(&composer, move |_, field, event: &InputEvent, cx| {
+        cx.subscribe(&composer, move |this, field, event: &InputEvent, cx| {
             if matches!(event, InputEvent::Change) {
                 let text = field.read(cx).value().to_string();
+                this.last_field_text = text.clone();
                 let key = key_for_change.clone();
                 store_handle.update(cx, move |s, _| {
                     if let Some(tile) = s.tile_by_key_mut(&key) {
@@ -284,6 +303,21 @@ impl TileView {
                         }
                     }
                 });
+            }
+        })
+        .detach();
+
+        // focus transitions are rare; the mirrored flag keeps render from
+        // reading the live focus handle (a TextareaState dependency)
+        cx.subscribe(&composer, move |this, _, event: &InputEvent, cx| {
+            let focused = match event {
+                InputEvent::Focus => true,
+                InputEvent::Blur => false,
+                _ => return,
+            };
+            if this.composer_focused != focused {
+                this.composer_focused = focused;
+                cx.notify();
             }
         })
         .detach();
@@ -331,6 +365,9 @@ impl TileView {
             menu: None,
             origin: std::rc::Rc::new(std::cell::Cell::new((0., 0., 0., 0.))),
             composer,
+            composer_field,
+            composer_focused: false,
+            last_field_text: initial_text,
             question_inputs: HashMap::new(),
             question_keys_seen: HashSet::new(),
             last_composer_text: String::new(),
@@ -433,9 +470,9 @@ impl TileView {
             field.set_value(text.as_str(), window, cx);
             field.set_cursor_position(end, window, cx);
         });
+        self.last_field_text = text.clone();
         self.last_composer_text = text;
     }
-
     /// Accepts the highlighted suggestion row. Commands expand into their
     /// server template (`$ARGUMENTS` takes the typed args, or the args append)
     /// and land in the composer for a final look before sending; file mentions
@@ -2478,6 +2515,8 @@ impl TileView {
                                 });
                                 // set_value emits no Change, so the store copy above stands
                                 composer.update(cx, |field, cx| field.set_value(text.as_ref(), window, cx));
+                                // keep the tile's field-text mirror in step
+                                tile_entity.update(cx, |tv, _| tv.last_field_text = text.to_string());
                             }
                             ContextMenu::Reprompt(text) => {
                                 let key = menu_owner_key.clone();
@@ -2532,13 +2571,12 @@ impl TileView {
 
     /// The composer frame: attachment strip, textarea, bottom row, and the
     /// slash/fill popovers anchored above it.
-    fn render_composer_frame(&mut self, snap: &TileSnap, window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
+    fn render_composer_frame(&mut self, snap: &TileSnap, _window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
         let fonts = snap.fonts;
         let accent = snap.accent;
-        let composer = self.composer.clone();
         let attachments_el = self.render_attachments(snap);
         let pills = self.render_pills(snap, cx);
-        let composer_focus_is = self.composer.read(cx).focus_handle(cx).is_focused(window);
+        let composer_focus_is = self.composer_focused;
 
         let bottom_row = div()
             .flex()
@@ -2636,29 +2674,9 @@ impl TileView {
             })
             .child(attachments_el)
             .child(
-                div().flex_1().min_h_0().child(
-                    // chrome-less inside: the composer frame (border/bg)
-                    // is ours, the textarea only edits.
-                    // image paste → attachment instead of text insertion
-                    Textarea::new(&composer).appearance(false).bordered(false).on_paste({
-                        let store = self.store.clone();
-                        let key = self.key.clone();
-                        move |item: &gpui::ClipboardItem, _, cx| {
-                            let image = item.entries().iter().find_map(|entry| match entry {
-                                gpui::ClipboardEntry::Image(image) => Some(image),
-                                _ => None,
-                            });
-                            if let Some(image) = image {
-                                let png = image.bytes.clone();
-                                let key = key.clone();
-                                store.update(cx, move |s, _| s.attach_image(&key, png));
-                                true
-                            } else {
-                                false
-                            }
-                        }
-                    }),
-                ),
+                // the leaf view owns the kit element: keystrokes re-render it
+                // alone, never this tile (see ComposerField)
+                div().flex_1().min_h_0().child(self.composer_field.clone()),
             )
             .child(bottom_row)
             .child(slash_el)
@@ -2823,11 +2841,14 @@ impl Render for TileView {
         let fonts = snap.fonts;
         let accent = snap.accent;
 
-        // external input changes (history, edit-queued) sync into the field
+        // external input changes (history, edit-queued) sync into the field;
+        // the field's own text arrives via Change events (set_value emits
+        // none), so the mirrored copy replaces a render-time entity read
         let composer_text_changed = snap.input != self.last_composer_text;
-        if snap.input != self.last_composer_text && self.composer.read(cx).value().as_ref() != snap.input {
+        if composer_text_changed && self.last_field_text != snap.input {
             let text = snap.input.clone();
             self.composer.update(cx, |field, cx| field.set_value(text, window, cx));
+            self.last_field_text = snap.input.clone();
         }
         self.last_composer_text = snap.input.clone();
 
@@ -2844,7 +2865,7 @@ impl Render for TileView {
         } else {
             None
         };
-        let composer_focused = self.composer.read(cx).focus_handle(cx).is_focused(window);
+        let composer_focused = self.composer_focused;
         let menu_wanted = match want {
             Some(mode) if composer_focused && (!self.suggest_dismissed || composer_text_changed) => Some(mode),
             _ => None,
@@ -3145,5 +3166,44 @@ impl Render for TileView {
             .child(menu_el);
 
         root.into_any_element()
+    }
+}
+
+/// Leaf view around the kit Textarea. Every keystroke notifies
+/// `TextareaState`, and GPUI re-renders every view that read that entity
+/// during its own render — embedding the element straight in TileView made
+/// each keypress re-render and re-layout the whole transcript. This view is
+/// the state's only renderer, so typing repaints one input field.
+struct ComposerField {
+    state: Entity<TextareaState>,
+    store: Entity<Store>,
+    key: String,
+}
+
+impl Render for ComposerField {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        let store = self.store.clone();
+        let key = self.key.clone();
+        // chrome-less inside: the composer frame (border/bg) is the tile's,
+        // the textarea only edits.
+        // image paste → attachment instead of text insertion
+        Textarea::new(&self.state)
+            .appearance(false)
+            .bordered(false)
+            .on_paste(move |item: &gpui::ClipboardItem, _, cx| {
+                let image = item.entries().iter().find_map(|entry| match entry {
+                    gpui::ClipboardEntry::Image(image) => Some(image),
+                    _ => None,
+                });
+                if let Some(image) = image {
+                    let png = image.bytes.clone();
+                    let key = key.clone();
+                    store.update(cx, move |s, _| s.attach_image(&key, png));
+                    true
+                } else {
+                    false
+                }
+            })
+            .into_any_element()
     }
 }

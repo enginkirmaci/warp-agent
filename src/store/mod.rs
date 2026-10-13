@@ -2081,13 +2081,8 @@ impl Store {
                     self.net.send(NetCommand::Request { ws_key: ws_key.clone(), request: ApiRequest::ListAgents });
                     // the / suggestion menu serves this workspace's commands
                     self.net.send(NetCommand::Request { ws_key: ws_key.clone(), request: ApiRequest::ListCommands });
-                    if is_selected {
-                        let wanted = self
-                            .selected_workspace()
-                            .map(|w| w.state.open_sessions.clone())
-                            .unwrap_or_default();
-                        self.restore_open_tiles(&ws_key, wanted, cx);
-                    }
+                    // a plain connect never reopens saved chats — only the
+                    // banner's Restore button and explicit chat clicks do
                     // restores and opens that were waiting on this server start
                     let pending_restores: Vec<(String, Vec<String>)> =
                         self.pending_restores.extract_if(.., |(path, _)| path == &ws_key).collect();
@@ -3063,6 +3058,25 @@ impl Store {
                 .find(|w| w.folder_path() == ws_key)
                 .map(|w| w.state.sessions.iter().cloned().collect())
                 .unwrap_or_default();
+            // the selected branch fills the title map below; this branch must
+            // too, or a chat clicked out of this section opens as "agent ses_xx"
+            for s in sessions.iter().filter(|s| known.contains(&s.id)) {
+                self.title_by_session.insert(s.id.clone(), s.title.clone());
+                if let Some(tile) = self.tile_for_session_mut(&s.id) {
+                    tile.title = s.title.clone();
+                }
+            }
+            let fresh_labels: Vec<(String, String)> = self
+                .running_agents
+                .iter()
+                .filter(|r| known.contains(&r.session_id))
+                .map(|r| (r.session_id.clone(), self.title_for(&r.session_id)))
+                .collect();
+            for running in &mut self.running_agents {
+                if let Some((_, title)) = fresh_labels.iter().find(|(sid, _)| sid == &running.session_id) {
+                    running.title = title.clone();
+                }
+            }
             let pins = &self.ui.pins;
             let mut chats: Vec<SessionItem> = sessions
                 .iter()

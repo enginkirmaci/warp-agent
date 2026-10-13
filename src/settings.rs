@@ -146,7 +146,8 @@ pub struct WorkspaceState {
     pub sessions: Vec<String>,
     #[serde(rename = "ActiveSession", default)]
     pub active_session: Option<String>,
-    /// Chats currently tiled in the grid, in reading order; restored when the workspace opens.
+    /// Chats currently tiled in the grid, in reading order; only the restore
+    /// banner's Restore button reopens them — connecting never does.
     #[serde(rename = "OpenSessions", default)]
     pub open_sessions: Vec<String>,
     #[serde(rename = "Collapsed", default)]

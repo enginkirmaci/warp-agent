@@ -422,6 +422,47 @@ impl ChatItem {
             ChatItem::SystemNote { key, .. } => format!("n{key}"),
         }
     }
+
+    /// Allocation-free `id()` comparison: item lookups run per SSE part
+    /// event, so building a String per candidate item would churn the
+    /// allocator at token rate on long transcripts.
+    pub fn matches_id(&self, item_id: &str) -> bool {
+        match self {
+            ChatItem::UserMessage { key, .. } => match_usize(item_id, 'u', *key),
+            ChatItem::AssistantText { key, .. } => match_str(item_id, 'a', key),
+            ChatItem::Reasoning { key, .. } => match_str(item_id, 'r', key),
+            ChatItem::Tool(t) => match_str(item_id, 't', &t.part_id),
+            ChatItem::Image { key, .. } => match_str(item_id, 'i', key),
+            ChatItem::Permission(p) => match_str(item_id, 'p', &p.id),
+            ChatItem::Question(q) => match_str(item_id, 'q', &q.id),
+            ChatItem::SystemNote { key, .. } => match_usize(item_id, 'n', *key),
+        }
+    }
+
+    /// Whether this item is keyed by the given SSE part id (any flavour the
+    /// stream creates items for); lets `on_part_removed` scan once instead
+    /// of once per id prefix.
+    pub fn matches_part_id(&self, part_id: &str) -> bool {
+        match self {
+            ChatItem::AssistantText { key, .. }
+            | ChatItem::Reasoning { key, .. }
+            | ChatItem::Image { key, .. } => key == part_id,
+            ChatItem::Tool(t) => t.part_id == part_id,
+            _ => false,
+        }
+    }
+}
+
+fn match_str(item_id: &str, prefix: char, key: &str) -> bool {
+    item_id.strip_prefix(prefix) == Some(key)
+}
+
+fn match_usize(item_id: &str, prefix: char, key: usize) -> bool {
+    // ids only ever come from format!("{prefix}{key}"), so a numeric
+    // round-trip cannot hit a false positive on server-generated keys
+    item_id
+        .strip_prefix(prefix)
+        .is_some_and(|rest| rest.parse::<usize>() == Ok(key))
 }
 
 /// A message parked while a turn is still running; sent when the session goes idle.
@@ -677,7 +718,7 @@ impl ChatTile {
     }
 
     fn find_item_index(&self, item_id: &str) -> Option<usize> {
-        self.items.iter().position(|i| i.id() == item_id)
+        self.items.iter().position(|i| i.matches_id(item_id))
     }
 
     // ---- SSE transcript building ----
@@ -691,9 +732,15 @@ impl ChatTile {
             return;
         };
         let id = id.to_string();
-        self.role_by_message.insert(id.clone(), role.to_string());
+        // the stream re-sends the same info snapshot constantly: guard every
+        // per-event insert so an unchanged snapshot costs no allocation
+        if self.role_by_message.get(&id).map(String::as_str) != Some(role) {
+            self.role_by_message.insert(id.clone(), role.to_string());
+        }
         if let Some(ms) = info.pointer("/time/created").and_then(serde_json::Value::as_i64) {
-            self.created_by_message.insert(id.clone(), ms);
+            if self.created_by_message.get(&id).copied() != Some(ms) {
+                self.created_by_message.insert(id.clone(), ms);
+            }
         }
         if role != "assistant" {
             return;
@@ -701,8 +748,11 @@ impl ChatTile {
         let provider = info.get("providerID").and_then(serde_json::Value::as_str).unwrap_or("");
         let model = info.get("modelID").and_then(serde_json::Value::as_str).unwrap_or("");
         if !provider.is_empty() && !model.is_empty() {
-            self.last_used_model = Some(format!("{provider}/{model}"));
-            self.update_context_limit(store);
+            let next = format!("{provider}/{model}");
+            if self.last_used_model.as_deref() != Some(next.as_str()) {
+                self.last_used_model = Some(next);
+                self.update_context_limit(store);
+            }
         }
         if let Some(meta) = build_meta(info) {
             // the stream re-sends the same info snapshot constantly: skip the
@@ -718,11 +768,11 @@ impl ChatTile {
                         }
                     }
                 }
+                self.meta_by_message.insert(id.clone(), meta);
             }
-            self.meta_by_message.insert(id.clone(), meta);
         }
         let total = read_token_total(info);
-        if total > 0 {
+        if total > 0 && self.tokens_by_message.get(&id).copied() != Some(total) {
             if self.tokens_by_message.insert(id.clone(), total).is_none() {
                 self.token_order.push(id);
             }
@@ -733,10 +783,11 @@ impl ChatTile {
     /// Item keys of assistant text parts belonging to a message (for meta refresh).
     fn meta_items(&self, message_id: &str) -> Option<Vec<String>> {
         // rebuilt from key_by_part: parts of this message were recorded when their text item was added
+        let prefix = format!("{message_id}:");
         Some(
             self.key_by_part
                 .iter()
-                .filter(|(part_id, _)| part_id.starts_with(&format!("{message_id}:")))
+                .filter(|(part_id, _)| part_id.starts_with(&prefix))
                 .map(|(_, item_id)| item_id.clone())
                 .collect(),
         )
@@ -761,20 +812,25 @@ impl ChatTile {
         match part_type {
             "text" => {
                 let item_id = format!("a{id}");
-                if self.find_item_index(&item_id).is_none() {
-                    let item = ChatItem::AssistantText {
-                        key: id.to_string(),
-                        text: String::new(),
-                        meta_label: self.meta_for(message_id.as_ref()),
-                        created_ms: self.created_at_for(message_id.as_ref()),
-                    };
-                    self.items.push(Arc::new(item));
-                    if let Some(mid) = &message_id {
-                        self.key_by_part.insert(format!("{mid}:{id}"), item_id.clone());
+                // one scan answers both "exists?" and "where?": the push path
+                // reuses the index instead of scanning the list a second time
+                let index = match self.find_item_index(&item_id) {
+                    Some(index) => index,
+                    None => {
+                        let item = ChatItem::AssistantText {
+                            key: id.to_string(),
+                            text: String::new(),
+                            meta_label: self.meta_for(message_id.as_ref()),
+                            created_ms: self.created_at_for(message_id.as_ref()),
+                        };
+                        self.items.push(Arc::new(item));
+                        if let Some(mid) = &message_id {
+                            self.key_by_part.insert(format!("{mid}:{id}"), item_id);
+                        }
+                        self.items.len() - 1
                     }
-                }
+                };
                 let text = part.get("text").and_then(serde_json::Value::as_str).unwrap_or("");
-                let Some(index) = self.find_item_index(&item_id) else { return false };
                 // compare through the Arc first: make_mut on an item the render
                 // snapshot still holds deep-copies the whole text just to
                 // conclude "unchanged"
@@ -793,14 +849,17 @@ impl ChatTile {
             }
             "reasoning" => {
                 let item_id = format!("r{id}");
-                if self.find_item_index(&item_id).is_none() {
-                    self.items.push(Arc::new(ChatItem::Reasoning {
-                        key: id.to_string(),
-                        text: String::new(),
-                    }));
-                }
+                let index = match self.find_item_index(&item_id) {
+                    Some(index) => index,
+                    None => {
+                        self.items.push(Arc::new(ChatItem::Reasoning {
+                            key: id.to_string(),
+                            text: String::new(),
+                        }));
+                        self.items.len() - 1
+                    }
+                };
                 let text = part.get("text").and_then(serde_json::Value::as_str).unwrap_or("");
-                let Some(index) = self.find_item_index(&item_id) else { return false };
                 if let ChatItem::Reasoning { text: t, .. } = self.items[index].as_ref() {
                     if t == text {
                         return false;
@@ -816,24 +875,27 @@ impl ChatTile {
             }
             "tool" => {
                 let item_id = format!("t{id}");
-                if self.find_item_index(&item_id).is_none() {
-                    let tool_name = part.get("tool").and_then(serde_json::Value::as_str).unwrap_or("tool");
-                    self.items.push(Arc::new(ChatItem::Tool(ToolItem {
-                        part_id: id.to_string(),
-                        tool: tool_name.into(),
-                        status: "pending".into(),
-                        title: tool_name.into(),
-                        file_path: String::new(),
-                        diff: None,
-                        numstat: None,
-                        is_error: false,
-                        error_preview: String::new(),
-                        details: ToolDetails::default(),
-                        state_sig: None,
-                    })));
-                }
+                let index = match self.find_item_index(&item_id) {
+                    Some(index) => index,
+                    None => {
+                        let tool_name = part.get("tool").and_then(serde_json::Value::as_str).unwrap_or("tool");
+                        self.items.push(Arc::new(ChatItem::Tool(ToolItem {
+                            part_id: id.to_string(),
+                            tool: tool_name.into(),
+                            status: "pending".into(),
+                            title: tool_name.into(),
+                            file_path: String::new(),
+                            diff: None,
+                            numstat: None,
+                            is_error: false,
+                            error_preview: String::new(),
+                            details: ToolDetails::default(),
+                            state_sig: None,
+                        })));
+                        self.items.len() - 1
+                    }
+                };
                 let Some(state) = part.get("state") else { return true };
-                let Some(index) = self.find_item_index(&item_id) else { return false };
                 let sig = {
                     use std::hash::{Hash, Hasher};
                     let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -894,12 +956,8 @@ impl ChatTile {
             })
             .map(String::from);
         let Some(id) = id else { return };
-        for prefix in ["a", "r", "t", "i"] {
-            let item_id = format!("{prefix}{id}");
-            if let Some(index) = self.find_item_index(&item_id) {
-                self.items.remove(index);
-                return;
-            }
+        if let Some(index) = self.items.iter().position(|i| i.matches_part_id(id.as_str())) {
+            self.items.remove(index);
         }
     }
 
@@ -1502,6 +1560,9 @@ pub struct Store {
     stream_repaint_last: Option<Instant>,
     /// a deferred stream repaint is already scheduled
     stream_repaint_scheduled: bool,
+    /// reused checkout dummy for `with_tile` — hot stream events would
+    /// otherwise build a throwaway ChatTile each
+    tile_placeholder: Option<ChatTile>,
 
     // ---- composer suggestions (/commands, @files) ----
     /// The workspace's server commands + skills, keyed by workspace folder
@@ -1590,6 +1651,7 @@ impl Store {
             todos_spring: None,
             stream_repaint_last: None,
             stream_repaint_scheduled: false,
+            tile_placeholder: None,
             commands: HashMap::new(),
             file_results: None,
         };
@@ -2470,10 +2532,13 @@ impl Store {
                         .iter()
                         .map(|t| (t.key.clone(), t.selected_model.clone(), t.selected_variant.clone()))
                         .collect();
+                    // merge-dedup through a set: the model list runs to
+                    // hundreds of entries and a Vec scan per model is O(n²)
+                    let mut known: HashSet<String> = self.models.iter().cloned().collect();
                     for m in models {
                         self.variants_by_model.insert(m.key.clone(), m.variants);
                         self.context_limit_by_model.insert(m.key.clone(), m.context_limit);
-                        if !self.models.contains(&m.key) {
+                        if known.insert(m.key.clone()) {
                             self.models.push(m.key);
                         }
                     }
@@ -3542,33 +3607,52 @@ impl Store {
         }
     }
 
-    fn track_session_info(&mut self, session_id: Option<&str>, parent_id: Option<&str>, agent: Option<&str>) {
-        let Some(session_id) = session_id else { return };
+    /// Returns whether running-agent-visible state changed: `session.updated`
+    /// fires at token rate for every (subagent) session, and an unchanged
+    /// snapshot must not rebuild the tiles' agent lists.
+    fn track_session_info(&mut self, session_id: Option<&str>, parent_id: Option<&str>, agent: Option<&str>) -> bool {
+        let Some(session_id) = session_id else { return false };
         match parent_id {
             None if parent_id.is_none() || parent_id == Some(session_id) => {
                 if self.subagent_by_session.remove(session_id).is_some() {
                     self.set_subagent_running(session_id, false);
+                    return true;
                 }
+                false
             }
             Some(parent_id) if parent_id == session_id => {
                 if self.subagent_by_session.remove(session_id).is_some() {
                     self.set_subagent_running(session_id, false);
+                    return true;
                 }
+                false
             }
             Some(parent_id) => {
+                let agent_label = agent
+                    .filter(|a| !a.trim().is_empty())
+                    .map(String::from)
+                    .unwrap_or_else(|| "subagent".into());
                 let info = SubagentInfo {
                     parent_session_id: parent_id.to_string(),
-                    agent: agent.filter(|a| !a.trim().is_empty()).map(String::from).unwrap_or_else(|| "subagent".into()),
+                    agent: agent_label.clone(),
                 };
-                let fresh_label = format!("{} → {}", info.agent, self.title_for(parent_id));
-                self.subagent_by_session.insert(session_id.to_string(), info);
+                let prior = self.subagent_by_session.insert(session_id.to_string(), info);
+                let info_changed = prior.is_none_or(|p| p.parent_session_id != parent_id || p.agent != agent_label);
+                // a running row's label follows the parent's title; compute it
+                // only for sessions that actually have a row
+                let mut label_changed = false;
                 if self.running_subagents.contains(session_id) {
+                    let fresh_label = format!("{} → {}", agent_label, self.title_for(parent_id));
                     if let Some(row) = self.running_agents.iter_mut().find(|r| r.session_id == session_id) {
-                        row.title = fresh_label;
+                        if row.title != fresh_label {
+                            row.title = fresh_label;
+                            label_changed = true;
+                        }
                     }
                 }
+                info_changed || label_changed
             }
-            None => {}
+            None => false,
         }
     }
 
@@ -3707,8 +3791,9 @@ impl Store {
                     let tracked_id = info.get("id").and_then(serde_json::Value::as_str);
                     let parent_id = info.get("parentID").and_then(serde_json::Value::as_str);
                     let agent = info.get("agent").and_then(serde_json::Value::as_str);
-                    self.track_session_info(tracked_id, parent_id, agent);
-                    self.refresh_tile_agents();
+                    if self.track_session_info(tracked_id, parent_id, agent) {
+                        self.refresh_tile_agents();
+                    }
                 }
                 self.notify_stream(cx);
                 return;
@@ -4001,13 +4086,20 @@ impl Store {
                 self.respond_permission(&id, "always", true, cx);
             }
         }
-        // refresh the visible countdown labels
+        // refresh the visible countdown labels — make_mut only the pending
+        // permission items themselves: the snapshot/render side keeps Arc
+        // clones alive, so an unguarded make_mut would deep-copy every item
+        // of every tile once per second
         for tile in &mut self.open_tiles {
             for item in &mut tile.items {
+                let Some(left) = (match item.as_ref() {
+                    ChatItem::Permission(p) => self.countdowns.get(&p.id).copied(),
+                    _ => None,
+                }) else {
+                    continue;
+                };
                 if let ChatItem::Permission(p) = Arc::make_mut(item) {
-                    if let Some(left) = self.countdowns.get(&p.id) {
-                        p.auto_countdown = Some(*left);
-                    }
+                    p.auto_countdown = Some(left);
                 }
             }
         }
@@ -4337,13 +4429,18 @@ impl Store {
 
     pub fn set_question_custom(&mut self, tile_key: &str, question_id: &str, qi: usize, text: String, cx: &mut Context<Self>) {
         let Some(tile) = self.tile_by_key_mut(tile_key) else { return };
-        for item in &mut tile.items {
-            if let ChatItem::Question(q) = Arc::make_mut(item) {
-                if q.id == question_id {
-                    if let Some(entry) = q.questions.get_mut(qi) {
-                        entry.custom_text = text.clone();
-                    }
-                }
+        // make_mut only the one question item: a blind per-item make_mut
+        // deep-copies the whole transcript on every keystroke
+        let Some(index) = tile
+            .items
+            .iter()
+            .position(|i| matches!(i.as_ref(), ChatItem::Question(q) if q.id == question_id))
+        else {
+            return;
+        };
+        if let ChatItem::Question(q) = Arc::make_mut(&mut tile.items[index]) {
+            if let Some(entry) = q.questions.get_mut(qi) {
+                entry.custom_text = text;
             }
         }
         cx.notify();
@@ -4480,13 +4577,18 @@ impl Store {
     }
 
     /// Checks a tile out of the grid, runs `f` with shared store access, then puts it back.
+    /// The checkout dummy is recycled across calls: message/part events hit
+    /// this at token rate.
     pub fn with_tile<R>(&mut self, key: &str, f: impl FnOnce(&mut ChatTile, &Store, &mut usize) -> R) -> Option<R> {
         let index = self.open_tiles.iter().position(|t| t.key == key)?;
-        let mut tile = std::mem::replace(&mut self.open_tiles[index], Self::placeholder_tile());
+        let mut tile = std::mem::replace(
+            &mut self.open_tiles[index],
+            self.tile_placeholder.take().unwrap_or_else(Self::placeholder_tile),
+        );
         let mut next_key = self.next_key;
         let result = f(&mut tile, self, &mut next_key);
         self.next_key = next_key;
-        self.open_tiles[index] = tile;
+        self.tile_placeholder = Some(std::mem::replace(&mut self.open_tiles[index], tile));
         Some(result)
     }
 }

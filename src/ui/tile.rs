@@ -107,22 +107,10 @@ pub struct TileView {
     /// after the transcript loop drops inputs of resolved/removed questions
     question_keys_seen: HashSet<String>,
     last_composer_text: String,
-    /// composer suggestion menu: open while the text starts with `/` (server
-    /// commands) or holds an active `@token` (file mentions); `suggest_selected`
-    /// indexes the (capped) row list of the active mode
-    suggest_open: bool,
-    suggest_mode: SuggestMode,
-    suggest_selected: usize,
-    /// Escape-closed menu: stays closed until the composer text changes (or
-    /// the field blurs), so it doesn't spring back on the next render
-    suggest_dismissed: bool,
-    /// byte offset of the `@` the file menu hangs from, and the query typed
-    /// after it (the key file results are matched against)
-    at_start: usize,
-    at_query: String,
-    /// the query a /find/file request last went out for, so keystrokes don't
-    /// spam the server with repeats of the same token
-    find_requested: Option<String>,
+    /// composer suggestion menu as its own leaf view: it subscribes to the
+    /// composer state directly, so the filter re-evaluates per keystroke
+    /// (see SuggestMenu below)
+    suggest: Entity<SuggestMenu>,
     flyout_open: bool,
     last_spring_seen: bool,
     /// item id whose copy button is flashing its "copied" state right now
@@ -340,17 +328,51 @@ impl TileView {
         })
         .detach();
 
-        // the suggestion menu lives only while the composer holds focus:
-        // clicking elsewhere (transcript, another tile) closes it like Escape
-        // would, and a later refocus may open it again
-        cx.subscribe(&composer, move |this, _, event: &InputEvent, cx| {
-            if matches!(event, InputEvent::Blur) && this.suggest_open {
-                this.suggest_open = false;
-                this.suggest_dismissed = false;
-                cx.notify();
-            }
-        })
-        .detach();
+        // the suggestion menu is a leaf view subscribed to the composer
+        // state itself: the filter re-evaluates on every keystroke without
+        // repainting this tile (see SuggestMenu)
+        let tile_handle = cx.entity();
+        let suggest = cx.new(|cx| {
+            let menu = SuggestMenu {
+                composer: composer.clone(),
+                store: store.clone(),
+                tile: tile_handle.clone(),
+                tile_key: key.clone(),
+                focused: false,
+                open: false,
+                mode: SuggestMode::Commands,
+                selected: 0,
+                dismissed: false,
+                at_start: 0,
+                at_query: String::new(),
+                find_requested: None,
+                pending_search: None,
+                search_task: None,
+            };
+            cx.subscribe(&composer, move |this: &mut SuggestMenu, field, event: &InputEvent, cx| match event {
+                InputEvent::Change => {
+                    let text = field.read(cx).value().to_string();
+                    this.recompute(&text, true, cx);
+                }
+                InputEvent::Focus => {
+                    this.focused = true;
+                    let text = field.read(cx).value().to_string();
+                    this.recompute(&text, false, cx);
+                }
+                InputEvent::Blur => {
+                    // the menu lives only while the composer holds focus:
+                    // clicking elsewhere closes it like Escape would, and a
+                    // later refocus may open it again
+                    this.focused = false;
+                    this.open = false;
+                    this.dismissed = false;
+                    cx.notify();
+                }
+                _ => {}
+            })
+            .detach();
+            menu
+        });
 
         Self {
             key,
@@ -371,13 +393,7 @@ impl TileView {
             question_inputs: HashMap::new(),
             question_keys_seen: HashSet::new(),
             last_composer_text: String::new(),
-            suggest_open: false,
-            suggest_mode: SuggestMode::Commands,
-            suggest_selected: 0,
-            suggest_dismissed: false,
-            at_start: 0,
-            at_query: String::new(),
-            find_requested: None,
+            suggest,
             flyout_open: false,
             last_spring_seen: false,
             copied_flash: None,
@@ -431,24 +447,8 @@ impl TileView {
     }
 
     // ---- composer suggestions: /commands · @files ----
-
-    /// Server commands filtered by the text after the leading `/`
-    /// (case-insensitive substring on the name; empty prefix lists all).
-    fn command_matches(&self, text: &str, cx: &App) -> Vec<CommandInfo> {
-        let prefix = text.get(1..).unwrap_or("");
-        // the typed part is `/name` — cut at the first space so args don't
-        // narrow the list away
-        let prefix = prefix.split(char::is_whitespace).next().unwrap_or("").to_lowercase();
-        // borrow the list and clone only the matches (tile_commands used to
-        // clone the whole Vec first)
-        self.store
-            .read(cx)
-            .tile_commands(&self.key)
-            .iter()
-            .filter(|c| prefix.is_empty() || c.name_lower.contains(&prefix))
-            .cloned()
-            .collect()
-    }
+    // the menu itself lives in SuggestMenu (leaf view) — only the composer
+    // write-back and the key-action plumbing stay on the tile
 
     /// Writes `text` into the composer AND the store copy (set_value emits no
     /// Change, so the store would keep the old draft), caret parked at the
@@ -474,200 +474,13 @@ impl TileView {
         });
         self.last_field_text = text.clone();
         self.last_composer_text = text;
+        // set_value emits no Change, so the suggest menu's filter would go
+        // stale against the inserted text — recompute it explicitly. The
+        // menu stays closed: acceptance dismisses it and `allow_reopen` is
+        // false (only a real keystroke may reopen a dismissed menu).
+        let text = self.last_field_text.clone();
+        self.suggest.update(cx, |menu, cx| menu.recompute(&text, false, cx));
     }
-    /// Accepts the highlighted suggestion row. Commands expand into their
-    /// server template (`$ARGUMENTS` takes the typed args, or the args append)
-    /// and land in the composer for a final look before sending; file mentions
-    /// replace the `@token` with `@path `.
-    fn accept_suggest(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let text = self.composer.read(cx).value().to_string();
-        let accepted = match self.suggest_mode {
-            SuggestMode::Commands => {
-                let matches = self.command_matches(&text, cx);
-                let Some(cmd) = matches.get(self.suggest_selected).cloned() else {
-                    return;
-                };
-                // whatever follows the typed `/name` rides in as the arguments
-                let args = text
-                    .get(1..)
-                    .and_then(|rest| rest.split_once(char::is_whitespace))
-                    .map(|(_, args)| args.trim())
-                    .unwrap_or("");
-                Some(if cmd.template.contains("$ARGUMENTS") {
-                    cmd.template.replace("$ARGUMENTS", args)
-                } else if args.is_empty() {
-                    cmd.template.clone()
-                } else {
-                    format!("{}\n\n{}", cmd.template.trim_end(), args)
-                })
-            }
-            SuggestMode::Files => {
-                let Some(paths) = self.store.read(cx).file_results_for(&self.key, &self.at_query) else {
-                    return;
-                };
-                let Some(path) = paths.get(self.suggest_selected).cloned() else {
-                    return;
-                };
-                let start = self.at_start.min(text.len());
-                if !text.is_char_boundary(start) {
-                    return;
-                }
-                Some(format!("{}@{} ", &text[..start], path))
-            }
-        };
-        self.suggest_open = false;
-        self.suggest_dismissed = true;
-        if let Some(text) = accepted {
-            self.insert_composer_text(text, window, cx);
-        }
-        cx.notify();
-    }
-
-    /// The suggestion popup, rendered as the composer frame's last child so
-    /// it paints above the field; `bottom(relative(1.))` parks it just above
-    /// the frame's top edge. Commands rows show `/name` + description (with a
-    /// faint skill/command tag); file rows show the doc glyph + path.
-    fn render_suggest_menu(&mut self, input: &str, fonts: theme::FontTokens, accent: gpui::Rgba, cx: &mut Context<Self>) -> gpui::AnyElement {
-        if !self.suggest_open {
-            return div().into_any_element();
-        }
-        let muted_row = |label: String| {
-            div()
-                .px_2()
-                .py_1()
-                .text_size(px(fonts.font_xsmall))
-                .italic()
-                .text_color(theme::TEXT_FAINT)
-                .child(label)
-        };
-        let mut rows = div().flex().flex_col();
-        let mut count = 0usize;
-        match self.suggest_mode {
-            SuggestMode::Commands => {
-                let matches = self.command_matches(input, cx);
-                count = matches.len();
-                if count == 0 {
-                    rows = rows.child(muted_row(if self.store.read(cx).tile_commands(&self.key).is_empty() {
-                        "no server commands".into()
-                    } else {
-                        "no matching command".into()
-                    }));
-                }
-                for (ix, cmd) in matches.iter().enumerate() {
-                    if ix == SLASH_MENU_VISIBLE {
-                        rows = rows.child(muted_row(format!("+{} more — keep typing", count - SLASH_MENU_VISIBLE)));
-                        break;
-                    }
-                    let selected = ix == self.suggest_selected;
-                    rows = rows.child(
-                        div()
-                            .id(gpui::ElementId::NamedInteger("suggest-row".into(), ix as u64))
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .px_2()
-                            .py_1()
-                            .rounded_md()
-                            .cursor_pointer()
-                            .when(selected, |d| d.bg(theme::HOVER))
-                            .hover(|s| s.bg(theme::HOVER))
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                this.suggest_selected = ix;
-                                this.accept_suggest(window, cx);
-                            }))
-                            .child(
-                                div()
-                                    .flex_shrink_0()
-                                    .text_size(px(fonts.font_small))
-                                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                                    .text_color(accent)
-                                    .child(SharedString::from(format!("/{}", cmd.name))),
-                            )
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .text_size(px(fonts.font_xsmall))
-                                    .text_color(theme::TEXT_MUTED)
-                                    .truncate()
-                                    .child({
-                                        let desc = cmd.description.lines().next().unwrap_or("").to_string();
-                                        SharedString::from(desc)
-                                    }),
-                            )
-                            .child(
-                                div()
-                                    .flex_shrink_0()
-                                    .text_size(px(fonts.font_micro))
-                                    .text_color(theme::TEXT_FAINT)
-                                    .child(if cmd.source == "skill" { "skill" } else { "cmd" }),
-                            ),
-                    );
-                }
-            }
-            SuggestMode::Files => {
-                let results = self.store.read(cx).file_results_for(&self.key, &self.at_query).cloned();
-                match results {
-                    None => rows = rows.child(muted_row("searching files…".into())),
-                    Some(paths) if paths.is_empty() => rows = rows.child(muted_row("no matching file".into())),
-                    Some(paths) => {
-                        count = paths.len();
-                        for (ix, path) in paths.iter().enumerate() {
-                            if ix == SLASH_MENU_VISIBLE {
-                                rows = rows.child(muted_row(format!("+{} more — keep typing", count - SLASH_MENU_VISIBLE)));
-                                break;
-                            }
-                            let selected = ix == self.suggest_selected;
-                            let path = path.clone();
-                            rows = rows.child(
-                                div()
-                                    .id(gpui::ElementId::NamedInteger("suggest-row".into(), ix as u64))
-                                    .flex()
-                                    .items_center()
-                                    .gap_2()
-                                    .px_2()
-                                    .py_1()
-                                    .rounded_md()
-                                    .cursor_pointer()
-                                    .when(selected, |d| d.bg(theme::HOVER))
-                                    .hover(|s| s.bg(theme::HOVER))
-                                    .on_click(cx.listener(move |this, _, window, cx| {
-                                        this.suggest_selected = ix;
-                                        this.accept_suggest(window, cx);
-                                    }))
-                                    .child(crate::ui::icon("icons/doc.svg", px(fonts.icon_small), theme::TEXT_MUTED))
-                                    .child(
-                                        div()
-                                            .flex_1()
-                                            .min_w_0()
-                                            .text_size(px(fonts.font_xsmall))
-                                            .font_family(theme::code_font())
-                                            .text_color(theme::TEXT_DIM)
-                                            .truncate()
-                                            .child(SharedString::from(path)),
-                                    ),
-                            );
-                        }
-                    }
-                }
-            }
-        }
-        // keyboard selection follows whichever list is live; wrap on the ends
-        // like the history cycle does
-        let visible = count.min(SLASH_MENU_VISIBLE);
-        if visible > 0 && self.suggest_selected >= visible {
-            self.suggest_selected = 0;
-        }
-        div()
-            .absolute()
-            .left_2()
-            .right_2()
-            .bottom(relative(1.))
-            .pb_1()
-            .child(popover_card().child(rows))
-            .into_any_element()
-    }
-
     /// Sets (or retargets) the glide target toward `target_y`. The glide
     /// itself advances once per displayed frame from `render`, kept alive by
     /// `Window::request_animation_frame` — a fixed 16 ms timer drifts against
@@ -2648,9 +2461,10 @@ impl TileView {
             .child(pills)
             .child(self.render_send_button(snap));
 
-        // slash-menu / fill-in popovers hover above the composer frame; built
-        // before the frame chain (they borrow self and cx)
-        let slash_el = self.render_suggest_menu(&snap.input, fonts, accent, cx);
+        // slash-menu / fill-in popovers hover above the composer frame; the
+        // menu is its own leaf — keystrokes re-filter it without touching
+        // this tile (see SuggestMenu)
+        let slash_el = self.suggest.clone();
 
         div()
             .mx_1()
@@ -2732,29 +2546,10 @@ impl TileView {
         self.store.update(cx, |s, _| s.cycle_agent(&key));
     }
 
-    /// Visible row count of the live menu: commands match the typed prefix,
-    /// files are the stored answer for the active @query (0 while in flight).
-    fn suggest_visible(&self, text: &str, cx: &App) -> usize {
-        match self.suggest_mode {
-            SuggestMode::Commands => self.command_matches(text, cx).len().min(SLASH_MENU_VISIBLE),
-            SuggestMode::Files => self
-                .store
-                .read(cx)
-                .file_results_for(&self.key, &self.at_query)
-                .map(|p| p.len().min(SLASH_MENU_VISIBLE))
-                .unwrap_or(0),
-        }
-    }
-
     fn action_slash_up(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.suggest_open {
-            let text = self.composer.read(cx).value().to_string();
-            let count = self.suggest_visible(&text, cx);
-            if count > 0 {
-                // wrap so the ends loop like the history cycle does
-                self.suggest_selected = if self.suggest_selected == 0 { count - 1 } else { self.suggest_selected - 1 };
-                cx.notify();
-            }
+        // the menu leaf owns the selection; moving it notifies only the leaf
+        if self.suggest.read(cx).open {
+            self.suggest.update(cx, |menu, cx| menu.move_selection(-1, cx));
             return;
         }
         // stock composer up-key: caret move, else per-tile history
@@ -2762,21 +2557,23 @@ impl TileView {
     }
 
     fn action_slash_down(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.suggest_open {
-            let text = self.composer.read(cx).value().to_string();
-            let count = self.suggest_visible(&text, cx);
-            if count > 0 {
-                self.suggest_selected = (self.suggest_selected + 1) % count;
-                cx.notify();
-            }
+        if self.suggest.read(cx).open {
+            self.suggest.update(cx, |menu, cx| menu.move_selection(1, cx));
             return;
         }
         self.action_composer_down(window, cx);
     }
 
     fn action_slash_enter(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.suggest_open {
-            self.accept_suggest(window, cx);
+        if self.suggest.read(cx).open {
+            // split acceptance: compute + close in the leaf, composer
+            // write-back here — re-entering TileView from inside its own
+            // action context would panic (entity already being updated).
+            // Nothing to accept leaves the menu open, like a no-op row.
+            if let Some(text) = self.suggest.read(cx).compute_acceptance(cx) {
+                self.suggest.update(cx, |menu, cx| menu.close_after_accept(cx));
+                self.insert_composer_text(text, window, cx);
+            }
             return;
         }
         let state = self.composer.clone();
@@ -2787,13 +2584,15 @@ impl TileView {
     }
 
     fn action_slash_escape(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.suggest_open {
+        if self.suggest.read(cx).open {
             // close and leave the typed text as-is; the menu stays closed
             // until the text changes, and the inserted-body case re-arms via
-            // accept_suggest the same way
-            self.suggest_open = false;
-            self.suggest_dismissed = true;
-            cx.notify();
+            // acceptance the same way
+            self.suggest.update(cx, |menu, cx| {
+                menu.open = false;
+                menu.dismissed = true;
+                cx.notify();
+            });
             return;
         }
         let state = self.composer.clone();
@@ -2863,59 +2662,12 @@ impl Render for TileView {
             let text = snap.input.clone();
             self.composer.update(cx, |field, cx| field.set_value(text, window, cx));
             self.last_field_text = snap.input.clone();
+            // set_value emits no Change: nudge the suggest menu's filter to
+            // the externally inserted text (the recompute is dismiss-safe)
+            let text = snap.input.clone();
+            self.suggest.update(cx, |menu, cx| menu.recompute(&text, true, cx));
         }
         self.last_composer_text = snap.input.clone();
-
-        // suggestion-menu state rides the composer text: a leading `/` opens
-        // the command menu, an active `@token` anywhere opens the file menu.
-        // No trigger, an escaped menu (until the text changes), or an
-        // unfocused composer keeps both closed. A fresh open refreshes the
-        // command list; a changed @query fires a new file search.
-        let at = at_token_start(&snap.input);
-        let want = if snap.input.starts_with('/') {
-            Some(SuggestMode::Commands)
-        } else if at.is_some() {
-            Some(SuggestMode::Files)
-        } else {
-            None
-        };
-        let composer_focused = self.composer_focused;
-        let menu_wanted = match want {
-            Some(mode) if composer_focused && (!self.suggest_dismissed || composer_text_changed) => Some(mode),
-            _ => None,
-        };
-        let tile_key = self.key.clone();
-        match (menu_wanted, want) {
-            (Some(mode), _) => {
-                if !self.suggest_open || self.suggest_mode != mode {
-                    self.suggest_open = true;
-                    self.suggest_mode = mode;
-                    self.suggest_selected = 0;
-                    self.find_requested = None;
-                    if mode == SuggestMode::Commands {
-                        self.store.update(cx, |s, _| s.refresh_commands(&tile_key));
-                    }
-                }
-                self.suggest_dismissed = false;
-                if mode == SuggestMode::Files {
-                    let (start, query) = at.unwrap();
-                    self.at_start = start;
-                    if self.at_query != query {
-                        self.at_query = query.clone();
-                        self.suggest_selected = 0;
-                    }
-                    if self.find_requested.as_deref() != Some(query.as_str()) {
-                        self.find_requested = Some(query.clone());
-                        let key = tile_key.clone();
-                        self.store.update(cx, |s, _| s.search_files(&key, &query));
-                    }
-                }
-            }
-            _ => {
-                self.suggest_open = false;
-                self.find_requested = None;
-            }
-        }
 
         // a live todo batch springs the flyout open
         if snap.spring {
@@ -3180,6 +2932,369 @@ impl Render for TileView {
             .child(menu_el);
 
         root.into_any_element()
+    }
+}
+
+/// The slash/@ suggestion menu as its own leaf view, subscribed to the
+/// composer's InputState directly: the filter re-evaluates on every
+/// keystroke and repaints only this popup. The render-time state machine
+/// it replaced could only run when some unrelated event repainted the
+/// tile — since the composer leaf fix removed per-keystroke tile
+/// repaints, the slash menu had gone stale mid-typing and the @ menu
+/// lagged a network round-trip behind. The @-file search is debounced so
+/// typing also stops firing one GET /find/file per character.
+struct SuggestMenu {
+    composer: Entity<TextareaState>,
+    store: Entity<Store>,
+    tile: Entity<TileView>,
+    tile_key: String,
+    /// focus mirror: reading the live focus handle in render would re-create
+    /// the per-keystroke dependency
+    focused: bool,
+    /// open while the text starts with `/` (server commands) or holds an
+    /// active `@token` (file mentions); `selected` indexes the row list
+    open: bool,
+    mode: SuggestMode,
+    selected: usize,
+    /// Escape-closed menu: stays closed until the text changes (or the field
+    /// blurs), so it doesn't spring back on its own
+    dismissed: bool,
+    /// byte offset of the `@` the file menu hangs from, and the query typed
+    /// after it (the key file results are matched against)
+    at_start: usize,
+    at_query: String,
+    /// the query a /find/file request last went out for, so repeats of the
+    /// same token don't re-ask the server
+    find_requested: Option<String>,
+    /// query waiting out the debounce; replaced (and the timer restarted) by
+    /// every keystroke
+    pending_search: Option<String>,
+    /// the in-flight debounce timer; dropping it cancels the wait
+    search_task: Option<gpui::Task<()>>,
+}
+
+impl SuggestMenu {
+    /// Server commands filtered by the text after the leading `/`
+    /// (case-insensitive substring on the name; empty prefix lists all).
+    fn command_matches(&self, text: &str, cx: &App) -> Vec<CommandInfo> {
+        let prefix = text.get(1..).unwrap_or("");
+        // the typed part is `/name` — cut at the first space so args don't
+        // narrow the list away
+        let prefix = prefix.split(char::is_whitespace).next().unwrap_or("").to_lowercase();
+        self.store
+            .read(cx)
+            .tile_commands(&self.tile_key)
+            .iter()
+            .filter(|c| prefix.is_empty() || c.name_lower.contains(&prefix))
+            .cloned()
+            .collect()
+    }
+
+    /// Visible row count of the live menu: commands match the typed prefix,
+    /// files are the stored answer for the active @query (0 while in flight).
+    fn visible(&self, text: &str, cx: &App) -> usize {
+        match self.mode {
+            SuggestMode::Commands => self.command_matches(text, cx).len().min(SLASH_MENU_VISIBLE),
+            SuggestMode::Files => self
+                .store
+                .read(cx)
+                .file_results_for(&self.tile_key, &self.at_query)
+                .map(|p| p.len().min(SLASH_MENU_VISIBLE))
+                .unwrap_or(0),
+        }
+    }
+
+    /// Menu state machine: a leading `/` opens the command menu, an active
+    /// `@token` anywhere opens the file menu. No trigger, an escaped menu
+    /// (until the text changes: `allow_reopen`), or an unfocused composer
+    /// keeps both closed. A fresh open refreshes the command list; a changed
+    /// @query re-arms the debounced file search.
+    fn recompute(&mut self, text: &str, allow_reopen: bool, cx: &mut Context<Self>) {
+        let at = at_token_start(text);
+        let want = if text.starts_with('/') {
+            Some(SuggestMode::Commands)
+        } else if at.is_some() {
+            Some(SuggestMode::Files)
+        } else {
+            None
+        };
+        let menu_wanted = match want {
+            Some(mode) if self.focused && (!self.dismissed || allow_reopen) => Some(mode),
+            _ => None,
+        };
+        match (menu_wanted, want) {
+            (Some(mode), _) => {
+                if !self.open || self.mode != mode {
+                    self.open = true;
+                    self.mode = mode;
+                    self.selected = 0;
+                    self.find_requested = None;
+                    if mode == SuggestMode::Commands {
+                        let key = self.tile_key.clone();
+                        self.store.update(cx, |s, _| s.refresh_commands(&key));
+                    }
+                }
+                self.dismissed = false;
+                if mode == SuggestMode::Files {
+                    let (start, query) = at.unwrap();
+                    self.at_start = start;
+                    if self.at_query != query {
+                        self.at_query = query.clone();
+                        self.selected = 0;
+                        self.arm_search(query, cx);
+                    }
+                }
+            }
+            _ => {
+                self.open = false;
+                self.find_requested = None;
+                self.pending_search = None;
+            }
+        }
+        cx.notify();
+    }
+
+    /// Restart the debounce for a changed @query: ~200 ms of quiet before
+    /// the request leaves, so typing a path fires one search instead of one
+    /// per character.
+    fn arm_search(&mut self, query: String, cx: &mut Context<Self>) {
+        self.pending_search = Some(query);
+        self.search_task = Some(cx.spawn(async move |menu, cx| {
+            cx.background_executor().timer(std::time::Duration::from_millis(200)).await;
+            let _ = menu.update(cx, |menu, cx| menu.fire_search(cx));
+        }));
+    }
+
+    /// Debounce elapsed: send the pending query unless typing moved on (the
+    /// task was replaced, so a stale timer never reaches here).
+    fn fire_search(&mut self, cx: &mut Context<Self>) {
+        let Some(query) = self.pending_search.take() else { return };
+        if self.open
+            && self.mode == SuggestMode::Files
+            && self.find_requested.as_deref() != Some(query.as_str())
+        {
+            self.find_requested = Some(query.clone());
+            let key = self.tile_key.clone();
+            self.store.update(cx, |s, _| s.search_files(&key, &query));
+        }
+    }
+
+    /// Arrow keys: move the row selection, wrapping on the ends like the
+    /// history cycle does.
+    fn move_selection(&mut self, dir: i32, cx: &mut Context<Self>) {
+        let text = self.composer.read(cx).value().to_string();
+        let count = self.visible(&text, cx);
+        if count > 0 {
+            self.selected = if dir < 0 {
+                if self.selected == 0 { count - 1 } else { self.selected - 1 }
+            } else {
+                (self.selected + 1) % count
+            };
+            cx.notify();
+        }
+    }
+
+    /// Pure half of acceptance: the text that WOULD land in the composer.
+    /// Commands expand into their server template (`$ARGUMENTS` takes the
+    /// typed args, or the args append) for a final look before sending; file
+    /// mentions replace the `@token` with `@path `.
+    fn compute_acceptance(&self, cx: &App) -> Option<String> {
+        let text = self.composer.read(cx).value().to_string();
+        match self.mode {
+            SuggestMode::Commands => {
+                let matches = self.command_matches(&text, cx);
+                let cmd = matches.get(self.selected).cloned()?;
+                // whatever follows the typed `/name` rides in as the arguments
+                let args = text
+                    .get(1..)
+                    .and_then(|rest| rest.split_once(char::is_whitespace))
+                    .map(|(_, args)| args.trim())
+                    .unwrap_or("");
+                Some(if cmd.template.contains("$ARGUMENTS") {
+                    cmd.template.replace("$ARGUMENTS", args)
+                } else if args.is_empty() {
+                    cmd.template.clone()
+                } else {
+                    format!("{}\n\n{}", cmd.template.trim_end(), args)
+                })
+            }
+            SuggestMode::Files => {
+                let paths = self.store.read(cx).file_results_for(&self.tile_key, &self.at_query)?;
+                let path = paths.get(self.selected).cloned()?;
+                let start = self.at_start.min(text.len());
+                if !text.is_char_boundary(start) {
+                    return None;
+                }
+                Some(format!("{}@{} ", &text[..start], path))
+            }
+        }
+    }
+
+    /// Close after an acceptance; the composer write-back is the caller's
+    /// job (the tile owns the mirrors, and re-entering the tile entity from
+    /// inside its own action context would panic).
+    fn close_after_accept(&mut self, cx: &mut Context<Self>) {
+        self.open = false;
+        self.dismissed = true;
+        cx.notify();
+    }
+
+    /// Row click: same acceptance as Enter — a click does not run inside the
+    /// tile's update, so driving the tile entity from here is safe.
+    fn accept_row(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(text) = self.compute_acceptance(cx) else { return };
+        self.close_after_accept(cx);
+        self.tile.update(cx, |tile, cx| tile.insert_composer_text(text, window, cx));
+    }
+}
+
+impl Render for SuggestMenu {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if !self.open {
+            return div().into_any_element();
+        }
+        let (fonts, accent) = {
+            let store = self.store.read(cx);
+            (store.fonts, store.accent.accent)
+        };
+        // reading the composer value here is the point: the leaf re-renders
+        // on every keystroke and the filter follows
+        let input = self.composer.read(cx).value().to_string();
+        let muted_row = |label: String| {
+            div()
+                .px_2()
+                .py_1()
+                .text_size(px(fonts.font_xsmall))
+                .italic()
+                .text_color(theme::TEXT_FAINT)
+                .child(label)
+        };
+        let mut rows = div().flex().flex_col();
+        let mut count = 0usize;
+        match self.mode {
+            SuggestMode::Commands => {
+                let matches = self.command_matches(&input, cx);
+                count = matches.len();
+                if count == 0 {
+                    rows = rows.child(muted_row(if self.store.read(cx).tile_commands(&self.tile_key).is_empty() {
+                        "no server commands".into()
+                    } else {
+                        "no matching command".into()
+                    }));
+                }
+                for (ix, cmd) in matches.iter().enumerate() {
+                    if ix == SLASH_MENU_VISIBLE {
+                        rows = rows.child(muted_row(format!("+{} more — keep typing", count - SLASH_MENU_VISIBLE)));
+                        break;
+                    }
+                    let selected = ix == self.selected;
+                    rows = rows.child(
+                        div()
+                            .id(gpui::ElementId::NamedInteger("suggest-row".into(), ix as u64))
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .px_2()
+                            .py_1()
+                            .rounded_md()
+                            .cursor_pointer()
+                            .when(selected, |d| d.bg(theme::HOVER))
+                            .hover(|s| s.bg(theme::HOVER))
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.selected = ix;
+                                this.accept_row(window, cx);
+                            }))
+                            .child(
+                                div()
+                                    .flex_shrink_0()
+                                    .text_size(px(fonts.font_small))
+                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                    .text_color(accent)
+                                    .child(SharedString::from(format!("/{}", cmd.name))),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .text_size(px(fonts.font_xsmall))
+                                    .text_color(theme::TEXT_MUTED)
+                                    .truncate()
+                                    .child({
+                                        let desc = cmd.description.lines().next().unwrap_or("").to_string();
+                                        SharedString::from(desc)
+                                    }),
+                            )
+                            .child(
+                                div()
+                                    .flex_shrink_0()
+                                    .text_size(px(fonts.font_micro))
+                                    .text_color(theme::TEXT_FAINT)
+                                    .child(if cmd.source == "skill" { "skill" } else { "cmd" }),
+                            ),
+                    );
+                }
+            }
+            SuggestMode::Files => {
+                let results = self.store.read(cx).file_results_for(&self.tile_key, &self.at_query).cloned();
+                match results {
+                    None => rows = rows.child(muted_row("searching files…".into())),
+                    Some(paths) if paths.is_empty() => rows = rows.child(muted_row("no matching file".into())),
+                    Some(paths) => {
+                        count = paths.len();
+                        for (ix, path) in paths.iter().enumerate() {
+                            if ix == SLASH_MENU_VISIBLE {
+                                rows = rows.child(muted_row(format!("+{} more — keep typing", count - SLASH_MENU_VISIBLE)));
+                                break;
+                            }
+                            let selected = ix == self.selected;
+                            let path = path.clone();
+                            rows = rows.child(
+                                div()
+                                    .id(gpui::ElementId::NamedInteger("suggest-row".into(), ix as u64))
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .px_2()
+                                    .py_1()
+                                    .rounded_md()
+                                    .cursor_pointer()
+                                    .when(selected, |d| d.bg(theme::HOVER))
+                                    .hover(|s| s.bg(theme::HOVER))
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        this.selected = ix;
+                                        this.accept_row(window, cx);
+                                    }))
+                                    .child(crate::ui::icon("icons/doc.svg", px(fonts.icon_small), theme::TEXT_MUTED))
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .text_size(px(fonts.font_xsmall))
+                                            .font_family(theme::code_font())
+                                            .text_color(theme::TEXT_DIM)
+                                            .truncate()
+                                            .child(SharedString::from(path)),
+                                    ),
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        // keyboard selection follows whichever list is live; wrap on the ends
+        // like the history cycle does
+        let visible = count.min(SLASH_MENU_VISIBLE);
+        if visible > 0 && self.selected >= visible {
+            self.selected = 0;
+        }
+        div()
+            .absolute()
+            .left_2()
+            .right_2()
+            .bottom(relative(1.))
+            .pb_1()
+            .child(popover_card().child(rows))
+            .into_any_element()
     }
 }
 

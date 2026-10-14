@@ -4427,7 +4427,12 @@ impl Store {
         cx.notify();
     }
 
-    pub fn set_question_custom(&mut self, tile_key: &str, question_id: &str, qi: usize, text: String, cx: &mut Context<Self>) {
+    /// Write-through for a question custom-answer field. Deliberately
+    /// notify-free: the field lives in its own leaf view (typing must not
+    /// repaint the window) and the leaf nudges the tile only when the
+    /// answer's filled state flips, since that is the only visible
+    /// consequence outside the field (the Answer button's can_submit).
+    pub fn set_question_custom(&mut self, tile_key: &str, question_id: &str, qi: usize, text: String) {
         let Some(tile) = self.tile_by_key_mut(tile_key) else { return };
         // make_mut only the one question item: a blind per-item make_mut
         // deep-copies the whole transcript on every keystroke
@@ -4443,7 +4448,6 @@ impl Store {
                 entry.custom_text = text;
             }
         }
-        cx.notify();
     }
 
     // ---- attachments ----

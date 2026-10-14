@@ -102,7 +102,7 @@ pub struct TileView {
     /// field text as of the last Change event or programmatic set_value
     /// (set_value emits no Change) — replaces render-time value reads
     last_field_text: String,
-    question_inputs: HashMap<String, Entity<InputState>>,
+    question_inputs: HashMap<String, Entity<QuestionField>>,
     /// question input keys touched by the current render pass — the prune
     /// after the transcript loop drops inputs of resolved/removed questions
     question_keys_seen: HashSet<String>,
@@ -1558,23 +1558,38 @@ impl TileView {
     ) -> gpui::AnyElement {
         let input_key = format!("{}#{qi}", question.id);
         self.question_keys_seen.insert(input_key.clone());
-        // custom-answer field, created lazily and wired to the store
+        // custom-answer field, created lazily as its own leaf view: typing
+        // must not re-render the transcript (see QuestionField below)
         if let std::collections::hash_map::Entry::Vacant(slot) = self.question_inputs.entry(input_key.clone()) {
             let store = self.store.clone();
             let qid = question.id.clone();
             let this_key = self.key.clone();
-            let field = cx.new(|cx| InputState::new(window, cx).placeholder("custom answer…"));
-            cx.subscribe(&field, move |_, field, event: &InputEvent, cx| {
-                if matches!(event, InputEvent::Change) {
+            let tile = cx.entity();
+            let field = cx.new(|cx| {
+                let state = cx.new(|cx| InputState::new(window, cx).placeholder("custom answer…"));
+                cx.subscribe(&state, move |this: &mut QuestionField, field, event: &InputEvent, cx| {
+                    if !matches!(event, InputEvent::Change) {
+                        return;
+                    }
                     let text = field.read(cx).value().to_string();
-                    let this_key = this_key.clone();
-                    let qid = qid.clone();
-                    store.update(cx, move |s, cx| {
-                        s.set_question_custom(&this_key, &qid, qi, text, cx);
-                    });
-                }
-            })
-            .detach();
+                    let filled = !text.trim().is_empty();
+                    let flip = filled != this.filled;
+                    this.filled = filled;
+                    let store = this.store.clone();
+                    let tile_key = this.tile_key.clone();
+                    let question_id = this.question_id.clone();
+                    let qi = this.qi;
+                    store.update(cx, move |s, _| s.set_question_custom(&tile_key, &question_id, qi, text));
+                    if flip {
+                        // the Answer button's can_submit only moves when some
+                        // entry's filled state flips; every other keystroke
+                        // stays inside this leaf
+                        this.tile.update(cx, |_, cx| cx.notify());
+                    }
+                })
+                .detach();
+                QuestionField { state, store, tile, tile_key: this_key, question_id: qid, qi, filled: false }
+            });
             slot.insert(field);
         }
         let field = self.question_inputs.get(&input_key).cloned().unwrap();
@@ -1692,7 +1707,7 @@ impl TileView {
             );
         }
         if !entry_locked {
-            column = column.child(div().px_1().child(Input::new(&field)));
+            column = column.child(div().px_1().child(field));
         }
         column.into_any_element()
     }
@@ -3165,6 +3180,30 @@ impl Render for TileView {
             .child(menu_el);
 
         root.into_any_element()
+    }
+}
+
+/// Leaf view for one question's custom-answer input (same shape as
+/// ComposerField): every keystroke notifies the InputState, and GPUI
+/// re-renders every view that read that entity during its own render —
+/// embedding the Input in TileView made each keypress re-layout the whole
+/// transcript. The typed text write-throughs into the store without
+/// notifying anyone; the tile is nudged only when the answer's filled
+/// state flips, because that is the only keystroke consequence outside
+/// this field (the Answer button's can_submit).
+struct QuestionField {
+    state: Entity<InputState>,
+    store: Entity<Store>,
+    tile: Entity<TileView>,
+    tile_key: String,
+    question_id: String,
+    qi: usize,
+    filled: bool,
+}
+
+impl Render for QuestionField {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        Input::new(&self.state)
     }
 }
 

@@ -99,13 +99,15 @@ pub struct WarpWindow {
     add_folder_receiver: async_channel::Receiver<String>,
     settings_buffers: SettingsBuffers,
     settings_fields: Vec<(&'static str, Entity<InputState>)>,
-    /// settings Model filtered dropdown visibility (opens on field focus)
-    settings_model_open: bool,
-    /// what the Model dropdown filters by: empty on focus (full list), then
-    /// tracks the typed text
-    settings_model_filter: String,
-    /// session being renamed + its edit field
-    rename: Option<(String, Entity<InputState>)>,
+    /// leaf renderers for the plain settings fields — keystrokes repaint
+    /// only the field, never the window (see InputLeaf below)
+    settings_leafs: Vec<(&'static str, Entity<InputLeaf>)>,
+    /// the Model field + its live-filtered dropdown, one leaf (see
+    /// ModelFieldLeaf): typing refilters the list inside the leaf
+    settings_model_leaf: Option<Entity<ModelFieldLeaf>>,
+    /// session being renamed + its edit field (state for the Enter
+    /// subscription, leaf for the per-keystroke renderer)
+    rename: Option<(String, Entity<InputState>, Entity<InputLeaf>)>,
     /// sidebar relative-time labels cached per chat (updated_ms → label);
     /// entries older than the current minute bucket are rebuilt wholesale —
     /// the label text changes at most once a minute, so the store's
@@ -137,8 +139,8 @@ impl WarpWindow {
             add_folder_receiver: folder_rx,
             settings_buffers,
             settings_fields: Vec::new(),
-            settings_model_open: false,
-            settings_model_filter: String::new(),
+            settings_leafs: Vec::new(),
+            settings_model_leaf: None,
             rename: None,
             sidebar_labels: HashMap::new(),
             sidebar_labels_minute: -1,
@@ -348,7 +350,10 @@ impl WarpWindow {
                     }
                 })
                 .detach();
-                self.rename = Some((id, entity));
+                // per-keystroke renderer as its own leaf: typing in the
+                // rename field must not re-render the window
+                let leaf = cx.new(|_| InputLeaf { state: entity.clone(), disabled: false });
+                self.rename = Some((id, entity, leaf));
             }
             (None, Some(_)) => {
                 self.rename = None;
@@ -606,9 +611,10 @@ impl WarpWindow {
                                 s.is_settings_open = true;
                             });
                             this.settings_buffers = SettingsBuffers::from_settings(&this.store.read(cx).settings);
-                            this.settings_fields = this.make_settings_fields(window, cx);
-                            this.settings_model_open = false;
-                            this.settings_model_filter.clear();
+                            let (fields, leafs, model_leaf) = this.make_settings_fields(window, cx);
+                            this.settings_fields = fields;
+                            this.settings_leafs = leafs;
+                            this.settings_model_leaf = model_leaf;
                             cx.notify();
                         })),
                     "Settings",
@@ -865,8 +871,8 @@ impl WarpWindow {
             .child(div().w(px(13.)).flex().items_center().justify_center().child(gutter));
 
         if chat.is_editing {
-            if let Some((_, field)) = &self.rename {
-                row = row.child(div().flex_1().min_w_0().child(Input::new(field)));
+            if let Some((_, _, leaf)) = &self.rename {
+                row = row.child(div().flex_1().min_w_0().child(leaf.clone()));
             }
         } else {
             row = row
@@ -1004,7 +1010,15 @@ impl WarpWindow {
         .detach();
     }
 
-    fn make_settings_fields(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Vec<(&'static str, Entity<InputState>)> {
+    fn make_settings_fields(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> (
+        Vec<(&'static str, Entity<InputState>)>,
+        Vec<(&'static str, Entity<InputLeaf>)>,
+        Option<Entity<ModelFieldLeaf>>,
+    ) {
         let b = self.settings_buffers.clone();
         let rows: Vec<(&'static str, String)> = vec![
             ("executable", b.open_code_executable),
@@ -1020,125 +1034,64 @@ impl WarpWindow {
             ("offstart", b.off_hours_start),
             ("workdaystart", b.workday_start),
         ];
-        rows.into_iter()
-            .map(|(key, value)| {
-                let entity = cx.new(|cx| {
-                    InputState::new(window, cx)
-                        .placeholder("")
-                        .default_value(value)
-                });
-                if key == "model" {
+        let mut fields = Vec::new();
+        let mut leafs = Vec::new();
+        let mut model_leaf = None;
+        for (key, value) in rows {
+            if key == "model" {
+                let state = cx.new(|cx| InputState::new(window, cx).placeholder("").default_value(value));
+                let store = self.store.clone();
+                let leaf = cx.new(|cx| {
                     // focus opens the dropdown on the full list, typing
                     // refilters it, blur (another field took focus) closes it
-                    cx.subscribe(&entity, move |this, field, event: &InputEvent, cx| match event {
+                    cx.subscribe(&state, |this: &mut ModelFieldLeaf, field, event: &InputEvent, cx| match event {
                         InputEvent::Focus => {
-                            this.settings_model_open = true;
-                            this.settings_model_filter.clear();
+                            this.open = true;
+                            this.filter.clear();
                             cx.notify();
                         }
                         InputEvent::Blur => {
-                            this.settings_model_open = false;
+                            this.open = false;
                             cx.notify();
                         }
                         InputEvent::Change => {
-                            this.settings_model_filter = field.read(cx).value().to_lowercase();
+                            this.filter = field.read(cx).value().to_lowercase();
                             cx.notify();
                         }
                         InputEvent::PressEnter { .. } => {}
                     })
                     .detach();
-                }
-                (key, entity)
-            })
-            .collect()
+                    ModelFieldLeaf { state: state.clone(), store, open: false, filter: String::new() }
+                });
+                fields.push((key, state));
+                model_leaf = Some(leaf);
+            } else {
+                let entity = cx.new(|cx| InputState::new(window, cx).placeholder("").default_value(value));
+                let leaf = cx.new(|_| InputLeaf { state: entity.clone(), disabled: false });
+                fields.push((key, entity));
+                leafs.push((key, leaf));
+            }
+        }
+        (fields, leafs, model_leaf)
     }
 
-    fn settings_field_wrap(&self, key: &str) -> gpui::AnyElement {
-        // the Variant default is inert while "always highest" is checked
+    fn settings_field_wrap(&self, key: &str, cx: &mut App) -> gpui::AnyElement {
+        // the Variant default is inert while "always highest" is checked;
+        // pushed into the leaf with a click-rate notify when it flips
         let disabled = key == "variant" && self.settings_buffers.variant_highest;
-        self.settings_fields
+        self.settings_leafs
             .iter()
             .find(|(k, _)| *k == key)
-            .map(|(_, f)| div().flex_1().min_w_0().child(Input::new(f).disabled(disabled)).into_any_element())
+            .map(|(_, leaf)| {
+                leaf.update(cx, |leaf, cx| {
+                    if leaf.disabled != disabled {
+                        leaf.disabled = disabled;
+                        cx.notify();
+                    }
+                });
+                div().flex_1().min_w_0().child(leaf.clone()).into_any_element()
+            })
             .unwrap_or_else(|| div().into_any_element())
-    }
-
-    /// Filtered model dropdown under the settings Model field: lists the
-    /// store's known models, narrowed by `settings_model_filter`; picking a
-    /// row fills the field ("(server default)" clears it).
-    fn settings_model_dropdown(&mut self, fonts: &theme::FontTokens, cx: &mut Context<Self>) -> gpui::AnyElement {
-        let filter = self.settings_model_filter.clone();
-        let entries: Vec<String> = {
-            let store = self.store.read(cx);
-            store
-                .models
-                .iter()
-                .filter(|m| filter.is_empty() || m.to_lowercase().contains(&filter))
-                .cloned()
-                .collect()
-        };
-        let field = self
-            .settings_fields
-            .iter()
-            .find(|(k, _)| *k == "model")
-            .map(|(_, f)| f.clone());
-        let mut list = div()
-            .id("model-dd-list")
-            .flex()
-            .flex_col()
-            .max_h(px(220.))
-            .overflow_y_scroll();
-        if entries.is_empty() {
-            list = list.child(
-                div()
-                    .px_2()
-                    .py_1()
-                    .text_size(px(fonts.font_small))
-                    .text_color(theme::TEXT_FAINT)
-                    .child("No matching model"),
-            );
-        }
-        for entry in entries {
-            let is_sentinel = entry.starts_with('(');
-            let field = field.clone();
-            list = list.child(
-                div()
-                    .id(gpui::ElementId::NamedInteger("model-row".into(), TileView::hash(&entry)))
-                    .px_2()
-                    .py_1()
-                    .rounded_md()
-                    .text_size(px(fonts.font_small))
-                    .text_color(if is_sentinel { theme::TEXT_MUTED } else { theme::TEXT })
-                    .cursor_pointer()
-                    .hover(|s| s.bg(theme::HOVER))
-                    .on_click({
-                        let entry = entry.clone();
-                        cx.listener(move |this, _, window, cx| {
-                            if let Some(field) = &field {
-                                let value: String = if is_sentinel { String::new() } else { entry.clone() };
-                                field.update(cx, |state, cx| state.set_value(value.as_str(), window, cx));
-                            }
-                            this.settings_model_open = false;
-                            cx.notify();
-                        })
-                    })
-                    .child(SharedString::from(entry)),
-            );
-        }
-        div()
-            .ml(px(160.))
-            .child(popover_card().child(list))
-            .into_any_element()
-    }
-
-    fn settings_label(&self, text: &str, fonts: &theme::FontTokens) -> gpui::AnyElement {
-        div()
-            .w(px(150.))
-            .flex_shrink_0()
-            .text_size(px(fonts.font_body))
-            .text_color(theme::TEXT_DIM)
-            .child(text.to_string())
-            .into_any_element()
     }
 
     fn settings_hint(&self, text: &str, fonts: &theme::FontTokens) -> gpui::AnyElement {
@@ -1416,12 +1369,6 @@ impl WarpWindow {
     fn render_settings(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
         let fonts = self.store.read(cx).fonts;
         let buffers = self.settings_buffers.clone();
-        // built before the page chain: the builder borrows cx mutably below
-        let model_dropdown = if self.settings_model_open {
-            Some(self.settings_model_dropdown(&fonts, cx))
-        } else {
-            None
-        };
 
         let page = div()
             .id("settings-page")
@@ -1474,39 +1421,21 @@ impl WarpWindow {
                                 .child(self.settings_section("Server", &fonts))
                                 .child(self.settings_card(vec![
                                     div().flex().items_center().gap_2p5()
-                                        .child(self.settings_label("OpenCode executable", &fonts))
-                                        .child(self.settings_field_wrap("executable"))
+                                        .child(settings_label("OpenCode executable", &fonts))
+                                        .child(self.settings_field_wrap("executable", cx))
                                         .into_any_element(),
                                     self.settings_hint("Running servers keep their current binary until stopped and started again.", &fonts),
                                 ]))
                                 .child(self.settings_section("Chat defaults", &fonts))
                                 .child(self.settings_card(vec![
-                                    div().flex().flex_col().gap_1()
-                                        .child(
-                                            div().flex().items_center().gap_2p5()
-                                                .child(self.settings_label("Model", &fonts))
-                                                .child(self.settings_field_wrap("model"))
-                                                .child(
-                                                    div()
-                                                        .id("model-dd-toggle")
-                                                        .cursor_pointer()
-                                                        .p_1()
-                                                        .rounded_md()
-                                                        .hover(|s| s.bg(theme::HOVER))
-                                                        .on_click(cx.listener(|this, _, _, cx| {
-                                                            this.settings_model_open = !this.settings_model_open;
-                                                            this.settings_model_filter.clear();
-                                                            cx.notify();
-                                                        }))
-                                                        .child(crate::ui::icon("icons/chevron-down.svg", px(fonts.icon_medium), theme::TEXT_MUTED)),
-                                                )
-                                                .into_any_element(),
-                                        )
-                                        .when_some(model_dropdown, |col, el| col.child(el))
-                                        .into_any_element(),
+                                    // the Model field + its filtered dropdown render in
+                                    // their own leaf so typing refilters only that leaf
+                                    self.settings_model_leaf.clone()
+                                        .map(|leaf| leaf.into_any_element())
+                                        .unwrap_or_else(|| div().into_any_element()),
                                     div().flex().items_center().gap_2p5()
-                                        .child(self.settings_label("Variant", &fonts))
-                                        .child(self.settings_field_wrap("variant")).into_any_element(),
+                                        .child(settings_label("Variant", &fonts))
+                                        .child(self.settings_field_wrap("variant", cx)).into_any_element(),
                                     self.check_row(
                                         "Always select the highest variant by default",
                                         buffers.variant_highest,
@@ -1515,8 +1444,8 @@ impl WarpWindow {
                                         cx,
                                     ),
                                     div().flex().items_center().gap_2p5()
-                                        .child(self.settings_label("Agent", &fonts))
-                                        .child(self.settings_field_wrap("agent")).into_any_element(),
+                                        .child(settings_label("Agent", &fonts))
+                                        .child(self.settings_field_wrap("agent", cx)).into_any_element(),
                                 ])),
                         )
                         .child(
@@ -1524,7 +1453,7 @@ impl WarpWindow {
                                 .child(self.settings_section("Appearance", &fonts))
                                 .child(self.settings_card(vec![
                                     div().flex().items_center().gap_2p5()
-                                        .child(self.settings_label("Text size", &fonts))
+                                        .child(settings_label("Text size", &fonts))
                                         .child(self.radio_row(
                                             &[("compact", "Small"), ("normal", "Normal"), ("large", "Large")],
                                             if buffers.text_compact { "compact" } else if buffers.text_large { "large" } else { "normal" },
@@ -1540,7 +1469,7 @@ impl WarpWindow {
                                     self.settings_hint("Applied across the app as soon as it's saved.", &fonts),
                                     div().h(px(1.)).bg(theme::HAIRLINE).into_any_element(),
                                     div().flex().flex_wrap().items_center().gap_2p5()
-                                        .child(self.settings_label("Accent", &fonts))
+                                        .child(settings_label("Accent", &fonts))
                                         .child({
                                             // wrap keeps all presets reachable at any card width
                                             let mut swatches = div().flex().flex_wrap().gap_2p5();
@@ -1577,27 +1506,27 @@ impl WarpWindow {
                                         perm_rows.push(self.check_row("Allow immediately (skip the random wait)", buffers.auto_allow_instant, &fonts, |b| b.auto_allow_instant = !b.auto_allow_instant, cx));
                                         if !buffers.auto_allow_instant {
                                             perm_rows.push(div().flex().items_center().gap_2p5()
-                                                .child(self.settings_label("Working hours", &fonts))
-                                                .child(self.settings_field_wrap("min"))
+                                                .child(settings_label("Working hours", &fonts))
+                                                .child(self.settings_field_wrap("min", cx))
                                                 .child(div().text_color(theme::TEXT_MUTED).child("–"))
-                                                .child(self.settings_field_wrap("max"))
+                                                .child(self.settings_field_wrap("max", cx))
                                                 .child(self.settings_hint("seconds", &fonts))
                                                 .into_any_element());
                                             perm_rows.push(div().flex().items_center().gap_2p5()
-                                                .child(self.settings_label("Lunch", &fonts))
-                                                .child(self.settings_field_wrap("lunchstart"))
+                                                .child(settings_label("Lunch", &fonts))
+                                                .child(self.settings_field_wrap("lunchstart", cx))
                                                 .child(div().text_color(theme::TEXT_MUTED).child("–"))
-                                                .child(self.settings_field_wrap("lunchend"))
+                                                .child(self.settings_field_wrap("lunchend", cx))
                                                 .child(div().text_color(theme::TEXT_MUTED).child("→"))
-                                                .child(self.settings_field_wrap("awaymin"))
+                                                .child(self.settings_field_wrap("awaymin", cx))
                                                 .child(div().text_color(theme::TEXT_MUTED).child("–"))
-                                                .child(self.settings_field_wrap("awaymax"))
+                                                .child(self.settings_field_wrap("awaymax", cx))
                                                 .into_any_element());
                                             perm_rows.push(div().flex().items_center().gap_2p5()
-                                                .child(self.settings_label("Off hours", &fonts))
-                                                .child(self.settings_field_wrap("offstart"))
+                                                .child(settings_label("Off hours", &fonts))
+                                                .child(self.settings_field_wrap("offstart", cx))
                                                 .child(div().text_color(theme::TEXT_MUTED).child("→"))
-                                                .child(self.settings_field_wrap("workdaystart"))
+                                                .child(self.settings_field_wrap("workdaystart", cx))
                                                 .into_any_element());
                                             perm_rows.push(self.settings_hint("Random wait before auto-allow, picked by local time.", &fonts));
                                         }
@@ -1635,5 +1564,123 @@ impl WarpWindow {
         }
         buffers.save(&self.store, cx);
     }
+}
 
+/// Fixed-width settings field label (free fn: the ModelFieldLeaf renders
+/// its own label without borrowing the window).
+fn settings_label(text: &str, fonts: &theme::FontTokens) -> gpui::AnyElement {
+    div()
+        .w(px(150.))
+        .flex_shrink_0()
+        .text_size(px(fonts.font_body))
+        .text_color(theme::TEXT_DIM)
+        .child(SharedString::from(text.to_string()))
+        .into_any_element()
+}
+
+/// Leaf renderer for a plain settings/rename input: gpui re-renders every
+/// view that read an InputState during its own render, so rendering these
+/// inputs from WarpWindow made each keystroke repaint the whole window —
+/// sidebar and tile grid included. The owner keeps the shared InputState
+/// handle for reading values; this view is only the renderer.
+struct InputLeaf {
+    state: Entity<InputState>,
+    disabled: bool,
+}
+
+impl Render for InputLeaf {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        Input::new(&self.state).disabled(self.disabled)
+    }
+}
+
+/// The settings Model field with its live-filtered dropdown, isolated in
+/// one leaf: focus opens the list on all models, typing refilters it, blur
+/// closes it — every one of those re-renders only this leaf instead of the
+/// whole window.
+struct ModelFieldLeaf {
+    state: Entity<InputState>,
+    store: Entity<Store>,
+    open: bool,
+    filter: String,
+}
+
+impl Render for ModelFieldLeaf {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let fonts = self.store.read(cx).fonts;
+        let mut col = div().flex().flex_col().gap_1().flex_1().min_w_0();
+        col = col.child(
+            div()
+                .flex()
+                .items_center()
+                .gap_2p5()
+                .child(settings_label("Model", &fonts))
+                .child(div().flex_1().min_w_0().child(Input::new(&self.state)))
+                .child(
+                    div()
+                        .id("model-dd-toggle")
+                        .cursor_pointer()
+                        .p_1()
+                        .rounded_md()
+                        .hover(|s| s.bg(theme::HOVER))
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.open = !this.open;
+                            this.filter.clear();
+                            cx.notify();
+                        }))
+                        .child(crate::ui::icon("icons/chevron-down.svg", px(fonts.icon_medium), theme::TEXT_MUTED)),
+                ),
+        );
+        if self.open {
+            let filter = self.filter.clone();
+            let entries: Vec<String> = {
+                let store = self.store.read(cx);
+                store
+                    .models
+                    .iter()
+                    .filter(|m| filter.is_empty() || m.to_lowercase().contains(&filter))
+                    .cloned()
+                    .collect()
+            };
+            let state = self.state.clone();
+            let mut list = div().id("model-dd-list").flex().flex_col().max_h(px(220.)).overflow_y_scroll();
+            if entries.is_empty() {
+                list = list.child(
+                    div()
+                        .px_2()
+                        .py_1()
+                        .text_size(px(fonts.font_small))
+                        .text_color(theme::TEXT_FAINT)
+                        .child("No matching model"),
+                );
+            }
+            for entry in entries {
+                let is_sentinel = entry.starts_with('(');
+                list = list.child(
+                    div()
+                        .id(gpui::ElementId::NamedInteger("model-row".into(), TileView::hash(&entry)))
+                        .px_2()
+                        .py_1()
+                        .rounded_md()
+                        .text_size(px(fonts.font_small))
+                        .text_color(if is_sentinel { theme::TEXT_MUTED } else { theme::TEXT })
+                        .cursor_pointer()
+                        .hover(|s| s.bg(theme::HOVER))
+                        .on_click({
+                            let entry = entry.clone();
+                            let state = state.clone();
+                            cx.listener(move |this, _, window, cx| {
+                                let value: String = if is_sentinel { String::new() } else { entry.clone() };
+                                state.update(cx, |state, cx| state.set_value(value.as_str(), window, cx));
+                                this.open = false;
+                                cx.notify();
+                            })
+                        })
+                        .child(SharedString::from(entry)),
+                );
+            }
+            col = col.child(div().ml(px(160.)).child(popover_card().child(list)));
+        }
+        col
+    }
 }

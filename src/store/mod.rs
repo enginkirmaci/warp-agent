@@ -3465,30 +3465,8 @@ impl Store {
         } else if let Some(index) = existing_index {
             self.running_agents.remove(index);
         }
-        if !running {
-            self.collapse_idle_workspace(session_id);
-        }
         self.update_sidebar_running();
         self.refresh_tile_agents();
-    }
-
-    /// A stopped session folds its workspace's sidebar section back up — the
-    /// closed folder icon follows the collapsed state — but only once nothing
-    /// else in that workspace is still running.
-    fn collapse_idle_workspace(&mut self, session_id: &str) {
-        let Some(path) = self.workspace_by_session.get(session_id).cloned() else { return };
-        let still_running = self
-            .workspace_by_session
-            .iter()
-            .any(|(sid, ws_path)| *ws_path == path && self.running_by_session.contains(sid));
-        if still_running {
-            return;
-        }
-        if let Some(ws) = self.workspaces.iter_mut().find(|w| w.folder_path() == path) {
-            if ws.is_expanded() {
-                ws.set_expanded(false);
-            }
-        }
     }
 
     fn update_sidebar_running(&mut self) {

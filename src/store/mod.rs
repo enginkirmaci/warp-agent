@@ -10,12 +10,16 @@ use gpui::prelude::*;
 use gpui::{App, Context, Entity};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 pub const DEFAULT_MODEL_ENTRY: &str = "(server default)";
 pub const DEFAULT_VARIANT_ENTRY: &str = "(default)";
 pub const DEFAULT_AGENT_ENTRY: &str = "(default build)";
 pub const DRAFT_TITLE: &str = "New chat";
+
+/// Minimum spacing between stream-driven repaints; 10 fps is plenty for
+/// streaming text and keeps a busy turn off the compositor's frame rate.
+const STREAM_REPAINT_INTERVAL: Duration = Duration::from_millis(100);
 
 /// ["(default)"] plus the model's variants — a tile's picker list. Stays at
 /// the bare sentinel until the server's model list lands (ModelsLoaded) or
@@ -198,7 +202,7 @@ pub struct Numstat {
     pub deletions: i64,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct ToolItem {
     /// opencode part id — item identity must match the "t{id}" lookup in
     /// on_part_updated or every stream snapshot re-pushes the row
@@ -212,6 +216,25 @@ pub struct ToolItem {
     pub is_error: bool,
     pub error_preview: String,
     pub details: ToolDetails,
+    /// fingerprint of the last applied `state` JSON — a re-sent identical
+    /// snapshot skips the clone + JSON pretty-print entirely
+    state_sig: Option<u64>,
+}
+
+impl PartialEq for ToolItem {
+    fn eq(&self, other: &Self) -> bool {
+        // state_sig is bookkeeping, not a visible field
+        self.part_id == other.part_id
+            && self.tool == other.tool
+            && self.status == other.status
+            && self.title == other.title
+            && self.file_path == other.file_path
+            && self.diff == other.diff
+            && self.numstat == other.numstat
+            && self.is_error == other.is_error
+            && self.error_preview == other.error_preview
+            && self.details == other.details
+    }
 }
 
 /// Tool call detail sections; the details fold draws each as its own
@@ -682,7 +705,12 @@ impl ChatTile {
             self.update_context_limit(store);
         }
         if let Some(meta) = build_meta(info) {
-            if let Some(items) = self.meta_items(&id) {
+            // the stream re-sends the same info snapshot constantly: skip the
+            // item walk (and the make_mut deep-copy it does per text part)
+            // unless the label actually moved
+            if self.meta_by_message.get(&id).map(String::as_str) != Some(meta.as_str())
+                && let Some(items) = self.meta_items(&id)
+            {
                 for key in items {
                     if let Some(index) = self.find_item_index(&key) {
                         if let ChatItem::AssistantText { meta_label, .. } = Arc::make_mut(&mut self.items[index]) {
@@ -745,19 +773,23 @@ impl ChatTile {
                         self.key_by_part.insert(format!("{mid}:{id}"), item_id.clone());
                     }
                 }
-                let text = part.get("text").and_then(serde_json::Value::as_str).unwrap_or("").to_string();
+                let text = part.get("text").and_then(serde_json::Value::as_str).unwrap_or("");
                 let Some(index) = self.find_item_index(&item_id) else { return false };
-                let changed = match Arc::make_mut(&mut self.items[index]) {
+                // compare through the Arc first: make_mut on an item the render
+                // snapshot still holds deep-copies the whole text just to
+                // conclude "unchanged"
+                if let ChatItem::AssistantText { text: t, .. } = self.items[index].as_ref() {
+                    if t == text {
+                        return false;
+                    }
+                }
+                match Arc::make_mut(&mut self.items[index]) {
                     ChatItem::AssistantText { text: t, .. } => {
-                        let changed = *t != text;
-                        if changed {
-                            *t = text;
-                        }
-                        changed
+                        *t = text.to_string();
+                        true
                     }
                     _ => false,
-                };
-                changed
+                }
             }
             "reasoning" => {
                 let item_id = format!("r{id}");
@@ -767,15 +799,17 @@ impl ChatTile {
                         text: String::new(),
                     }));
                 }
-                let text = part.get("text").and_then(serde_json::Value::as_str).unwrap_or("").to_string();
+                let text = part.get("text").and_then(serde_json::Value::as_str).unwrap_or("");
                 let Some(index) = self.find_item_index(&item_id) else { return false };
+                if let ChatItem::Reasoning { text: t, .. } = self.items[index].as_ref() {
+                    if t == text {
+                        return false;
+                    }
+                }
                 match Arc::make_mut(&mut self.items[index]) {
                     ChatItem::Reasoning { text: t, .. } => {
-                        let changed = *t != text;
-                        if changed {
-                            *t = text;
-                        }
-                        changed
+                        *t = text.to_string();
+                        true
                     }
                     _ => false,
                 }
@@ -795,10 +829,22 @@ impl ChatTile {
                         is_error: false,
                         error_preview: String::new(),
                         details: ToolDetails::default(),
+                        state_sig: None,
                     })));
                 }
                 let Some(state) = part.get("state") else { return true };
                 let Some(index) = self.find_item_index(&item_id) else { return false };
+                let sig = {
+                    use std::hash::{Hash, Hasher};
+                    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                    state.hash(&mut hasher);
+                    hasher.finish()
+                };
+                if let ChatItem::Tool(t) = self.items[index].as_ref()
+                    && t.state_sig == Some(sig)
+                {
+                    return false;
+                }
                 let changed = {
                     let tool = match Arc::make_mut(&mut self.items[index]) {
                         ChatItem::Tool(tool) => tool,
@@ -807,6 +853,7 @@ impl ChatTile {
                     let before = tool.clone();
                     apply_tool_state(state, tool);
                     apply_tool_metadata(state, tool);
+                    tool.state_sig = Some(sig);
                     *tool != before
                 };
                 changed
@@ -944,10 +991,15 @@ impl ChatTile {
                             is_error: false,
                             error_preview: String::new(),
                             details: ToolDetails::default(),
+                            state_sig: None,
                         };
                         if let Some(state) = part.get("state") {
                             apply_tool_state(state, &mut tool);
                             apply_tool_metadata(state, &mut tool);
+                            use std::hash::{Hash, Hasher};
+                            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                            state.hash(&mut hasher);
+                            tool.state_sig = Some(hasher.finish());
                         }
                         if tool_name == "todowrite" {
                             todos = todos_from_part(part);
@@ -1446,6 +1498,10 @@ pub struct Store {
     pending_opens: Vec<(String, String)>,
     /// tile whose flyout should spring open after a live todo batch
     pub todos_spring: Option<String>,
+    /// when the last coalesced stream repaint ran; None = never
+    stream_repaint_last: Option<Instant>,
+    /// a deferred stream repaint is already scheduled
+    stream_repaint_scheduled: bool,
 
     // ---- composer suggestions (/commands, @files) ----
     /// The workspace's server commands + skills, keyed by workspace folder
@@ -1532,6 +1588,8 @@ impl Store {
             pending_restores: Vec::new(),
             pending_opens: Vec::new(),
             todos_spring: None,
+            stream_repaint_last: None,
+            stream_repaint_scheduled: false,
             commands: HashMap::new(),
             file_results: None,
         };
@@ -3652,11 +3710,15 @@ impl Store {
                     self.track_session_info(tracked_id, parent_id, agent);
                     self.refresh_tile_agents();
                 }
+                self.notify_stream(cx);
+                return;
             }
             "message.updated" => {
                 if let Some(tile_key) = self.tile_from_data(data, ws_key) {
                     self.with_tile(&tile_key, |tile, store, _| tile.on_message_updated(data, store));
                 }
+                self.notify_stream(cx);
+                return;
             }
             "message.part.updated" => {
                 // the stream re-sends unchanged part snapshots constantly while a
@@ -3668,7 +3730,7 @@ impl Store {
                     })
                     .unwrap_or(false);
                 if changed {
-                    cx.notify();
+                    self.notify_stream(cx);
                 }
                 return;
             }
@@ -3731,9 +3793,41 @@ impl Store {
                     self.announce(&message, true, cx);
                 }
             }
-            _ => {}
+            // an event type nothing renders must not repaint the window — the
+            // bus emits plenty of these while a turn runs
+            _ => return,
         }
         cx.notify();
+    }
+
+    /// Repaint coalescer for the high-frequency stream arms (part, message
+    /// and session updates): notify now when the last one is old enough,
+    /// otherwise schedule a single deferred flush — the transcript repaints
+    /// at most once per STREAM_REPAINT_INTERVAL no matter how fast tokens
+    /// arrive, instead of once per SSE event.
+    fn notify_stream(&mut self, cx: &mut Context<Self>) {
+        let now = Instant::now();
+        let since_last = self.stream_repaint_last.map(|t| now.duration_since(t));
+        if since_last.is_none_or(|d| d >= STREAM_REPAINT_INTERVAL) {
+            self.stream_repaint_last = Some(now);
+            self.stream_repaint_scheduled = false;
+            cx.notify();
+            return;
+        }
+        if self.stream_repaint_scheduled {
+            return;
+        }
+        self.stream_repaint_scheduled = true;
+        let wait = STREAM_REPAINT_INTERVAL - since_last.unwrap();
+        cx.spawn(async move |store, cx| {
+            cx.background_executor().timer(wait).await;
+            let _ = store.update(cx, |store, cx| {
+                store.stream_repaint_scheduled = false;
+                store.stream_repaint_last = Some(Instant::now());
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     fn tile_from_data(&self, data: &serde_json::Value, ws_key: &str) -> Option<String> {

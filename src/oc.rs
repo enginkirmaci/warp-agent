@@ -66,6 +66,9 @@ pub struct AgentInfo {
 #[derive(Clone, Debug)]
 pub struct CommandInfo {
     pub name: String,
+    /// `name.to_lowercase()`, computed once here: the menu filter runs it
+    /// against every command on every keystroke and stream repaint
+    pub name_lower: String,
     pub description: String,
     /// "command" (built-in / user markdown) or "skill"
     pub source: String,
@@ -438,6 +441,7 @@ impl ApiClient {
                     continue;
                 };
                 commands.push(CommandInfo {
+                    name_lower: name.to_lowercase(),
                     name: name.to_string(),
                     description: c.get("description").and_then(Value::as_str).unwrap_or("").into(),
                     source: c.get("source").and_then(Value::as_str).unwrap_or("command").into(),

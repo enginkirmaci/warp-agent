@@ -439,11 +439,13 @@ impl TileView {
         // the typed part is `/name` — cut at the first space so args don't
         // narrow the list away
         let prefix = prefix.split(char::is_whitespace).next().unwrap_or("").to_lowercase();
+        // borrow the list and clone only the matches (tile_commands used to
+        // clone the whole Vec first)
         self.store
             .read(cx)
             .tile_commands(&self.key)
             .iter()
-            .filter(|c| prefix.is_empty() || c.name.to_lowercase().contains(&prefix))
+            .filter(|c| prefix.is_empty() || c.name_lower.contains(&prefix))
             .cloned()
             .collect()
     }
@@ -1036,8 +1038,6 @@ impl TileView {
     ) -> gpui::AnyElement {
         let open_diff = self.expanded.contains(&format!("{item_id}:diff"));
         let open_details = self.expanded.contains(&format!("{item_id}:details"));
-        let diff = tool.diff.clone().unwrap_or_default();
-        let details = tool.details.clone();
         let has_diff = tool.has_diff();
         let has_details = tool.has_details();
         div()
@@ -1103,30 +1103,30 @@ impl TileView {
                 .when(open_diff, |d| {
                     d.child(
                         fold_body(gpui::ElementId::NamedInteger("fold-diff".into(), Self::hash(item_id)))
-                            .child(render_diff(&diff, fonts.font_detail, window)),
+                            .child(render_diff(tool.diff.as_deref().unwrap_or(""), fonts.font_detail, window)),
                     )
                 })
             })
             .when(has_details, |d| {
                 d.child(self.fold_header(&format!("{item_id}:details"), "details", None, open_details, fonts, cx)).when(
                     open_details,
-                    |d| {
-                        let body = fold_body(gpui::ElementId::NamedInteger("fold-details".into(), Self::hash(item_id)))
-                            .flex()
-                            .flex_col()
-                            .gap_2p5();
-                        let body = body
-                            .when(!details.input.is_empty(), |d| {
-                                d.child(self.detail_section(&format!("{item_id}:input"), "input", &details.input, theme::TEXT_DIM, fonts))
-                            })
-                            .when(!details.output.is_empty(), |d| {
-                                d.child(self.detail_section(&format!("{item_id}:output"), "output", &details.output, theme::TEXT_DIM, fonts))
-                            })
-                            .when(!details.error.is_empty(), |d| {
-                                d.child(self.detail_section(&format!("{item_id}:error"), "error", &details.error, theme::DANGER, fonts))
-                            });
-                        d.child(body)
-                    },
+                |d| {
+                    let body = fold_body(gpui::ElementId::NamedInteger("fold-details".into(), Self::hash(item_id)))
+                        .flex()
+                        .flex_col()
+                        .gap_2p5();
+                    let body = body
+                        .when(!tool.details.input.is_empty(), |d| {
+                            d.child(self.detail_section(&format!("{item_id}:input"), "input", &tool.details.input, theme::TEXT_DIM, fonts))
+                        })
+                        .when(!tool.details.output.is_empty(), |d| {
+                            d.child(self.detail_section(&format!("{item_id}:output"), "output", &tool.details.output, theme::TEXT_DIM, fonts))
+                        })
+                        .when(!tool.details.error.is_empty(), |d| {
+                            d.child(self.detail_section(&format!("{item_id}:error"), "error", &tool.details.error, theme::DANGER, fonts))
+                        });
+                    d.child(body)
+                },
                 )
             })
             .into_any_element()
@@ -1295,7 +1295,6 @@ impl TileView {
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let open_diff = self.expanded.contains(&format!("{item_id}:diff"));
-        let diff = perm.diff.clone().unwrap_or_default();
         div()
             .w_full()
             .flex()
@@ -1422,7 +1421,7 @@ impl TileView {
                                     .when(open_diff, |d| {
                                         d.child(
                                             fold_body(gpui::ElementId::NamedInteger("perm-diff".into(), Self::hash(item_id)))
-                                                .child(render_diff(&diff, fonts.font_detail, window)),
+                                                .child(render_diff(perm.diff.as_deref().unwrap_or(""), fonts.font_detail, window)),
                                         )
                                     })
                             }),

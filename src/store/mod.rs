@@ -1802,10 +1802,10 @@ impl Store {
 
     /// Slash commands for the workspace a tile talks to (its own session's
     /// server, else the selected one). Empty when the server has none.
-    pub fn tile_commands(&self, tile_key: &str) -> Vec<CommandInfo> {
+    pub fn tile_commands(&self, tile_key: &str) -> &[CommandInfo] {
         self.tile_ws_key(tile_key)
-            .and_then(|ws| self.commands.get(&ws).cloned())
-            .unwrap_or_default()
+            .and_then(|ws| self.commands.get(&ws).map(Vec::as_slice))
+            .unwrap_or(&[])
     }
 
     /// Fire a /command refresh for the tile's workspace (menu open).
@@ -4707,7 +4707,7 @@ mod suggest_tests {
     use serde_json::json;
 
     fn cmd(name: &str, template: &str) -> CommandInfo {
-        CommandInfo { name: name.into(), description: "".into(), source: "command".into(), template: template.into() }
+        CommandInfo { name_lower: name.to_lowercase(), name: name.into(), description: "".into(), source: "command".into(), template: template.into() }
     }
 
     fn stored(id: &str, role: &str, info: serde_json::Value) -> StoredMessage {

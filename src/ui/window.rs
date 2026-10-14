@@ -106,6 +106,12 @@ pub struct WarpWindow {
     settings_model_filter: String,
     /// session being renamed + its edit field
     rename: Option<(String, Entity<InputState>)>,
+    /// sidebar relative-time labels cached per chat (updated_ms → label);
+    /// entries older than the current minute bucket are rebuilt wholesale —
+    /// the label text changes at most once a minute, so the store's
+    /// chrono-format runs once per minute per chat instead of per repaint
+    sidebar_labels: HashMap<String, (i64, SharedString)>,
+    sidebar_labels_minute: i64,
     /// active sidebar resize: (start pointer x, start sidebar width); shared with
     /// the paint-phase listener registration because window.on_mouse_event may
     /// only be called during paint in this gpui rev
@@ -134,6 +140,8 @@ impl WarpWindow {
             settings_model_open: false,
             settings_model_filter: String::new(),
             rename: None,
+            sidebar_labels: HashMap::new(),
+            sidebar_labels_minute: -1,
             splitter_drag: std::rc::Rc::new(std::cell::Cell::new(None)),
         }
     }
@@ -512,10 +520,10 @@ impl WarpWindow {
                             .child("No chats yet"),
                     );
                 }
-                let chat_count = ws.chats.len();
-                for chat_index in 0..chat_count {
-                    let chat = ws.chats[chat_index].clone();
-                    workspaces = workspaces.child(self.render_session_row(&chat, cx));
+                // borrow the chats from the workspace clone: re-cloning each
+                // SessionItem here doubles the sidebar copy work per repaint
+                for chat in &ws.chats {
+                    workspaces = workspaces.child(self.render_session_row(chat, cx));
                 }
             }
         }
@@ -775,6 +783,24 @@ impl WarpWindow {
             .into_any_element()
     }
 
+    /// Cached `SessionItem::updated_label`: sidebar rows re-render on every
+    /// store repaint, and the label only moves on minute boundaries.
+    fn cached_time_label(&mut self, chat: &crate::store::SessionItem) -> SharedString {
+        let minute = chrono::Local::now().timestamp() / 60;
+        if minute != self.sidebar_labels_minute {
+            self.sidebar_labels.clear();
+            self.sidebar_labels_minute = minute;
+        }
+        match self.sidebar_labels.get(&chat.id) {
+            Some((ms, label)) if *ms == chat.updated_ms => label.clone(),
+            _ => {
+                let label: SharedString = chat.updated_label().into();
+                self.sidebar_labels.insert(chat.id.clone(), (chat.updated_ms, label.clone()));
+                label
+            }
+        }
+    }
+
     fn render_session_row(&mut self, chat: &crate::store::SessionItem, cx: &mut Context<Self>) -> gpui::AnyElement {
         let (fonts, accent_dim) = {
             let store = self.store.read(cx);
@@ -867,7 +893,7 @@ impl WarpWindow {
                         .group_hover("chatrow", |s| s.opacity(0.))
                         .text_size(px(fonts.font_micro))
                         .text_color(theme::TEXT_FAINT)
-                        .child(SharedString::from(chat.updated_label())),
+                        .child(self.cached_time_label(chat)),
                 )
                 .child(
                     div()

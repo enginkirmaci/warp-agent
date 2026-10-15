@@ -509,6 +509,11 @@ pub struct ChatTile {
     pub tasks: Vec<TaskItem>,
     pub queue_rows: Vec<usize>, // QueueEntry keys pinned above the composer
     pub is_focused: bool,
+    /// Notified only when THIS tile's content changed: its cached view
+    /// (Entity::cached) re-renders on this and nothing else, so one tile's
+    /// stream doesn't rebuild every open transcript. None on the with_tile
+    /// checkout placeholder.
+    pub rev: Option<Entity<()>>,
 
     role_by_message: HashMap<String, String>,
     created_by_message: HashMap<String, i64>,
@@ -576,6 +581,7 @@ impl ChatTile {
             tasks: Vec::new(),
             queue_rows: Vec::new(),
             is_focused: false,
+            rev: None,
             role_by_message: HashMap::new(),
             created_by_message: HashMap::new(),
             meta_by_message: HashMap::new(),
@@ -1560,6 +1566,9 @@ pub struct Store {
     stream_repaint_last: Option<Instant>,
     /// a deferred stream repaint is already scheduled
     stream_repaint_scheduled: bool,
+    /// tiles whose transcript changed since the last stream flush; flushed
+    /// as per-tile revision bumps, never as a store-level notify
+    stream_dirty: Vec<String>,
     /// reused checkout dummy for `with_tile` — hot stream events would
     /// otherwise build a throwaway ChatTile each
     tile_placeholder: Option<ChatTile>,
@@ -1651,6 +1660,7 @@ impl Store {
             todos_spring: None,
             stream_repaint_last: None,
             stream_repaint_scheduled: false,
+            stream_dirty: Vec::new(),
             tile_placeholder: None,
             commands: HashMap::new(),
             file_results: None,
@@ -1868,6 +1878,31 @@ impl Store {
 
     pub fn tile_by_key_mut(&mut self, key: &str) -> Option<&mut ChatTile> {
         self.open_tiles.iter_mut().find(|t| t.key == key)
+    }
+
+    /// Bump one tile's revision: its cached view re-renders (via its own
+    /// observer) while every other tile keeps its recycled subtree. Fires no
+    /// store-level notify — use `repaint` when global chrome changed too.
+    pub fn touch_tile(&self, key: &str, cx: &mut Context<Self>) {
+        if let Some(rev) = self.tile_by_key(key).and_then(|t| t.rev.clone()) {
+            rev.update(cx, |(), cx| cx.notify());
+        }
+    }
+
+    /// Bump every open tile's revision (settings/accent/global-state style
+    /// changes that all tiles render).
+    pub fn touch_all_tiles(&self, cx: &mut Context<Self>) {
+        for rev in self.open_tiles.iter().filter_map(|t| t.rev.clone()) {
+            rev.update(cx, |(), cx| cx.notify());
+        }
+    }
+
+    /// The full-store repaint: sidebar/titlebar chrome AND every tile view.
+    /// The default for store notifications; the hot stream path touches
+    /// single tiles instead.
+    pub fn repaint(&self, cx: &mut Context<Self>) {
+        self.touch_all_tiles(cx);
+        cx.notify();
     }
 
     pub fn focused_tile(&self) -> Option<&ChatTile> {
@@ -2217,7 +2252,7 @@ impl Store {
                             request: ApiRequest::GetMessages { session_id },
                         });
                     }
-                    cx.notify();
+                    self.repaint(cx);
                 }
                 Err(err) => {
                     let name = self
@@ -2250,7 +2285,7 @@ impl Store {
                                 self.announce("Connection lost — reconnecting…", true, cx);
                             }
                         }
-                        cx.notify();
+                        self.repaint(cx);
                     }
                 }
             }
@@ -2258,7 +2293,7 @@ impl Store {
                 if let Some(runtime) = self.runtimes.get_mut(&ws_key) {
                     if runtime.healthy != healthy {
                         runtime.healthy = healthy;
-                        cx.notify();
+                        self.repaint(cx);
                     }
                 }
             }
@@ -2299,6 +2334,7 @@ impl Store {
                         self.next_key = next_key;
                     }
                     self.tile_by_session.insert(session_id.clone(), key.clone());
+                    tile.rev = Some(cx.new(|_| ()));
                     self.open_tiles.push(tile);
                     // a tile just opened: the restore banner has served its purpose
                     self.show_restore_prompt = false;
@@ -2313,7 +2349,7 @@ impl Store {
                         }
                     }
                     self.focus_tile(&key, cx);
-                    cx.notify();
+                    self.repaint(cx);
                 }
                 Err(err) => {
                     tracing::warn!("could not load chat {session_id}: {err:#}");
@@ -2371,7 +2407,7 @@ impl Store {
                         self.pending_sends.remove(0);
                     }
                     self.announce(&format!("Could not create a session: {err:#}"), true, cx);
-                    cx.notify();
+                    self.repaint(cx);
                 }
             },
             UiEvent::ForkSessionCreated { ws_key, context, result } => match result {
@@ -2396,6 +2432,7 @@ impl Store {
                         ws.state.sessions.insert(0, info.id.clone());
                     }
                     self.tile_by_session.insert(info.id.clone(), key.clone());
+                    tile.rev = Some(cx.new(|_| ()));
                     self.open_tiles.push(tile);
                     if self.selected_workspace.as_deref() == Some(ws_key.as_str()) {
                         self.sessions.push(SessionItem {
@@ -2419,7 +2456,7 @@ impl Store {
                 }
                 Err(err) => {
                     self.announce(&format!("Could not fork: {err:#}"), true, cx);
-                    cx.notify();
+                    self.repaint(cx);
                 }
             },
             UiEvent::SessionRenamed { session_id, result, .. } => match result {
@@ -2436,7 +2473,7 @@ impl Store {
                     }
                     self.sort_sessions();
                     self.sync_workspace_chats(cx);
-                    cx.notify();
+                    self.repaint(cx);
                 }
                 Err(err) => {
                     tracing::warn!("rename failed: {err:#}");
@@ -2451,7 +2488,7 @@ impl Store {
                     self.forget_session(&session_id, cx);
                     self.save_state();
                 }
-                cx.notify();
+                self.repaint(cx);
             }
             UiEvent::Aborted { session_id, result } => {
                 if let Err(err) = result {
@@ -2470,7 +2507,7 @@ impl Store {
                     self.set_running(Some(&session_id), false);
                     self.set_subagent_running(&session_id, false);
                 }
-                cx.notify();
+                self.repaint(cx);
             }
             UiEvent::PermissionReplied { permission_id, response, is_auto, result } => {
                 let label = match result {
@@ -2484,7 +2521,7 @@ impl Store {
                 if let Some(label) = label {
                     self.resolve_permission(&permission_id, label, is_auto);
                 }
-                cx.notify();
+                self.repaint(cx);
             }
             UiEvent::QuestionsPulled { for_session, result, .. } => {
                 if let Ok(pending) = result {
@@ -2514,7 +2551,7 @@ impl Store {
                         self.next_key = next_key;
                     }
                 }
-                cx.notify();
+                self.repaint(cx);
             }
             UiEvent::QuestionReplied { request_id, summary, result } => {
                 let resolution = match result {
@@ -2522,7 +2559,7 @@ impl Store {
                     Ok(()) => summary,
                 };
                 self.resolve_question(&request_id, &resolution);
-                cx.notify();
+                self.repaint(cx);
             }
             UiEvent::ModelsLoaded { result, .. } => {
                 if let Ok(models) = result {
@@ -2578,7 +2615,7 @@ impl Store {
                         }
                     }
                 }
-                cx.notify();
+                self.repaint(cx);
             }
             UiEvent::AgentsLoaded { result, .. } => {
                 if let Ok(agents) = result {
@@ -2602,23 +2639,23 @@ impl Store {
                         }
                     }
                 }
-                cx.notify();
+                self.repaint(cx);
             }
             UiEvent::CommandsLoaded { ws_key, result } => {
                 if let Ok(commands) = result {
                     self.commands.insert(ws_key, commands);
-                    cx.notify();
+                    self.repaint(cx);
                 }
             }
             UiEvent::FilesFound { ws_key, query, result } => {
                 if let Ok(paths) = result {
                     self.file_results = Some(FileSuggest { ws_key, query, paths });
-                    cx.notify();
+                    self.repaint(cx);
                 }
             }
             UiEvent::MessageSendFailed { session_id, error, .. } => {
                 self.post_note_for_session(&session_id, &format!("Message failed: {error}"), true);
-                cx.notify();
+                self.repaint(cx);
             }
         }
     }
@@ -2628,11 +2665,12 @@ impl Store {
         self.tile_by_key_mut(&key)
     }
 
-    fn create_tile(&mut self) -> &mut ChatTile {
+    fn create_tile(&mut self, cx: &mut Context<Self>) -> &mut ChatTile {
         let key = format!("t{}", self.next_tile_key);
         self.next_tile_key += 1;
         let mut tile = ChatTile::new(key.clone(), self.seed_model(), self.seed_agent(), self.seed_variant());
         tile.apply_variant_list(&self.variants_by_model, self.settings.default_variant_highest);
+        tile.rev = Some(cx.new(|_| ()));
         self.open_tiles.push(tile);
         self.tile_by_key_mut(&key).unwrap()
     }
@@ -2650,7 +2688,7 @@ impl Store {
             self.focus_tile(&key, cx);
         } else {
             let key = {
-                let tile = self.create_tile();
+                let tile = self.create_tile(cx);
                 tile.key.clone()
             };
             self.focus_tile(&key, cx);
@@ -2659,7 +2697,7 @@ impl Store {
         if !self.runtimes.contains_key(&ws_path) {
             self.start_workspace(&ws_path, cx);
         }
-        cx.notify();
+        self.repaint(cx);
     }
 
     pub fn new_chat_for_workspace(&mut self, path: &str, cx: &mut Context<Self>) {
@@ -2692,7 +2730,7 @@ impl Store {
         self.update_sidebar_selection();
         self.persist_tiles();
         self.save_state();
-        cx.notify();
+        self.repaint(cx);
     }
 
     /// Closing a tile only un-tiles it; the chat stays in the sidebar and keeps running in the background.
@@ -2703,7 +2741,7 @@ impl Store {
             self.persist_tiles();
             self.save_state();
         }
-        cx.notify();
+        self.repaint(cx);
     }
 
     fn detach_tile(&mut self, key: &str, cx: &mut Context<Self>) {
@@ -2821,7 +2859,7 @@ impl Store {
             if let Some(tile) = self.tile_by_key_mut(tile_key) {
                 tile.queue_rows.push(key);
             }
-            cx.notify();
+            self.repaint(cx);
             return;
         }
 
@@ -2898,7 +2936,7 @@ impl Store {
                 .map(|a| (a.file_name, a.mime, a.data))
                 .collect(),
         });
-        cx.notify();
+        self.repaint(cx);
     }
 
     /// Steer: jump the queue and interrupt the running turn so this prompt runs next.
@@ -2936,7 +2974,7 @@ impl Store {
                 }
             }
         }
-        cx.notify();
+        self.repaint(cx);
     }
 
     pub fn remove_queued(&mut self, queue_key: usize, cx: &mut Context<Self>) {
@@ -2944,7 +2982,7 @@ impl Store {
         for tile in &mut self.open_tiles {
             tile.queue_rows.retain(|k| *k != queue_key);
         }
-        cx.notify();
+        self.repaint(cx);
     }
 
     fn drop_queue(&mut self, session_ids: &[String]) {
@@ -2995,7 +3033,7 @@ impl Store {
     pub fn stop_running(&mut self, session_id: &str, cx: &mut Context<Self>) {
         let Some(ws_key) = self.effective_workspace_path(session_id) else { return };
         self.net.send(NetCommand::Request { ws_key, request: ApiRequest::Abort { session_id: session_id.to_string() } });
-        cx.notify();
+        self.repaint(cx);
     }
 
     fn auto_title(&mut self, session_id: &str, text: &str) {
@@ -3220,7 +3258,7 @@ impl Store {
             if let Some(ws) = self.workspace_by_path_mut(ws_key) {
                 ws.chats = chats;
             }
-            cx.notify();
+            self.repaint(cx);
             return;
         }
         let Some(state) = self.workspaces.iter().find(|w| w.folder_path() == ws_key).map(|w| w.state.clone()) else { return };
@@ -3297,7 +3335,7 @@ impl Store {
         self.update_sidebar_selection();
         self.sync_workspace_chats(cx);
         self.save_state();
-        cx.notify();
+        self.repaint(cx);
     }
 
     pub fn sort_sessions(&mut self) {
@@ -3311,7 +3349,7 @@ impl Store {
             ws.chats = chats;
         }
         self.update_sidebar_selection();
-        cx.notify();
+        self.repaint(cx);
     }
 
     pub fn update_sidebar_selection(&mut self) {
@@ -3347,7 +3385,7 @@ impl Store {
         self.save_state();
         self.sort_sessions();
         self.sync_workspace_chats(cx);
-        cx.notify();
+        self.repaint(cx);
     }
 
     pub fn begin_rename(&mut self, session_id: &str, cx: &mut Context<Self>) {
@@ -3390,7 +3428,7 @@ impl Store {
             ws_key,
             request: ApiRequest::RenameSession { session_id: session_id.to_string(), title },
         });
-        cx.notify();
+        self.repaint(cx);
     }
 
     pub fn delete_session(&mut self, session_id: &str, cx: &mut Context<Self>) {
@@ -3413,7 +3451,7 @@ impl Store {
         }
         self.forget_session(session_id, cx);
         self.save_state();
-        cx.notify();
+        self.repaint(cx);
     }
 
     fn forget_session(&mut self, id: &str, cx: &mut Context<Self>) {
@@ -3460,7 +3498,7 @@ impl Store {
                 self.pending_restores.push((path.clone(), wanted));
             }
         }
-        cx.notify();
+        self.repaint(cx);
     }
 
     pub fn dismiss_restore_prompt(&mut self, cx: &mut Context<Self>) {
@@ -3491,7 +3529,7 @@ impl Store {
         if added == 0 {
             self.prune_untouched_drafts(cx);
         }
-        cx.notify();
+        self.repaint(cx);
     }
 
     // ---- pending permission/question parking ----
@@ -3767,14 +3805,14 @@ impl Store {
         if !self.runtimes.contains_key(ws_path) {
             self.start_workspace(ws_path, cx);
             self.pending_opens.push((ws_path.to_string(), session_id.to_string()));
-            cx.notify();
+            self.repaint(cx);
             return;
         }
         self.net.send(NetCommand::Request {
             ws_key: ws_path.to_string(),
             request: ApiRequest::GetMessages { session_id: session_id.to_string() },
         });
-        cx.notify();
+        self.repaint(cx);
     }
 
     // ---- stream events (HandleEvent port) ----
@@ -3792,30 +3830,33 @@ impl Store {
                     let parent_id = info.get("parentID").and_then(serde_json::Value::as_str);
                     let agent = info.get("agent").and_then(serde_json::Value::as_str);
                     if self.track_session_info(tracked_id, parent_id, agent) {
+                        // subagent tracking feeds the sidebar spinners too; rare
                         self.refresh_tile_agents();
+                        self.repaint(cx);
                     }
                 }
+                // metadata-only session pings changed nothing visible: the
+                // dirty set stays empty and the flush is a no-op
                 self.notify_stream(cx);
                 return;
             }
             "message.updated" => {
                 if let Some(tile_key) = self.tile_from_data(data, ws_key) {
                     self.with_tile(&tile_key, |tile, store, _| tile.on_message_updated(data, store));
+                    self.mark_stream_dirty(tile_key, cx);
                 }
-                self.notify_stream(cx);
                 return;
             }
             "message.part.updated" => {
                 // the stream re-sends unchanged part snapshots constantly while a
                 // turn runs; only an actual transcript change may repaint
-                let changed = self
-                    .tile_from_data(data, ws_key)
-                    .and_then(|tile_key| {
-                        self.with_tile(&tile_key, |tile, _store, _| tile.on_part_updated(data))
-                    })
-                    .unwrap_or(false);
-                if changed {
-                    self.notify_stream(cx);
+                if let Some(tile_key) = self.tile_from_data(data, ws_key) {
+                    let changed = self
+                        .with_tile(&tile_key, |tile, _store, _| tile.on_part_updated(data))
+                        .unwrap_or(false);
+                    if changed {
+                        self.mark_stream_dirty(tile_key, cx);
+                    }
                 }
                 return;
             }
@@ -3882,21 +3923,21 @@ impl Store {
             // bus emits plenty of these while a turn runs
             _ => return,
         }
-        cx.notify();
+        self.repaint(cx);
     }
 
-    /// Repaint coalescer for the high-frequency stream arms (part, message
-    /// and session updates): notify now when the last one is old enough,
-    /// otherwise schedule a single deferred flush — the transcript repaints
-    /// at most once per STREAM_REPAINT_INTERVAL no matter how fast tokens
-    /// arrive, instead of once per SSE event.
+    /// Repaint coalescer for the high-frequency stream arms (part and
+    /// message updates): flush now when the last one is old enough,
+    /// otherwise schedule a single deferred flush — a streaming transcript
+    /// repaints at most once per STREAM_REPAINT_INTERVAL no matter how fast
+    /// tokens arrive, and only the tiles that actually changed.
     fn notify_stream(&mut self, cx: &mut Context<Self>) {
         let now = Instant::now();
         let since_last = self.stream_repaint_last.map(|t| now.duration_since(t));
         if since_last.is_none_or(|d| d >= STREAM_REPAINT_INTERVAL) {
             self.stream_repaint_last = Some(now);
             self.stream_repaint_scheduled = false;
-            cx.notify();
+            self.flush_stream(cx);
             return;
         }
         if self.stream_repaint_scheduled {
@@ -3909,10 +3950,27 @@ impl Store {
             let _ = store.update(cx, |store, cx| {
                 store.stream_repaint_scheduled = false;
                 store.stream_repaint_last = Some(Instant::now());
-                cx.notify();
+                store.flush_stream(cx);
             });
         })
         .detach();
+    }
+
+    /// Queue a tile into the coalesced stream flush.
+    fn mark_stream_dirty(&mut self, key: String, cx: &mut Context<Self>) {
+        if !self.stream_dirty.contains(&key) {
+            self.stream_dirty.push(key);
+        }
+        self.notify_stream(cx);
+    }
+
+    /// Drain the stream-dirty set into per-tile revision bumps. Fires no
+    /// store-level notify: unchanged tiles keep their cached subtree and the
+    /// sidebar doesn't rebuild for token noise.
+    fn flush_stream(&mut self, cx: &mut Context<Self>) {
+        for key in std::mem::take(&mut self.stream_dirty) {
+            self.touch_tile(&key, cx);
+        }
     }
 
     fn tile_from_data(&self, data: &serde_json::Value, ws_key: &str) -> Option<String> {
@@ -4039,14 +4097,14 @@ impl Store {
             if !auto_allow {
                 self.mark_attention(&session_id, true);
             }
-            cx.notify();
+            self.repaint(cx);
             return;
         }
         self.pending_by_session.entry(owner).or_default().push(item);
         if !auto_allow {
             self.mark_attention(&session_id, true);
         }
-        cx.notify();
+        self.repaint(cx);
     }
 
     /// Random auto-allow wait: quick during working hours, long over lunch and off hours.
@@ -4089,8 +4147,11 @@ impl Store {
         // refresh the visible countdown labels — make_mut only the pending
         // permission items themselves: the snapshot/render side keeps Arc
         // clones alive, so an unguarded make_mut would deep-copy every item
-        // of every tile once per second
+        // of every tile once per second. Per-tile revision bumps only: the
+        // 1 Hz tick must not rebuild the sidebar or the other tiles.
+        let mut touched: Vec<String> = Vec::new();
         for tile in &mut self.open_tiles {
+            let mut changed = false;
             for item in &mut tile.items {
                 let Some(left) = (match item.as_ref() {
                     ChatItem::Permission(p) => self.countdowns.get(&p.id).copied(),
@@ -4100,10 +4161,16 @@ impl Store {
                 };
                 if let ChatItem::Permission(p) = Arc::make_mut(item) {
                     p.auto_countdown = Some(left);
+                    changed = true;
                 }
             }
+            if changed {
+                touched.push(tile.key.clone());
+            }
         }
-        cx.notify();
+        for key in touched {
+            self.touch_tile(&key, cx);
+        }
     }
 
     fn find_permission(&self, permission_id: &str) -> Option<&PermissionItem> {
@@ -4177,7 +4244,7 @@ impl Store {
         };
         self.net.send(NetCommand::Request { ws_key, request });
         // the card flipped to "sending…" — repaint now, not on the next event
-        cx.notify();
+        self.repaint(cx);
     }
 
     fn resolve_permission(&mut self, permission_id: &str, label: String, is_auto: bool) {
@@ -4231,7 +4298,7 @@ impl Store {
                     tile.items.push(Arc::new(ChatItem::Question(built)));
                 }
             }
-            cx.notify();
+            self.repaint(cx);
             return;
         }
         let pending = self.pending_questions_by_session.entry(owner).or_default();
@@ -4239,7 +4306,7 @@ impl Store {
             pending.push(built);
         }
         self.mark_attention(&request.session_id, true);
-        cx.notify();
+        self.repaint(cx);
     }
 
     fn on_question_resolved(&mut self, data: &serde_json::Value) {
@@ -4319,7 +4386,7 @@ impl Store {
             ws_key,
             request: ApiRequest::ReplyQuestion { request_id: question_id.to_string(), answers },
         });
-        cx.notify();
+        self.repaint(cx);
     }
 
     pub fn dismiss_question(&mut self, question_id: &str, cx: &mut Context<Self>) {
@@ -4346,7 +4413,7 @@ impl Store {
             ws_key,
             request: ApiRequest::RejectQuestion { request_id: question_id.to_string() },
         });
-        cx.notify();
+        self.repaint(cx);
     }
 
     // ---- notes ----
@@ -4368,7 +4435,7 @@ impl Store {
         if let Some(tile) = self.tile_by_key_mut(tile_key) {
             tile.items.push(Arc::new(ChatItem::SystemNote { key: note_key, text: text.into(), is_error: error }));
         }
-        cx.notify();
+        self.repaint(cx);
     }
 
     fn post_note_for_session(&mut self, session_id: &str, text: &str, error: bool) {
@@ -4424,7 +4491,7 @@ impl Store {
                 }
             }
         }
-        cx.notify();
+        self.repaint(cx);
     }
 
     /// Write-through for a question custom-answer field. Deliberately
@@ -4496,14 +4563,14 @@ impl Store {
             let mime = crate::ui::mime_for_path(&name);
             self.attach_file(tile_key, name, mime.into(), data);
         }
-        cx.notify();
+        self.repaint(cx);
     }
 
     pub fn remove_attachment(&mut self, tile_key: &str, attachment_key: usize, cx: &mut Context<Self>) {
         if let Some(tile) = self.tile_by_key_mut(tile_key) {
             tile.attachments.retain(|a| a.key != attachment_key);
         }
-        cx.notify();
+        self.repaint(cx);
     }
 
     // ---- composer pickers ----
@@ -4545,7 +4612,7 @@ impl Store {
         self.sidebar_visible = visible;
         self.ui.sidebar_visible = Some(visible);
         self.ui.save();
-        cx.notify();
+        self.repaint(cx);
     }
 
     /// Persists the dragged sidebar width after a resize gesture ends.
@@ -4569,7 +4636,7 @@ impl Store {
         crate::ui::tooltip::sync_settings(cx, self.tool_tips_visible, self.fonts.font_xsmall);
         self.settings.save();
         self.save_state();
-        cx.notify();
+        self.repaint(cx);
     }
 }
 

@@ -198,9 +198,27 @@ impl TileView {
     }
 
     /// Drops cache entries whose transcript item or attachment is gone.
-    fn prune_caches(&mut self, live: &HashSet<String>) {
+    fn prune_caches(&mut self, live: &HashSet<String>, window: &mut Window, cx: &mut Context<Self>) {
         self.md_cache.retain(|k, _| live.contains(k));
+        // evicted decoded images must also leave the window's sprite atlas —
+        // atlas tiles persist until drop_image, so without this every image
+        // ever shown in the session would stay on the GPU forever
+        let evicted: Vec<Arc<gpui::RenderImage>> = self
+            .img_cache
+            .iter()
+            .filter(|(k, _)| !live.contains(k.as_str()))
+            .map(|(_, img)| Arc::clone(img))
+            .collect();
         self.img_cache.retain(|k, _| live.contains(k));
+        for img in evicted {
+            cx.drop_image(img, Some(window));
+        }
+    }
+
+    /// Decoded images still held for this tile's transcript/attachments —
+    /// dropped from the atlas when the tile closes (see render_main).
+    pub fn held_images(&self) -> Vec<Arc<gpui::RenderImage>> {
+        self.img_cache.values().cloned().collect()
     }
 }
 
@@ -252,6 +270,13 @@ fn context_ring(frac: f32) -> gpui::AnyElement {
 
 impl TileView {
     pub fn new(store: Entity<Store>, key: String, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        // the store bumps this tile's revision entity when its content
+        // changed: as a cached view (see render_main) this tile re-renders
+        // on that bump and on nothing else — other tiles' streams, sidebar
+        // events and global chrome pings keep the recycled subtree
+        if let Some(rev) = store.read(cx).tile_by_key(&key).and_then(|t| t.rev.clone()) {
+            cx.observe(&rev, |_, _, cx| cx.notify()).detach();
+        }
         // kit textarea: submit_on_enter gives Warp-style Enter=send, Shift+Enter=newline;
         // a persisted draft (ui.json) is restored straight into the field
         let initial = store
@@ -2802,7 +2827,7 @@ impl Render for TileView {
             }
         }
         live.extend(snap.attachments.iter().map(|a| format!("att{}", a.key)));
-        self.prune_caches(&live);
+        self.prune_caches(&live, window, cx);
         self.question_inputs.retain(|k, _| self.question_keys_seen.contains(k));
 
         let jump_visible = !self.pinned && snap.has_messages;

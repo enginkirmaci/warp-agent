@@ -9,7 +9,7 @@ use crate::ui::settings::SettingsBuffers;
 use crate::ui::tile::TileView;
 use crate::ui::tooltip::{self, tip};
 use gpui::prelude::*;
-use gpui::{canvas, div, px, App, Context, Entity, MouseButton, Render, SharedString, Window, WindowControlArea};
+use gpui::{canvas, div, px, App, Context, Entity, MouseButton, Render, SharedString, StyleRefinement, Window, WindowControlArea};
 use std::collections::HashMap;
 
 #[derive(Clone)]
@@ -1224,7 +1224,17 @@ impl WarpWindow {
                 self.tile_views.insert(key.clone(), view);
             }
         }
-        self.tile_views.retain(|key, _| keys.contains(key));
+        self.tile_views.retain(|key, view| {
+            if keys.contains(key) {
+                return true;
+            }
+            // a closing tile's decoded images must leave the sprite atlas,
+            // not just the Rust-side cache
+            for img in view.read(cx).held_images() {
+                cx.drop_image(img, Some(window));
+            }
+            false
+        });
 
         let tile_columns = self.store.read(cx).tile_columns().max(1);
         // explicit equal rows: implicit grid rows are content-sized (auto),
@@ -1242,7 +1252,11 @@ impl WarpWindow {
             .p_1();
         for key in &keys {
             if let Some(view) = self.tile_views.get(key) {
-                grid = grid.child(view.clone());
+                // cached: the tile's render only runs when its own revision
+                // entity fired (store.touch_tile) — one streaming tile no
+                // longer rebuilds every open transcript per coalesced frame.
+                // The grid stretch sizes the node; contents aren't measured.
+                grid = grid.child(view.clone().cached(StyleRefinement::default()));
             }
         }
 

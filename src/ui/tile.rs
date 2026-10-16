@@ -76,11 +76,6 @@ pub struct TileView {
     pub key: String,
     store: Entity<Store>,
     scroll: ScrollHandle,
-    /// wheel animation target; None when the scroll is at rest
-    scroll_target: Option<Pixels>,
-    /// wall clock of the last glide advance; eases per-frame with real dt
-    /// so the glide feel is identical at any display refresh rate
-    glide_last: std::time::Instant,
     pinned: bool,
     last_max: Pixels,
     expanded: HashSet<String>, // fold state by item id
@@ -122,10 +117,6 @@ pub struct TileView {
     /// decoded images by item id / attachment key — PNG decode is far too
     /// expensive to repeat on every repaint; evicted with the transcript
     img_cache: HashMap<String, Arc<gpui::RenderImage>>,
-    /// busy/reconnect pulse dots as leaf view entities: the animation notify
-    /// then re-renders only the dot, not this whole tile (see ui::bits)
-    busy_pulse: Option<Entity<crate::ui::bits::Pulse>>,
-    reconnect_pulse: Option<Entity<crate::ui::bits::Pulse>>,
 }
 
 impl TileView {
@@ -346,7 +337,6 @@ impl TileView {
                 let key = key_for_send.clone();
                 store_handle.update(cx, move |s, cx| s.send_from_tile(&key, cx));
                 this.pinned = true;
-                this.scroll_target = None;
                 this.scroll.scroll_to_bottom();
                 cx.notify();
             }
@@ -403,8 +393,6 @@ impl TileView {
             key,
             store,
             scroll: ScrollHandle::new(),
-            scroll_target: None,
-            glide_last: std::time::Instant::now(),
             pinned: true,
             last_max: px(0.),
             expanded: HashSet::new(),
@@ -424,8 +412,6 @@ impl TileView {
             copied_flash: None,
             md_cache: HashMap::new(),
             img_cache: HashMap::new(),
-            busy_pulse: None,
-            reconnect_pulse: None,
         }
     }
 
@@ -506,16 +492,10 @@ impl TileView {
         let text = self.last_field_text.clone();
         self.suggest.update(cx, |menu, cx| menu.recompute(&text, false, cx));
     }
-    /// Sets (or retargets) the glide target toward `target_y`. The glide
-    /// itself advances once per displayed frame from `render`, kept alive by
-    /// `Window::request_animation_frame` — a fixed 16 ms timer drifts against
-    /// the compositor vsync and reads as periodic stutter. Safe to call per
-    /// wheel event: while gliding only the target moves.
-    fn animate_scroll_to(&mut self, target_y: Pixels, cx: &mut Context<Self>) {
-        if self.scroll_target.is_none() {
-            self.glide_last = std::time::Instant::now();
-        }
-        self.scroll_target = Some(target_y);
+    /// Instant scroll to `y`, counting distance scrolled down — the handle
+    /// stores the offset negative-down (0 at top, -max at bottom).
+    fn scroll_to(&mut self, y: Pixels, cx: &mut Context<Self>) {
+        self.scroll.set_offset(gpui::point(self.scroll.offset().x, -y));
         cx.notify();
     }
 
@@ -1608,14 +1588,8 @@ impl TileView {
 
         let mut header_right = div().flex().items_center().gap_1p5();
         // stream-status pill: amber while this tile's workspace pump retries
-        // its event stream, with a slow pulse like the busy dot
+        // its event stream
         if snap.is_reconnecting {
-            let pulse = self.reconnect_pulse.get_or_insert_with(|| {
-                cx.new(|_| {
-                    crate::ui::bits::Pulse::dot(theme::WARN, std::time::Duration::from_millis(1200), 0.25)
-                })
-            })
-            .clone();
             header_right = header_right.child(
                 tip(
                     div()
@@ -1629,7 +1603,7 @@ impl TileView {
                         .bg(theme::WARN_BG),
                     "Connection lost — retrying…",
                 )
-                .child(pulse)
+                .child(div().size(px(5.)).rounded_full().bg(theme::WARN).flex_shrink_0())
                 .child(
                     div()
                         .text_size(px(fonts.font_small))
@@ -1704,12 +1678,7 @@ impl TileView {
                 .child(crate::ui::icon("icons/close.svg", px(fonts.icon_xsmall), theme::TEXT_MUTED)),
             )
             .when(snap.is_busy, |d| {
-                let dot = self.busy_pulse.get_or_insert_with(|| {
-                    cx.new(|_| {
-                        crate::ui::bits::Pulse::dot(theme::WORKING, std::time::Duration::from_secs(2), 0.2)
-                    })
-                });
-                d.child(div().ml_1().child(dot.clone()))
+                d.child(div().ml_1().size(px(5.)).rounded_full().bg(theme::WORKING).flex_shrink_0())
             })
             .child(
                 div()
@@ -2704,36 +2673,9 @@ impl Render for TileView {
             self.last_spring_seen = false;
         }
 
-        // advance the wheel glide one step per displayed frame; eased by the
-        // real frame delta so the motion is identical on 60/120/144 Hz panels
-        if let Some(target) = self.scroll_target {
-            let max = self.scroll.max_offset();
-            let target = target.min(max.y);
-            let x = self.scroll.offset().x;
-            // gpui stores the handle offset negative-down (0 at top, -max at
-            // bottom); scroll_target counts distance scrolled
-            let current = -self.scroll.offset().y;
-            if cx.reduce_motion() || (target - current).abs() < px(1.) {
-                self.scroll.set_offset(gpui::point(x, -target));
-                self.scroll_target = None;
-                self.pinned = target >= max.y - px(1.);
-            } else {
-                let now = std::time::Instant::now();
-                let dt = now - self.glide_last;
-                self.glide_last = now;
-                // 1 - e^(-dt/τ): ~0.34 per 16.7 ms frame, rate-independent
-                let alpha = 1. - (-(dt.as_secs_f32() / 0.04)).exp();
-                let next = current + (target - current) * alpha;
-                self.scroll.set_offset(gpui::point(x, -next));
-                // keep the frame loop running until the glide settles
-                window.request_animation_frame();
-            }
-        }
-
         // transcript auto-scroll: keep pinned while content grows
         let max_now = self.scroll.max_offset().y;
         if self.pinned && max_now > self.last_max + px(0.5) && max_now > px(0.) {
-            self.scroll_target = None;
             self.scroll.scroll_to_bottom();
         }
         if max_now != self.last_max {
@@ -2751,18 +2693,17 @@ impl Render for TileView {
             .track_scroll(&self.scroll.clone())
             .on_scroll_wheel(cx.listener(|this, event: &gpui::ScrollWheelEvent, window, cx| {
                 // the wheel no longer scrolls natively (overflow_hidden keeps
-                // the handle-driven offset) — deltas accumulate into a target
-                // and render advances a frame-locked glide toward it
+                // the handle-driven offset) — each delta applies straight to
+                // the handle offset, no glide
                 let delta = event.delta.pixel_delta(window.line_height()).y;
                 if delta == px(0.) {
                     return;
                 }
                 let max = this.scroll.max_offset();
-                let base = this.scroll_target.unwrap_or_else(|| -this.scroll.offset().y);
-                // wheel deltas are positive-up; the target counts down
-                let target = (base - delta).clamp(px(0.), max.y);
-                this.pinned = target >= max.y - px(1.);
-                this.animate_scroll_to(target, cx);
+                // wheel deltas are positive-up; the offset counts down
+                let next = (-this.scroll.offset().y - delta).clamp(px(0.), max.y);
+                this.pinned = next >= max.y - px(1.);
+                this.scroll_to(next, cx);
             }))
             .p_1()
             .flex()
@@ -2941,7 +2882,7 @@ impl Render for TileView {
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.pinned = true;
                                 let target = this.scroll.max_offset().y;
-                                this.animate_scroll_to(target, cx);
+                                this.scroll_to(target, cx);
                             })),
                         "Jump to latest",
                     )

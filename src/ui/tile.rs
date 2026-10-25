@@ -2917,8 +2917,8 @@ struct SuggestMenu {
     /// focus mirror: reading the live focus handle in render would re-create
     /// the per-keystroke dependency
     focused: bool,
-    /// open while the text starts with `/` (server commands) or holds an
-    /// active `@token` (file mentions); `selected` indexes the row list
+    /// open while the text is a bare `/command` name (server commands) or
+    /// holds an active `@token` (file mentions); `selected` indexes the rows
     open: bool,
     mode: SuggestMode,
     selected: usize,
@@ -2970,14 +2970,16 @@ impl SuggestMenu {
         }
     }
 
-    /// Menu state machine: a leading `/` opens the command menu, an active
-    /// `@token` anywhere opens the file menu. No trigger, an escaped menu
-    /// (until the text changes: `allow_reopen`), or an unfocused composer
-    /// keeps both closed. A fresh open refreshes the command list; a changed
-    /// @query re-arms the debounced file search.
+    /// Menu state machine: a leading `/` (still naming the command — once a
+    /// space follows, args are being typed and the picker is done) opens the
+    /// command menu, an active `@token` anywhere opens the file menu. No
+    /// trigger, an escaped menu (until the text changes: `allow_reopen`), or
+    /// an unfocused composer keeps both closed. A fresh open refreshes the
+    /// command list; a changed @query re-arms the debounced file search.
     fn recompute(&mut self, text: &str, allow_reopen: bool, cx: &mut Context<Self>) {
         let at = at_token_start(text);
-        let want = if text.starts_with('/') {
+        let naming_command = text.starts_with('/') && !text[1..].contains(char::is_whitespace);
+        let want = if naming_command {
             Some(SuggestMode::Commands)
         } else if at.is_some() {
             Some(SuggestMode::Files)
@@ -3061,9 +3063,9 @@ impl SuggestMenu {
     }
 
     /// Pure half of acceptance: the text that WOULD land in the composer.
-    /// Commands expand into their server template (`$ARGUMENTS` takes the
-    /// typed args, or the args append) for a final look before sending; file
-    /// mentions replace the `@token` with `@path `.
+    /// Commands keep their short `/name args` form — the server expands the
+    /// template at send time; file mentions replace the `@token` with
+    /// `@path `.
     fn compute_acceptance(&self, cx: &App) -> Option<String> {
         let text = self.composer.read(cx).value().to_string();
         match self.mode {
@@ -3076,12 +3078,10 @@ impl SuggestMenu {
                     .and_then(|rest| rest.split_once(char::is_whitespace))
                     .map(|(_, args)| args.trim())
                     .unwrap_or("");
-                Some(if cmd.template.contains("$ARGUMENTS") {
-                    cmd.template.replace("$ARGUMENTS", args)
-                } else if args.is_empty() {
-                    cmd.template.clone()
+                Some(if args.is_empty() {
+                    format!("/{} ", cmd.name)
                 } else {
-                    format!("{}\n\n{}", cmd.template.trim_end(), args)
+                    format!("/{} {}", cmd.name, args)
                 })
             }
             SuggestMode::Files => {

@@ -82,26 +82,20 @@ pub fn at_token_start(text: &str) -> Option<(usize, String)> {
     None
 }
 
-/// `/name args` → the matching server command's template with `$ARGUMENTS`
-/// substituted; args append when the template has no slot. Text matching no
-/// command comes back unchanged (it goes to the model verbatim).
-pub fn expand_slash_command(text: &str, commands: &[CommandInfo]) -> String {
-    let Some(rest) = text.strip_prefix('/') else {
-        return text.to_string();
-    };
+/// `/name args` → `(name, args)` when `name` matches a server command or
+/// skill. The template expansion is the server's job (POST
+/// /session/{id}/command), so the composer, history and transcript keep the
+/// short `/name args` form — no whole skill files pasted into prompts.
+pub fn parse_slash_command(text: &str, commands: &[CommandInfo]) -> Option<(String, String)> {
+    let rest = text.strip_prefix('/')?;
     let (name, args) = match rest.find(char::is_whitespace) {
         Some(pos) => (&rest[..pos], rest[pos..].trim()),
         None => (rest, ""),
     };
-    let Some(cmd) = commands.iter().find(|c| c.name == name) else {
-        return text.to_string();
-    };
-    if cmd.template.contains("$ARGUMENTS") {
-        cmd.template.replace("$ARGUMENTS", args)
-    } else if args.is_empty() {
-        cmd.template.clone()
+    if commands.iter().any(|c| c.name == name) {
+        Some((name.to_string(), args.to_string()))
     } else {
-        format!("{}\n\n{}", cmd.template.trim_end(), args)
+        None
     }
 }
 
@@ -1666,6 +1660,13 @@ impl Store {
             file_results: None,
         };
 
+        // heal paths saved by older builds: fs::canonicalize used to leak the
+        // Windows verbatim `\\?\` prefix into stored workspaces, which explorer
+        // and Windows Terminal reject
+        for ws in &mut store.ui.workspaces {
+            ws.path = normalize_dir(&ws.path);
+        }
+
         // ensure the General workspace exists and leads the list
         let general_path = crate::paths::AppPaths::general_workspace_path().to_string_lossy().to_string();
         if !store.ui.workspaces.iter().any(|w| w.path == general_path) {
@@ -2812,13 +2813,8 @@ impl Store {
         if text.is_empty() && attachment_count == 0 {
             return;
         }
-        // a leading `/name` expands against the workspace's server command
-        // list; anything that matches no command goes out verbatim
-        let text = self
-            .tile_ws_key(tile_key)
-            .and_then(|ws| self.commands.get(&ws))
-            .map(|commands| expand_slash_command(&text, commands))
-            .unwrap_or_else(|| text.clone());
+        // a leading `/name` stays as typed; send_core routes it to the
+        // server's /command endpoint, which does the template expansion
         // an existing chat talks to its own workspace's server; a draft to the selected one
         let Some(tile) = self.tile_by_key(tile_key) else { return };
         if let Some(session_id) = &tile.session_id {
@@ -2924,6 +2920,13 @@ impl Store {
             .and_then(|t| t.selected_variant.clone())
             .filter(|v| v != DEFAULT_VARIANT_ENTRY);
         let agent = tile.and_then(|t| t.selected_agent.clone()).filter(|a| a != DEFAULT_AGENT_ENTRY);
+        // a leading `/name args` matching a server command/skill goes to the
+        // /command route: the server expands the template and honors the
+        // command's own agent/model config (subtask skills included)
+        let command = self
+            .commands
+            .get(&ws_key)
+            .and_then(|commands| parse_slash_command(&text, commands));
         self.net.send(NetCommand::SendMessage {
             ws_key,
             session_id: session_id.to_string(),
@@ -2935,6 +2938,7 @@ impl Store {
                 .into_iter()
                 .map(|a| (a.file_name, a.mime, a.data))
                 .collect(),
+            command,
         });
         self.repaint(cx);
     }
@@ -4753,9 +4757,19 @@ fn build_question_item(request: &oc::QuestionRequestInfo, next_key: &mut usize) 
 
 fn normalize_dir(path: &str) -> String {
     let trimmed = path.trim();
-    match std::fs::canonicalize(trimmed) {
-        Ok(full) => full.to_string_lossy().trim_end_matches('/').to_string(),
-        Err(_) => trimmed.trim_end_matches('/').to_string(),
+    let full = std::fs::canonicalize(trimmed)
+        .map(|full| crate::services::plain_path(&full).to_string_lossy().into_owned())
+        .unwrap_or_else(|_| trimmed.to_string());
+    #[cfg(windows)]
+    let full = full.trim_end_matches(|c| c == '/' || c == '\\').to_string();
+    #[cfg(not(windows))]
+    let full = full.trim_end_matches('/').to_string();
+    // a bare drive ("C:") points at the drive's forgotten current directory;
+    // keep its root form
+    if cfg!(windows) && full.len() == 2 && full.as_bytes()[1] == b':' {
+        format!("{full}\\")
+    } else {
+        full
     }
 }
 
@@ -4773,12 +4787,12 @@ fn rand_0_to(n: i64) -> i64 {
 
 #[cfg(test)]
 mod suggest_tests {
-    use super::{at_token_start, expand_slash_command, session_chat_settings};
+    use super::{at_token_start, parse_slash_command, session_chat_settings};
     use crate::oc::{CommandInfo, StoredMessage};
     use serde_json::json;
 
-    fn cmd(name: &str, template: &str) -> CommandInfo {
-        CommandInfo { name_lower: name.to_lowercase(), name: name.into(), description: "".into(), source: "command".into(), template: template.into() }
+    fn cmd(name: &str) -> CommandInfo {
+        CommandInfo { name_lower: name.to_lowercase(), name: name.into(), description: "".into(), source: "command".into() }
     }
 
     fn stored(id: &str, role: &str, info: serde_json::Value) -> StoredMessage {
@@ -4795,18 +4809,15 @@ mod suggest_tests {
     }
 
     #[test]
-    fn slash_expansion() {
-        let commands = vec![
-            cmd("init", "bootstrap $ARGUMENTS now"),
-            cmd("review", "review this"),
-        ];
-        assert_eq!(expand_slash_command("/init", &commands), "bootstrap  now");
-        assert_eq!(expand_slash_command("/init fast", &commands), "bootstrap fast now");
-        // no $ARGUMENTS slot: args append
-        assert_eq!(expand_slash_command("/review the diff", &commands), "review this\n\nthe diff");
-        // unknown command and non-slash text go out verbatim
-        assert_eq!(expand_slash_command("/nope", &commands), "/nope");
-        assert_eq!(expand_slash_command("plain text", &commands), "plain text");
+    fn slash_parsing() {
+        let commands = vec![cmd("init"), cmd("review")];
+        assert_eq!(parse_slash_command("/init", &commands), Some(("init".into(), "".into())));
+        // args ride along, whitespace-normalized
+        assert_eq!(parse_slash_command("/init fast", &commands), Some(("init".into(), "fast".into())));
+        assert_eq!(parse_slash_command("/review  the   diff ", &commands), Some(("review".into(), "the   diff".into())));
+        // unknown command and non-slash text are plain prompts
+        assert_eq!(parse_slash_command("/nope", &commands), None);
+        assert_eq!(parse_slash_command("plain text", &commands), None);
     }
 
     #[test]

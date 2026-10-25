@@ -60,9 +60,9 @@ pub struct AgentInfo {
     pub hidden: bool,
 }
 
-/// A server-side slash command or skill: GET /command. `template` is the full
-/// prompt the TUI submits; `$ARGUMENTS` (when present) takes the text typed
-/// after `/name args`.
+/// A server-side slash command or skill: GET /command. The template never
+/// reaches the client — `/name args` runs via POST /session/{id}/command and
+/// the server does the expansion (skills included).
 #[derive(Clone, Debug)]
 pub struct CommandInfo {
     pub name: String,
@@ -72,7 +72,6 @@ pub struct CommandInfo {
     pub description: String,
     /// "command" (built-in / user markdown) or "skill"
     pub source: String,
-    pub template: String,
 }
 
 #[derive(Clone, Debug)]
@@ -362,6 +361,55 @@ impl ApiClient {
         error_for_status(resp).await.map(|_| ())
     }
 
+    /// Server-side slash command / skill execution (POST /session/{id}/command):
+    /// the server expands the template, honors the command's own agent/model
+    /// config and starts the turn — the client never sees the expanded text.
+    /// `model` is a "provider/model" string on this route, unlike the object
+    /// shape the plain message route takes.
+    pub async fn send_command(
+        &self,
+        session_id: &str,
+        name: &str,
+        args: &str,
+        model: Option<&str>,
+        variant: Option<&str>,
+        agent: Option<&str>,
+        attachments: &[(String, String, std::sync::Arc<Vec<u8>>)], // (filename, mime, bytes)
+    ) -> Result<()> {
+        let mut body = json!({ "command": name, "arguments": args });
+        if let Some(model) = model {
+            body["model"] = json!(model);
+        }
+        if let Some(variant) = variant {
+            body["variant"] = json!(variant);
+        }
+        if let Some(agent) = agent {
+            body["agent"] = json!(agent);
+        }
+        if !attachments.is_empty() {
+            let parts: Vec<_> = attachments
+                .iter()
+                .map(|(file_name, mime, data)| {
+                    json!({
+                        "type": "file",
+                        "mime": mime,
+                        "filename": file_name,
+                        "url": format!("data:{mime};base64,{}", base64_encode(data)),
+                    })
+                })
+                .collect();
+            body["parts"] = json!(parts);
+        }
+        let resp = self
+            .http
+            .post(format!("{}/session/{}/command", self.base_url, session_id))
+            .json(&body)
+            .timeout(Duration::from_secs(600))
+            .send()
+            .await?;
+        error_for_status(resp).await.map(|_| ())
+    }
+
     pub async fn respond_permission(&self, session_id: &str, permission_id: &str, response: &str) -> Result<()> {
         let resp = self
             .http
@@ -445,7 +493,6 @@ impl ApiClient {
                     name: name.to_string(),
                     description: c.get("description").and_then(Value::as_str).unwrap_or("").into(),
                     source: c.get("source").and_then(Value::as_str).unwrap_or("command").into(),
-                    template: c.get("template").and_then(Value::as_str).unwrap_or("").into(),
                 });
             }
         }
@@ -653,7 +700,9 @@ pub enum NetCommand {
     StopServer { ws_key: String },
     /// Run a request against the workspace's API; results come back as UiEvents.
     Request { ws_key: String, request: ApiRequest },
-    /// Fire-and-forget message send.
+    /// Fire-and-forget message send. `command` is `(name, args)` when the text
+    /// parsed as a server command/skill — it goes to the /command route
+    /// instead of a plain prompt, and the server expands the template.
     SendMessage {
         ws_key: String,
         session_id: String,
@@ -662,6 +711,7 @@ pub enum NetCommand {
         variant: Option<String>,
         agent: Option<String>,
         attachments: Vec<(String, String, std::sync::Arc<Vec<u8>>)>,
+        command: Option<(String, String)>,
     },
 }
 
@@ -805,7 +855,7 @@ async fn net_main(command_rx: async_channel::Receiver<NetCommand>, event_tx: asy
                     let _ = event_tx.send(event).await;
                 });
             }
-            NetCommand::SendMessage { ws_key, session_id, text, model, variant, agent, attachments } => {
+            NetCommand::SendMessage { ws_key, session_id, text, model, variant, agent, attachments, command } => {
                 let Some(client) = workspaces.get(&ws_key).map(|ws| ws.api.clone()) else {
                     // don't drop silently — the tile would sit "running" forever
                     let _ = event_tx
@@ -818,9 +868,18 @@ async fn net_main(command_rx: async_channel::Receiver<NetCommand>, event_tx: asy
                 };
                 let event_tx = event_tx.clone();
                 tokio::spawn(async move {
-                    let result = client
-                        .send_message(&session_id, &text, model.as_deref(), variant.as_deref(), agent.as_deref(), &attachments)
-                        .await;
+                    let result = match &command {
+                        Some((name, args)) => {
+                            client
+                                .send_command(&session_id, name, args, model.as_deref(), variant.as_deref(), agent.as_deref(), &attachments)
+                                .await
+                        }
+                        None => {
+                            client
+                                .send_message(&session_id, &text, model.as_deref(), variant.as_deref(), agent.as_deref(), &attachments)
+                                .await
+                        }
+                    };
                     if let Err(err) = result {
                         let _ = event_tx.send(UiEvent::MessageSendFailed { session_id, error: format!("{err:#}") }).await;
                     }

@@ -1404,12 +1404,16 @@ fn workspace_display_name(path: &str) -> String {
         .to_string()
 }
 
+/// Sort key: General leads, the rest alphabetical by name (case-insensitive).
+/// Single-sourced so every workspace-list sort keeps General on top.
+fn workspace_order_key(path: &str) -> (bool, String) {
+    let general = path == crate::paths::AppPaths::general_workspace_path().to_string_lossy();
+    (!general, workspace_display_name(path).to_lowercase())
+}
+
 /// Sidebar order: General leads, the rest alphabetical by name (case-insensitive).
 fn sort_workspaces(workspaces: &mut Vec<WorkspaceState>) {
-    workspaces.sort_by_key(|w| {
-        let general = w.path == crate::paths::AppPaths::general_workspace_path().to_string_lossy();
-        (!general, workspace_display_name(&w.path).to_lowercase())
-    });
+    workspaces.sort_by_key(|w| workspace_order_key(&w.path));
 }
 
 #[derive(Clone)]
@@ -2044,7 +2048,7 @@ impl Store {
         let path_key = item.folder_path().to_string();
         self.workspaces.push(item);
         sort_workspaces(&mut self.ui.workspaces);
-        self.workspaces.sort_by_key(|w| (w.is_general(), w.name.to_lowercase()));
+        self.workspaces.sort_by_key(|w| workspace_order_key(w.folder_path()));
         self.save_state();
         self.select_workspace(&path_key, cx);
     }

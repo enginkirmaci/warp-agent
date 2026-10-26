@@ -104,6 +104,14 @@ pub struct WarpWindow {
     /// session being renamed + its edit field (state for the Enter
     /// subscription, leaf for the per-keystroke renderer)
     rename: Option<(String, Entity<InputState>, Entity<InputLeaf>)>,
+    /// workspace-name filter text; keystrokes land in the sidebar filter
+    /// leaf (InputLeaf) and only a Change event copies the text out and
+    /// nudges the window to refilter the list
+    sidebar_filter: String,
+    /// the filter input isolated in a leaf so typing doesn't repaint the
+    /// whole window (created on first sidebar render — InputState needs
+    /// the window)
+    sidebar_filter_leaf: Option<Entity<InputLeaf>>,
     /// sidebar relative-time labels cached per chat (updated_ms → label);
     /// entries older than the current minute bucket are rebuilt wholesale —
     /// the label text changes at most once a minute, so the store's
@@ -137,6 +145,8 @@ impl WarpWindow {
             settings_leafs: Vec::new(),
             settings_model_leaf: None,
             rename: None,
+            sidebar_filter: String::new(),
+            sidebar_filter_leaf: None,
             sidebar_labels: HashMap::new(),
             sidebar_labels_minute: -1,
             splitter_drag: std::rc::Rc::new(std::cell::Cell::new(None)),
@@ -196,7 +206,7 @@ impl Render for WarpWindow {
 
         let mut content = div().flex().flex_row().flex_1().min_h_0();
         if sidebar_visible {
-            content = content.child(self.render_sidebar(cx));
+            content = content.child(self.render_sidebar(window, cx));
             content = content.child(self.render_splitter());
         }
         content = content.child(self.render_main(window, cx));
@@ -486,16 +496,39 @@ impl WarpWindow {
 
     // ---- sidebar ---------------------------------------------------------------
 
-    fn render_sidebar(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
+    fn render_sidebar(&mut self, window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
 
         let (fonts, width) = {
             let store = self.store.read(cx);
             (store.fonts, store.sidebar_shown_width)
         };
+        // the filter input is created on first sidebar render (InputState
+        // needs the window) and renders from a leaf: keystrokes repaint only
+        // the leaf, a Change event copies the text out and nudges the window
+        // to refilter the list
+        if self.sidebar_filter_leaf.is_none() {
+            let state = cx.new(|cx| InputState::new(window, cx).placeholder("Filter workspaces"));
+            cx.subscribe(&state, |this: &mut Self, field, event: &InputEvent, cx| {
+                if let InputEvent::Change = event {
+                    this.sidebar_filter = field.read(cx).value().to_string();
+                    cx.notify();
+                }
+            })
+            .detach();
+            self.sidebar_filter_leaf = Some(cx.new(|_| InputLeaf { state, disabled: false }));
+        }
+        let filter = self.sidebar_filter.to_lowercase();
+        let filter_leaf = self.sidebar_filter_leaf.clone().unwrap();
+
         let mut workspaces = div().flex().flex_col().gap_2p5();
         let ws_count = self.store.read(cx).workspaces.len();
+        let mut shown = 0usize;
         for ws_index in 0..ws_count {
             let ws = self.store.read(cx).workspaces[ws_index].clone();
+            if !filter.is_empty() && !ws.name.to_lowercase().contains(&filter) {
+                continue;
+            }
+            shown += 1;
             workspaces = workspaces.child(self.render_workspace_row(&ws, cx));
             if ws.is_expanded() {
                 if ws.show_empty_hint() {
@@ -514,6 +547,16 @@ impl WarpWindow {
                     workspaces = workspaces.child(self.render_session_row(chat, cx));
                 }
             }
+        }
+        if !filter.is_empty() && shown == 0 {
+            workspaces = workspaces.child(
+                div()
+                    .px_2()
+                    .text_size(px(fonts.font_small))
+                    .italic()
+                    .text_color(theme::TEXT_FAINT)
+                    .child("No matching workspace"),
+            );
         }
 
         div()
@@ -566,6 +609,9 @@ impl WarpWindow {
                         )
                         .child(crate::ui::icon("icons/plus.svg", px(fonts.icon_medium), theme::TEXT_MUTED)),
                     ),
+            )
+            .child(
+                div().w_full().min_w_0().mt_1().child(filter_leaf),
             )
             .child(
                 div()

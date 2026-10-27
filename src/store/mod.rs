@@ -468,6 +468,37 @@ pub struct QueueEntry {
     pub key: usize,
 }
 
+/// The exact prompt a chat last put on the wire, kept so a retryable
+/// connection error can replay it verbatim — re-reading the tile would pick
+/// up model/variant switches made while the failed turn ran.
+#[derive(Clone)]
+struct PromptPayload {
+    text: String,
+    attachments: Vec<AttachmentItem>,
+    model: Option<String>,
+    variant: Option<String>,
+    agent: Option<String>,
+    command: Option<(String, String)>,
+    /// automatic resends already spent on this prompt
+    attempts: u32,
+}
+
+/// Automatic resends allowed per prompt before the error note stands as-is.
+const MAX_AUTO_RETRY: u32 = 3;
+
+/// Automatic restarts allowed when a workspace's serve process crashes,
+/// before the app gives up and leaves the workspace stopped.
+const MAX_CRASH_RESTARTS: u32 = 3;
+/// A server that stayed up this long earns a fresh crash ladder — otherwise
+/// a spawn-that-then-crashes cycle would reset its count on every start.
+const CRASH_RESTART_RESET_AFTER: Duration = Duration::from_secs(600);
+
+/// Pause before auto-retry attempt n; the server already spent its own
+/// backoff ladder (tens of seconds) before the error reached us.
+fn retry_backoff(attempts: u32) -> Duration {
+    Duration::from_secs(5 * attempts.max(1) as u64)
+}
+
 // ---- tiles ---------------------------------------------------------------
 
 /// Subagent runs spawned by THIS chat — the flyout's Agents section is scoped here.
@@ -1541,6 +1572,13 @@ pub struct Store {
     tile_by_session: HashMap<String, String>, // session id → tile key
     turn_start_by_session: HashMap<String, Instant>,
     user_stopped_by_session: HashSet<String>,
+    /// last prompt per session, replayed when a turn dies retryable
+    last_prompt_by_session: HashMap<String, PromptPayload>,
+    /// sessions whose turn died retryable; their next session.idle re-sends
+    retry_due_by_session: HashSet<String>,
+    /// consecutive crash restarts per workspace, with the last crash time;
+    /// the count decays after a long stable stretch
+    crash_restarts: HashMap<String, (u32, Instant)>,
     pub queue: Vec<QueueEntry>,
     workspace_generation: u64,
     running_by_session: HashSet<String>,
@@ -1650,6 +1688,9 @@ impl Store {
             tile_by_session: HashMap::new(),
             turn_start_by_session: HashMap::new(),
             user_stopped_by_session: HashSet::new(),
+            last_prompt_by_session: HashMap::new(),
+            retry_due_by_session: HashSet::new(),
+            crash_restarts: HashMap::new(),
             queue: Vec::new(),
             workspace_generation: 0,
             running_by_session: HashSet::new(),
@@ -2131,6 +2172,7 @@ impl Store {
         }
         self.drop_queue(&session_ids);
         self.drop_pending(&session_ids);
+        self.drop_retries(&session_ids);
         for sid in &session_ids {
             self.workspace_by_session.remove(sid);
             self.title_by_session.remove(sid);
@@ -2190,7 +2232,15 @@ impl Store {
             return;
         }
         self.net.send(NetCommand::StopServer { ws_key: path.into() });
+        self.teardown_runtime(path);
+        let _ = cx;
+    }
+
+    /// Drops the store-side state of a workspace's runtime; the net-side
+    /// entry (process, pump, poll) dies via the StopServer command.
+    fn teardown_runtime(&mut self, path: &str) {
         self.runtimes.remove(path);
+        self.crash_restarts.remove(path);
         self.drop_subagent_rows(path);
         if let Some(ws) = self.workspace_by_path_mut(path) {
             ws.is_running = false;
@@ -2207,12 +2257,12 @@ impl Store {
         }
         self.drop_queue(&session_ids);
         self.drop_pending(&session_ids);
+        self.drop_retries(&session_ids);
         if self.selected_workspace.as_deref() == Some(path) {
             self.is_server_running = false;
             self.sessions.clear();
         }
         self.save_state();
-        let _ = cx;
     }
 
     pub fn shutdown(&mut self) {
@@ -2329,6 +2379,41 @@ impl Store {
                 }
             },
             UiEvent::ServerStopped { .. } => {}
+            UiEvent::ServerCrashed { ws_key } => {
+                // a user stop tore the workspace down meanwhile: stale report
+                if !self.runtimes.contains_key(&ws_key) {
+                    return;
+                }
+                let crashes = {
+                    let now = Instant::now();
+                    let entry = self.crash_restarts.entry(ws_key.clone()).or_insert((0, now));
+                    if now.duration_since(entry.1) >= CRASH_RESTART_RESET_AFTER {
+                        entry.0 = 0; // the previous run was long ago: fresh ladder
+                    }
+                    entry.0 += 1;
+                    entry.1 = now;
+                    entry.0
+                };
+                let name = self
+                    .workspaces
+                    .iter()
+                    .find(|w| w.folder_path() == ws_key)
+                    .map(|w| w.name.clone())
+                    .unwrap_or_else(|| ws_key.clone());
+                // StopServer first: it tears down the net-side entry (dead
+                // process handle, still-retrying pump) so StartServer can spawn
+                self.net.send(NetCommand::StopServer { ws_key: ws_key.clone() });
+                self.teardown_runtime(&ws_key);
+                if crashes > MAX_CRASH_RESTARTS {
+                    tracing::error!("server for {name} keeps crashing — giving up after {MAX_CRASH_RESTARTS} restarts");
+                    self.announce(&format!("{name}: server keeps crashing — stopped restarting."), true, cx);
+                } else {
+                    tracing::warn!("server for {name} crashed — restarting ({crashes}/{MAX_CRASH_RESTARTS})");
+                    self.announce(&format!("{name}: server crashed — restarting ({crashes}/{MAX_CRASH_RESTARTS})…"), true, cx);
+                    self.start_workspace(&ws_key, cx);
+                }
+                self.repaint(cx);
+            }
             UiEvent::Event { ws_key, event } => {
                 self.handle_stream_event(&ws_key, &event, cx);
             }
@@ -2567,6 +2652,7 @@ impl Store {
                     }
                 } else {
                     self.user_stopped_by_session.insert(session_id.clone());
+                    self.retry_due_by_session.remove(&session_id);
                     self.set_running(Some(&session_id), false);
                     self.set_subagent_running(&session_id, false);
                 }
@@ -2949,20 +3035,49 @@ impl Store {
     }
 
     fn send_core(&mut self, session_id: &str, text: String, attachments: Vec<AttachmentItem>, cx: &mut Context<Self>) {
+        let tile_key = self.tile_by_session.get(session_id).cloned();
+        let tile = tile_key.as_deref().and_then(|key| self.tile_by_key(key));
+        let model = tile
+            .and_then(|t| t.selected_model.clone())
+            .filter(|m| m != DEFAULT_MODEL_ENTRY);
+        let variant = tile
+            .and_then(|t| t.selected_variant.clone())
+            .filter(|v| v != DEFAULT_VARIANT_ENTRY);
+        let agent = tile.and_then(|t| t.selected_agent.clone()).filter(|a| a != DEFAULT_AGENT_ENTRY);
+        // a leading `/name args` matching a server command/skill goes to the
+        // /command route: the server expands the template and honors the
+        // command's own agent/model config (subtask skills included)
+        let command = self
+            .effective_workspace_path(session_id)
+            .and_then(|ws_key| self.commands.get(&ws_key))
+            .and_then(|commands| parse_slash_command(&text, commands));
+        self.dispatch_send(
+            session_id,
+            PromptPayload { text, attachments, model, variant, agent, command, attempts: 0 },
+            cx,
+        );
+    }
+
+    /// Puts a prompt on the wire: optimistic transcript items, running state,
+    /// auto title, then the net command. The auto-retry path replays a stored
+    /// [`PromptPayload`] through here unchanged.
+    fn dispatch_send(&mut self, session_id: &str, payload: PromptPayload, cx: &mut Context<Self>) {
         let Some(ws_key) = self.effective_workspace_path(session_id) else { return };
         let tile_key = self.tile_by_session.get(session_id).cloned();
+        // verbatim copy for the auto-retry path (attachment bytes are Arc'd)
+        self.last_prompt_by_session.insert(session_id.to_string(), payload.clone());
         let sent_at = Instant::now();
         if let Some(tile_key) = &tile_key {
             let mut items: Vec<Arc<ChatItem>> = Vec::new();
-            if !text.is_empty() {
+            if !payload.text.is_empty() {
                 items.push(Arc::new(ChatItem::UserMessage {
                     key: self.next_key,
-                    text: text.clone(),
+                    text: payload.text.clone(),
                     created_ms: 0, // rendered with no time label, like "now"
                 }));
                 self.next_key += 1;
             }
-            for attachment in &attachments {
+            for attachment in &payload.attachments {
                 if attachment.is_image() {
                     items.push(Arc::new(ChatItem::Image {
                         key: format!("local{}", self.next_key),
@@ -2985,39 +3100,25 @@ impl Store {
         }
         self.set_running(Some(session_id), true);
         self.turn_start_by_session.insert(session_id.to_string(), sent_at);
-        let title_seed = if !text.is_empty() {
-            text.clone()
+        let title_seed = if !payload.text.is_empty() {
+            payload.text.clone()
         } else {
-            attachments.first().map(|a| a.file_name.clone()).unwrap_or_else(|| DRAFT_TITLE.into())
+            payload.attachments.first().map(|a| a.file_name.clone()).unwrap_or_else(|| DRAFT_TITLE.into())
         };
         self.auto_title(session_id, &title_seed);
-        let tile = tile_key.as_deref().and_then(|key| self.tile_by_key(key));
-        let model = tile
-            .and_then(|t| t.selected_model.clone())
-            .filter(|m| m != DEFAULT_MODEL_ENTRY);
-        let variant = tile
-            .and_then(|t| t.selected_variant.clone())
-            .filter(|v| v != DEFAULT_VARIANT_ENTRY);
-        let agent = tile.and_then(|t| t.selected_agent.clone()).filter(|a| a != DEFAULT_AGENT_ENTRY);
-        // a leading `/name args` matching a server command/skill goes to the
-        // /command route: the server expands the template and honors the
-        // command's own agent/model config (subtask skills included)
-        let command = self
-            .commands
-            .get(&ws_key)
-            .and_then(|commands| parse_slash_command(&text, commands));
         self.net.send(NetCommand::SendMessage {
             ws_key,
             session_id: session_id.to_string(),
-            text,
-            model,
-            variant,
-            agent,
-            attachments: attachments
+            text: payload.text,
+            model: payload.model,
+            variant: payload.variant,
+            agent: payload.agent,
+            attachments: payload
+                .attachments
                 .into_iter()
                 .map(|a| (a.file_name, a.mime, a.data))
                 .collect(),
-            command,
+            command: payload.command,
         });
         self.repaint(cx);
     }
@@ -3102,6 +3203,37 @@ impl Store {
         self.send_core(session_id, entry.text, entry.attachments, cx);
     }
 
+    /// Marks a session for an automatic resend when its next idle lands.
+    /// Only prompts this app sent qualify, only up to [`MAX_AUTO_RETRY`]
+    /// attempts, and an explicitly stopped turn never retries.
+    fn arm_auto_retry(&mut self, session_id: &str) -> Option<u32> {
+        if self.user_stopped_by_session.contains(session_id) {
+            return None;
+        }
+        let payload = self.last_prompt_by_session.get_mut(session_id)?;
+        if payload.attempts >= MAX_AUTO_RETRY {
+            return None;
+        }
+        payload.attempts += 1;
+        self.retry_due_by_session.insert(session_id.to_string());
+        Some(payload.attempts)
+    }
+
+    /// The retry timer fired: put the stored prompt back on the wire.
+    /// A prompt the user sent meanwhile or a stop press wins over the retry.
+    fn fire_auto_retry(&mut self, session_id: &str, cx: &mut Context<Self>) {
+        self.retry_due_by_session.remove(session_id);
+        if self.is_busy(session_id) || self.user_stopped_by_session.contains(session_id) {
+            return;
+        }
+        if !self.has_runtime(session_id) {
+            self.post_note_for_session(session_id, "Auto-retry cancelled — this chat's workspace server is stopped.", true);
+            return;
+        }
+        let Some(payload) = self.last_prompt_by_session.get(session_id).cloned() else { return };
+        self.dispatch_send(session_id, payload, cx);
+    }
+
     pub fn abort_tile(&mut self, tile_key: &str, cx: &mut Context<Self>) {
         let Some(tile) = self.tile_by_key(tile_key) else { return };
         let Some(session_id) = tile.session_id.clone() else { return };
@@ -3115,6 +3247,7 @@ impl Store {
 
     pub fn stop_running(&mut self, session_id: &str, cx: &mut Context<Self>) {
         let Some(ws_key) = self.effective_workspace_path(session_id) else { return };
+        self.retry_due_by_session.remove(session_id);
         self.net.send(NetCommand::Request { ws_key, request: ApiRequest::Abort { session_id: session_id.to_string() } });
         self.repaint(cx);
     }
@@ -3555,6 +3688,7 @@ impl Store {
         self.ui.pins.remove(id);
         self.drop_queue(&[id.to_string()]);
         self.drop_pending(&[id.to_string()]);
+        self.drop_retries(&[id.to_string()]);
         self.sync_workspace_chats(cx);
     }
 
@@ -3623,6 +3757,14 @@ impl Store {
                 self.mark_attention(sid, false);
             }
             self.pending_questions_by_session.remove(sid);
+        }
+    }
+
+    /// Drops the auto-retry bookkeeping for sessions whose workspace went away.
+    fn drop_retries(&mut self, session_ids: &[String]) {
+        for sid in session_ids {
+            self.last_prompt_by_session.remove(sid);
+            self.retry_due_by_session.remove(sid);
         }
     }
 
@@ -3975,7 +4117,20 @@ impl Store {
                         }
                     }
                     let sid = sid.to_string();
-                    self.try_drain_queue(&sid, cx);
+                    if self.retry_due_by_session.remove(&sid) {
+                        // the turn died retryable: re-send the stored prompt
+                        // after a pause; the queue drains on the retry's idle
+                        let delay = retry_backoff(
+                            self.last_prompt_by_session.get(&sid).map(|p| p.attempts).unwrap_or(1),
+                        );
+                        cx.spawn(async move |store, cx| {
+                            cx.background_executor().timer(delay).await;
+                            let _ = store.update(cx, |store, cx| store.fire_auto_retry(&sid, cx));
+                        })
+                        .detach();
+                    } else {
+                        self.try_drain_queue(&sid, cx);
+                    }
                 }
             }
             "todo.updated" => {
@@ -3994,10 +4149,18 @@ impl Store {
                 }
             }
             "session.error" => {
-                let message = read_error(data);
+                let (message, retryable) = read_error_info(data);
                 let error_session = read_session_id(data);
                 if let Some(sid) = error_session {
-                    self.post_note_for_session(sid, &message, true);
+                    let attempt = if retryable { self.arm_auto_retry(sid) } else { None };
+                    match attempt {
+                        Some(attempt) => self.post_note_for_session(
+                            sid,
+                            &format!("Connection lost — re-sending the last prompt (attempt {attempt}/{MAX_AUTO_RETRY})…"),
+                            false,
+                        ),
+                        None => self.post_note_for_session(sid, &message, true),
+                    }
                 } else {
                     self.announce(&message, true, cx);
                 }
@@ -4763,6 +4926,17 @@ fn read_status(data: &serde_json::Value) -> String {
     }
 }
 
+/// (message, retryable) from a session.error payload. `retryable` mirrors the
+/// AI SDK's own flag on the error — true for connection failures, false for
+/// real API errors (auth, quota, bad request) which must not be re-sent.
+fn read_error_info(data: &serde_json::Value) -> (String, bool) {
+    let retryable = data
+        .pointer("/error/data/isRetryable")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    (read_error(data), retryable)
+}
+
 fn read_error(data: &serde_json::Value) -> String {
     if let Some(error) = data.get("error").filter(|e| e.is_object()) {
         let name = error.get("name").and_then(serde_json::Value::as_str).unwrap_or("");
@@ -4866,7 +5040,7 @@ fn rand_0_to(n: i64) -> i64 {
 
 #[cfg(test)]
 mod suggest_tests {
-    use super::{at_token_start, parse_slash_command, session_chat_settings};
+    use super::{at_token_start, parse_slash_command, read_error_info, session_chat_settings};
     use crate::oc::{CommandInfo, StoredMessage};
     use serde_json::json;
 
@@ -4919,5 +5093,31 @@ mod suggest_tests {
         // malformed model fields fall back to the seeds too
         let messages = vec![stored("m1", "assistant", json!({"providerID": "", "modelID": "new"}))];
         assert_eq!(session_chat_settings(&messages), None);
+    }
+
+    #[test]
+    fn error_reader_reports_retryable() {
+        // real v1.19.4 shape: connection failures carry isRetryable in error.data
+        let connection = json!({
+            "sessionID": "s1",
+            "error": {
+                "name": "APIError",
+                "data": {
+                    "message": "Cannot connect to API: ECONNREFUSED: Unable to connect.",
+                    "isRetryable": true,
+                    "metadata": {"url": "http://127.0.0.1:1/v1/chat/completions"}
+                }
+            }
+        });
+        assert_eq!(
+            read_error_info(&connection),
+            ("Error: Cannot connect to API: ECONNREFUSED: Unable to connect.".into(), true)
+        );
+        // hard errors never retry, with or without the flag
+        let quota = json!({"error": {"name": "APIError", "data": {"message": "quota exceeded", "isRetryable": false}}});
+        assert_eq!(read_error_info(&quota).1, false);
+        let auth = json!({"error": {"name": "ProviderAuthError", "message": "invalid api key"}});
+        assert_eq!(read_error_info(&auth).1, false);
+        assert_eq!(read_error_info(&json!({})).1, false);
     }
 }

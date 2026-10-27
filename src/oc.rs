@@ -9,7 +9,7 @@
 use anyhow::{anyhow, Context as _, Result};
 use serde_json::{json, Value};
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 pub const ASK_CONFIG: &str = r#"{"$schema":"https://opencode.ai/config.json","permission":{"edit":"ask","bash":"ask","webfetch":"ask"}}"#;
@@ -100,7 +100,20 @@ pub struct QuestionRequestInfo {
 
 pub struct ServerProcess {
     pub base_url: String,
-    child: Option<tokio::process::Child>,
+    /// behind Arc+Mutex so the health poll can watch for an early exit while
+    /// the workspace map on the net thread keeps the owning handle; None for
+    /// an attached (not spawned) server — there is nothing to watch
+    child: Arc<Mutex<Option<tokio::process::Child>>>,
+}
+
+/// True when the spawned serve process exited on its own. A taken (stopped)
+/// or never-spawned (attached) child reads false.
+fn child_exited(probe: &Mutex<Option<tokio::process::Child>>) -> bool {
+    let mut guard = probe.lock().expect("child lock");
+    match guard.as_mut() {
+        Some(child) => matches!(child.try_wait(), Ok(Some(_))),
+        None => false,
+    }
 }
 
 impl ServerProcess {
@@ -112,7 +125,7 @@ impl ServerProcess {
         if is_healthy(&client, &base_url).await {
             tracing::info!("attached to a healthy opencode server at {base_url}");
             on_log(format!("attaching to a healthy opencode server at {base_url}"));
-            return Ok(ServerProcess { base_url, child: None });
+            return Ok(ServerProcess { base_url, child: Arc::new(Mutex::new(None)) });
         }
 
         let mut command = tokio::process::Command::new(executable);
@@ -164,19 +177,21 @@ impl ServerProcess {
             });
         }
 
-        let process = ServerProcess { base_url: base_url.clone(), child: Some(child) };
+        let process = ServerProcess { base_url: base_url.clone(), child: Arc::new(Mutex::new(Some(child))) };
 
         let deadline = std::time::Instant::now() + Duration::from_secs(25);
-        let mut process = process;
         loop {
             if std::time::Instant::now() >= deadline {
                 tracing::warn!("serve did not become healthy within 25 s");
                 return Err(anyhow!("opencode serve did not become healthy within 25 s."));
             }
-            if let Some(child) = process.child.as_mut() {
-                if let Ok(Some(status)) = child.try_wait() {
-                    tracing::warn!("serve exited early with code {status}");
-                    return Err(anyhow!("opencode serve exited with code {status}."));
+            {
+                let mut guard = process.child.lock().expect("child lock");
+                if let Some(child) = guard.as_mut() {
+                    if let Ok(Some(status)) = child.try_wait() {
+                        tracing::warn!("serve exited early with code {status}");
+                        return Err(anyhow!("opencode serve exited with code {status}."));
+                    }
                 }
             }
             if is_healthy(&client, &base_url).await {
@@ -187,10 +202,11 @@ impl ServerProcess {
     }
 
     pub fn stop(&mut self) {
-        if let Some(child) = self.child.as_mut() {
+        // take (not just kill): the health poll must not report a crash for a
+        // process the user stopped, and kill_on_drop finishes the job
+        if let Some(mut child) = self.child.lock().expect("child lock").take() {
             let _ = child.start_kill();
         }
-        self.child = None;
     }
 }
 
@@ -792,6 +808,8 @@ pub enum StreamStatus {
 pub enum UiEvent {
     ServerStarted { ws_key: String, result: Result<()> },
     ServerStopped,
+    /// the spawned serve process exited on its own (not a user stop)
+    ServerCrashed { ws_key: String },
     Event { ws_key: String, event: Value },
     StreamStatus { ws_key: String, status: StreamStatus },
     /// Latest /global/health answer; None until the first poll lands.
@@ -911,16 +929,31 @@ async fn net_main(command_rx: async_channel::Receiver<NetCommand>, event_tx: asy
                 };
                 let event_tx = event_tx.clone();
                 tokio::spawn(async move {
-                    let result = match &command {
-                        Some((name, args)) => {
-                            client
-                                .send_command(&session_id, name, args, model.as_deref(), variant.as_deref(), agent.as_deref(), &attachments)
-                                .await
-                        }
-                        None => {
-                            client
-                                .send_message(&session_id, &text, model.as_deref(), variant.as_deref(), agent.as_deref(), &attachments)
-                                .await
+                    // a connect-phase failure never reached the server, so a
+                    // re-POST cannot double-send; brief blips (serve restarting
+                    // under the chat) retry quietly instead of erroring the turn
+                    let mut blips = 0u32;
+                    let result = loop {
+                        let attempt = match &command {
+                            Some((name, args)) => {
+                                client
+                                    .send_command(&session_id, name, args, model.as_deref(), variant.as_deref(), agent.as_deref(), &attachments)
+                                    .await
+                            }
+                            None => {
+                                client
+                                    .send_message(&session_id, &text, model.as_deref(), variant.as_deref(), agent.as_deref(), &attachments)
+                                    .await
+                            }
+                        };
+                        match attempt {
+                            Ok(()) => break Ok(()),
+                            Err(err) if blips < 2 && is_connect_blip(&err) => {
+                                blips += 1;
+                                tracing::warn!("send to {session_id} could not connect, retry {blips}/2: {err:#}");
+                                tokio::time::sleep(Duration::from_millis(1500 * blips as u64)).await;
+                            }
+                            Err(err) => break Err(err),
                         }
                     };
                     if let Err(err) = result {
@@ -1044,12 +1077,20 @@ async fn start_workspace(
     });
 
     // server health poll: /global/health every 10 s feeds the gauge's
-    // "connected but degraded" color; the store dedupes unchanged answers
+    // "connected but degraded" color; the store dedupes unchanged answers.
+    // Each tick first checks the spawned child: an exited serve can never
+    // come back on its own, so the store gets a ServerCrashed to restart it
     let poll_tx = event_tx.clone();
     let poll_key = ws_key.to_string();
     let poll_client = ApiClient::new(&base_url);
+    let poll_probe = Arc::clone(&process.child);
     tokio::spawn(async move {
         loop {
+            if child_exited(&poll_probe) {
+                tracing::warn!("[{poll_key}] serve process exited — reporting crash");
+                let _ = poll_tx.send(UiEvent::ServerCrashed { ws_key: poll_key.clone() }).await;
+                return;
+            }
             let healthy = tokio::select! {
                 _ = stop_rx.recv() => return,
                 healthy = is_healthy(&poll_client.http, &poll_client.base_url) => healthy,
@@ -1069,6 +1110,14 @@ async fn start_workspace(
         WorkspaceNet { process: Some(process), api, event_stop: Some(stop_tx) },
     );
     Ok(())
+}
+
+/// True when a request failed in the connect phase (nothing was sent, the
+/// server was unreachable) — a re-POST cannot double-send.
+fn is_connect_blip(err: &anyhow::Error) -> bool {
+    err.chain()
+        .filter_map(|cause| cause.downcast_ref::<reqwest::Error>())
+        .any(|e| e.is_connect())
 }
 
 async fn run_request(client: &ApiClient, ws_key: String, request: ApiRequest) -> UiEvent {

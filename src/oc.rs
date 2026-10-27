@@ -519,6 +519,42 @@ impl ApiClient {
             .unwrap_or_default())
     }
 
+    /// The server's merged config (global + project + env content). The `mcp`
+    /// section lists the workspace's configured MCP servers.
+    pub async fn get_config(&self) -> Result<Value> {
+        let resp = self.http.get(format!("{}/config", self.base_url)).send().await?;
+        error_for_status(resp).await?.json().await.map_err(anyhow::Error::from)
+    }
+
+    /// Runtime MCP toggles: they change which tools the running server exposes
+    /// immediately, touch no config file, and a 404 just means the entry
+    /// vanished from config between listing and acting — still a success.
+    pub async fn mcp_connect(&self, name: &str) -> Result<()> {
+        let resp = self
+            .http
+            .post(format!("{}/mcp/{}/connect", self.base_url, name))
+            .json(&json!({}))
+            .send()
+            .await?;
+        if resp.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(());
+        }
+        error_for_status(resp).await.map(|_| ())
+    }
+
+    pub async fn mcp_disconnect(&self, name: &str) -> Result<()> {
+        let resp = self
+            .http
+            .post(format!("{}/mcp/{}/disconnect", self.base_url, name))
+            .json(&json!({}))
+            .send()
+            .await?;
+        if resp.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(());
+        }
+        error_for_status(resp).await.map(|_| ())
+    }
+
     pub async fn get_models(&self) -> Result<Vec<ModelInfo>> {
         let resp = self
             .http
@@ -737,6 +773,11 @@ pub enum ApiRequest {
     ListCommands,
     /// Filename search for the `@` mention menu (GET /find/file).
     FindFiles { query: String },
+    /// Names of the workspace's configured MCP servers (GET /config "mcp" section).
+    ListMcpNames,
+    /// Runtime MCP toggle for one configured server; instant, no config write.
+    McpConnect { name: String },
+    McpDisconnect { name: String },
 }
 
 /// Live state of a workspace's event pump. Connected is reported on every
@@ -771,6 +812,8 @@ pub enum UiEvent {
     /// Answer to a FindFiles request; the query rides along so stale answers
     /// can be told apart from the menu's current token.
     FilesFound { ws_key: String, query: String, result: Result<Vec<String>> },
+    /// The workspace's configured MCP server names, in stable name order.
+    McpNamesLoaded { ws_key: String, result: Result<Vec<String>> },
     MessageSendFailed { session_id: String, error: String },
     Log { ws_key: String, line: String },
 }
@@ -1100,5 +1143,66 @@ async fn run_request(client: &ApiClient, ws_key: String, request: ApiRequest) ->
             query: query.clone(),
             result: client.find_files(&query).await,
         },
+        ApiRequest::ListMcpNames => UiEvent::McpNamesLoaded {
+            ws_key,
+            result: client.get_config().await.map(|v| mcp_names(&v)),
+        },
+        ApiRequest::McpConnect { name } => {
+            let line = match client.mcp_connect(&name).await {
+                Ok(()) => format!("mcp: connect {name}"),
+                Err(err) => format!("mcp: connect {name} failed: {err:#}"),
+            };
+            UiEvent::Log { ws_key, line }
+        }
+        ApiRequest::McpDisconnect { name } => {
+            let line = match client.mcp_disconnect(&name).await {
+                Ok(()) => format!("mcp: disconnect {name}"),
+                Err(err) => format!("mcp: disconnect {name} failed: {err:#}"),
+            };
+            UiEvent::Log { ws_key, line }
+        }
+    }
+}
+
+/// The `mcp` section's server names from a merged /config answer, in stable
+/// name order. Non-object entries are not servers and are skipped.
+fn mcp_names(config: &Value) -> Vec<String> {
+    let mut names: Vec<String> = config
+        .get("mcp")
+        .and_then(Value::as_object)
+        .map(|mcp| {
+            mcp.iter()
+                .filter(|(_, entry)| entry.is_object())
+                .map(|(name, _)| name.clone())
+                .collect()
+        })
+        .unwrap_or_default();
+    names.sort();
+    names
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn mcp_names_parses_section_and_skips_non_objects() {
+        let config = json!({
+            "mcp": {
+                "wiki": { "type": "remote", "url": "http://x" },
+                "broken": "not a server",
+                "tools": { "type": "local", "command": ["npx"] }
+            },
+            "agent": {}
+        });
+        assert_eq!(mcp_names(&config), vec!["tools".to_string(), "wiki".to_string()]);
+    }
+
+    #[test]
+    fn mcp_names_handles_missing_and_empty_sections() {
+        assert!(mcp_names(&json!({ "agent": {} })).is_empty());
+        assert!(mcp_names(&json!({ "mcp": {} })).is_empty());
+        assert!(mcp_names(&json!({ "mcp": "garbage" })).is_empty());
     }
 }

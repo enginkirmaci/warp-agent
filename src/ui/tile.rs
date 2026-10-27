@@ -1590,6 +1590,10 @@ struct TileSnap {
     multiple_workspaces: bool,
     has_attention: bool,
     allow_on: bool,
+    /// MCP toggle: any servers configured for the tile's workspace, and
+    /// whether the toggle currently keeps them enabled
+    has_mcp: bool,
+    mcp_on: bool,
     spring: bool,
 }
 
@@ -2464,6 +2468,30 @@ impl TileView {
                         } else {
                             crate::ui::icon("icons/shield.svg", px(fonts.icon_medium), theme::TEXT_MUTED)
                         }),
+                    )
+                    .child(
+                        tip(
+                            div()
+                                .id("mcp-toggle")
+                                .when(!snap.has_mcp, |d| d.opacity(0.4))
+                                .cursor_pointer()
+                                .p_1()
+                                .rounded_md()
+                                .hover(|s| s.bg(theme::HOVER))
+                                .on_click({
+                                    let store = self.store.clone();
+                                    let key = self.key.clone();
+                                    move |_, _, cx| {
+                                        store.update(cx, |s, cx| s.toggle_mcp(&key, cx));
+                                    }
+                                }),
+                            "Toggle MCP servers",
+                        )
+                        .child(if snap.mcp_on {
+                            crate::ui::icon("icons/plug.svg", px(fonts.icon_medium), accent)
+                        } else {
+                            crate::ui::icon("icons/plug.svg", px(fonts.icon_medium), theme::TEXT_MUTED)
+                        }),
                     ),
             )
             .child(div().flex_1())
@@ -2619,6 +2647,7 @@ impl Render for TileView {
             let Some(tile) = store.tile_by_key(&self.key) else {
                 return div().into_any_element();
             };
+            let (has_mcp, mcp_on) = store.mcp_state(&self.key);
             TileSnap {
                 fonts: store.fonts,
                 accent: store.accent.accent,
@@ -2658,6 +2687,8 @@ impl Render for TileView {
                 has_attention: store.has_attention_needed(),
                 allow_on: store.auto_allow,
                 spring: store.todos_spring.as_deref() == Some(self.key.as_str()),
+                has_mcp,
+                mcp_on,
             }
         };
         let fonts = snap.fonts;

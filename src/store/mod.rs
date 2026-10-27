@@ -1575,6 +1575,13 @@ pub struct Store {
     /// The workspace's server commands + skills, keyed by workspace folder
     /// path; filled on ServerStarted and refreshed when a slash menu opens.
     pub commands: HashMap<String, Vec<CommandInfo>>,
+    /// The workspace's configured MCP server names, keyed by workspace folder
+    /// path; filled on ServerStarted (GET /config "mcp" section). Drives the
+    /// composer's MCP toggle.
+    pub mcp_names: HashMap<String, Vec<String>>,
+    /// Workspace folder paths whose MCP servers the user keeps disconnected;
+    /// re-asserted with runtime disconnects after every server (re)start.
+    pub mcp_disabled: HashSet<String>,
     /// Latest @-mention filename search answer (last request wins); the query
     /// rides along so a tile can tell stale answers from its current token.
     pub file_results: Option<FileSuggest>,
@@ -1662,6 +1669,8 @@ impl Store {
             tile_placeholder: None,
             commands: HashMap::new(),
             file_results: None,
+            mcp_names: HashMap::new(),
+            mcp_disabled: ui.mcp_disabled_ws.iter().cloned().collect(),
         };
 
         // heal paths saved by older builds: fs::canonicalize used to leak the
@@ -1736,6 +1745,11 @@ impl Store {
     pub fn save_state(&mut self) {
         self.ui.active_workspace = self.selected_workspace.clone();
         self.ui.auto_allow_always = Some(self.auto_allow);
+        self.ui.mcp_disabled_ws = {
+            let mut paths: Vec<String> = self.mcp_disabled.iter().cloned().collect();
+            paths.sort();
+            paths
+        };
         self.persist_tiles();
         self.persist_drafts();
         // persist_tiles (and most mutations) write the runtime WorkspaceItems;
@@ -1858,6 +1872,48 @@ impl Store {
             .and_then(|t| t.session_id.clone())
             .and_then(|sid| self.workspace_by_session.get(&sid).cloned())
             .or_else(|| self.selected_workspace.clone())
+    }
+
+    /// The MCP toggle's state for a tile: `(has servers, enabled)` — `has` is
+    /// false when the workspace's server is down or has no `mcp` config, and
+    /// the button renders dimmed.
+    pub fn mcp_state(&self, tile_key: &str) -> (bool, bool) {
+        let Some(ws_key) = self.tile_ws_key(tile_key) else { return (false, false) };
+        let has = self.mcp_names.get(&ws_key).is_some_and(|names| !names.is_empty());
+        let on = has && !self.mcp_disabled.contains(&ws_key);
+        (has, on)
+    }
+
+    /// The composer's MCP toggle: runtime-disconnects (or reconnects) every
+    /// configured MCP server of the tile's workspace. Instant, touches no
+    /// config file; the choice persists in ui.json and is re-asserted after
+    /// every server (re)start.
+    pub fn toggle_mcp(&mut self, tile_key: &str, cx: &mut Context<Self>) {
+        let Some(ws_key) = self.tile_ws_key(tile_key) else { return };
+        let names = self.mcp_names.get(&ws_key).cloned().unwrap_or_default();
+        if names.is_empty() {
+            self.announce("No MCP servers configured for this workspace.", true, cx);
+            return;
+        }
+        let disabling = !self.mcp_disabled.contains(&ws_key);
+        for name in names {
+            self.net.send(NetCommand::Request {
+                ws_key: ws_key.clone(),
+                request: if disabling {
+                    ApiRequest::McpDisconnect { name }
+                } else {
+                    ApiRequest::McpConnect { name }
+                },
+            });
+        }
+        if disabling {
+            self.mcp_disabled.insert(ws_key.clone());
+        } else {
+            self.mcp_disabled.remove(&ws_key);
+        }
+        tracing::info!("mcp {} for {ws_key}", if disabling { "disabled" } else { "enabled" });
+        self.save_state();
+        self.repaint(cx);
     }
 
     // ---- lookups ----
@@ -2241,6 +2297,8 @@ impl Store {
                     self.net.send(NetCommand::Request { ws_key: ws_key.clone(), request: ApiRequest::ListAgents });
                     // the / suggestion menu serves this workspace's commands
                     self.net.send(NetCommand::Request { ws_key: ws_key.clone(), request: ApiRequest::ListCommands });
+                    // the MCP toggle needs the workspace's configured server names
+                    self.net.send(NetCommand::Request { ws_key: ws_key.clone(), request: ApiRequest::ListMcpNames });
                     // a plain connect never reopens saved chats — only the
                     // banner's Restore button and explicit chat clicks do
                     // restores and opens that were waiting on this server start
@@ -2652,6 +2710,23 @@ impl Store {
                     self.repaint(cx);
                 }
             }
+            UiEvent::McpNamesLoaded { ws_key, result } => match result {
+                Ok(names) => {
+                    self.mcp_names.insert(ws_key.clone(), names);
+                    // a fresh server starts every configured MCP server; keep
+                    // the user's toggle-off in force (best-effort, ignores 404)
+                    if self.mcp_disabled.contains(&ws_key) {
+                        for name in self.mcp_names.get(&ws_key).cloned().unwrap_or_default() {
+                            self.net.send(NetCommand::Request {
+                                ws_key: ws_key.clone(),
+                                request: ApiRequest::McpDisconnect { name },
+                            });
+                        }
+                    }
+                    self.repaint(cx);
+                }
+                Err(err) => tracing::debug!("mcp list refresh failed for {ws_key}: {err:#}"),
+            },
             UiEvent::FilesFound { ws_key, query, result } => {
                 if let Ok(paths) = result {
                     self.file_results = Some(FileSuggest { ws_key, query, paths });

@@ -125,6 +125,10 @@ pub struct UiState {
     /// persisted — the app still never launches with a phantom draft.
     #[serde(rename = "Drafts", default)]
     pub drafts: std::collections::HashMap<String, String>,
+    /// Workspace folder paths whose MCP servers the composer toggle keeps
+    /// disconnected; re-applied after every server (re)start.
+    #[serde(rename = "McpDisabled", default)]
+    pub mcp_disabled_ws: Vec<String>,
 }
 
 impl UiState {

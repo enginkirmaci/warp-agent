@@ -41,6 +41,7 @@ pub fn shared_highlighter(cx: &gpui::App) -> Arc<CodeBlockHighlighter> {
 thread_local! {
     static CACHE: RefCell<Option<(Arc<HighlightTheme>, Arc<CodeBlockHighlighter>)>> = const { RefCell::new(None) };
     static HIGHLIGHTERS: RefCell<HashMap<SharedString, SyntaxHighlighter>> = RefCell::new(HashMap::new());
+    static BUFFER_CACHE: RefCell<HashMap<(Arc<HighlightTheme>, String, u64), Arc<Vec<(Range<usize>, HighlightStyle)>>>> = RefCell::new(HashMap::new());
 }
 
 fn build(
@@ -60,16 +61,53 @@ fn build(
         let Some(lang) = lang else {
             return Vec::new();
         };
-        HIGHLIGHTERS.with(|cache| {
-            let mut cache = cache.borrow_mut();
-            let highlighter = cache
-                .entry(lang.clone().into())
-                .or_insert_with(|| SyntaxHighlighter::new(&lang));
-            let rope = Rope::from_str(&code);
-            highlighter.update(None, &rope, None);
-            highlighter.styles(&(0..code.len()), theme.as_ref())
-        })
+        (*highlight_buffer(&code, &lang, &theme)).clone()
     }
+}
+
+/// Token styles for a plain code buffer — the entry point for the renderers
+/// that draw their own gutters (ui/diff.rs). Cached by (language, text): a
+/// re-render of an unchanged block — every repaint of an open fold while its
+/// tile streams — skips both the rope rebuild and the tree-sitter style pass.
+pub fn highlight_buffer(
+    code: &str,
+    lang: &str,
+    theme: &Arc<HighlightTheme>,
+) -> Arc<Vec<(Range<usize>, HighlightStyle)>> {
+    // The theme Arc sits IN the key: accent swaps replace the global theme,
+    // and holding the old Arc alive keeps its address from being reused, so
+    // cached styles can never outlive their palette. 64 blocks cover every
+    // open fold with slack; a full clear on overflow is fine — entries only
+    // get expensive to rebuild, never stale.
+    const CAP: usize = 64;
+    let key = (theme.clone(), lang.to_string(), hash_text(code));
+    if let Some(hit) = BUFFER_CACHE.with(|c| c.borrow().get(&key).cloned()) {
+        return hit;
+    }
+    let styles = HIGHLIGHTERS.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        let highlighter = cache
+            .entry(lang.to_string().into())
+            .or_insert_with(|| SyntaxHighlighter::new(lang));
+        let rope = Rope::from_str(code);
+        highlighter.update(None, &rope, None);
+        Arc::new(highlighter.styles(&(0..code.len()), theme.as_ref()))
+    });
+    BUFFER_CACHE.with(|c| {
+        let mut cache = c.borrow_mut();
+        if cache.len() >= CAP {
+            cache.clear();
+        }
+        cache.insert(key, styles.clone());
+    });
+    styles
+}
+
+fn hash_text(text: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    text.hash(&mut hasher);
+    hasher.finish()
 }
 
 fn looks_like_diff(code: &str) -> bool {

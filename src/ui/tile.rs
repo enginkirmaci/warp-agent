@@ -6,7 +6,7 @@ use crate::store::{at_token_start, ChatItem, QuestionEntry, Store, ToolItem};
 use crate::theme;
 use crate::ui::controls::{fold_body, menu_row, popover_card, BtnKind};
 use crate::ui::controls;
-use crate::ui::diff::render_diff;
+use crate::ui::diff::{render_diff, sniff_lang};
 use crate::ui::markdown::render_markdown;
 use crate::ui::tooltip::tip;
 use gpui::prelude::*;
@@ -921,7 +921,13 @@ impl TileView {
                 .when(open_diff, |d| {
                     d.child(
                         fold_body(gpui::ElementId::NamedInteger("fold-diff".into(), Self::hash(item_id)))
-                            .child(render_diff(tool.diff.as_deref().unwrap_or(""), fonts.font_detail, window)),
+                            .child(render_diff(
+                                tool.diff.as_deref().unwrap_or(""),
+                                Some(&tool.file_path),
+                                fonts.font_detail,
+                                window,
+                                cx,
+                            )),
                     )
                 })
             })
@@ -935,13 +941,13 @@ impl TileView {
                         .gap_2p5();
                     let body = body
                         .when(!tool.details.input.is_empty(), |d| {
-                            d.child(self.detail_section(&format!("{item_id}:input"), "input", &tool.details.input, theme::TEXT_DIM, fonts))
+                            d.child(self.detail_section(&format!("{item_id}:input"), "input", &tool.details.input, theme::TEXT_DIM, sniff_lang(&tool.details.input), fonts, window, cx))
                         })
                         .when(!tool.details.output.is_empty(), |d| {
-                            d.child(self.detail_section(&format!("{item_id}:output"), "output", &tool.details.output, theme::TEXT_DIM, fonts))
+                            d.child(self.detail_section(&format!("{item_id}:output"), "output", &tool.details.output, theme::TEXT_DIM, sniff_lang(&tool.details.output), fonts, window, cx))
                         })
                         .when(!tool.details.error.is_empty(), |d| {
-                            d.child(self.detail_section(&format!("{item_id}:error"), "error", &tool.details.error, theme::DANGER, fonts))
+                            d.child(self.detail_section(&format!("{item_id}:error"), "error", &tool.details.error, theme::DANGER, None, fonts, window, cx))
                         });
                     d.child(body)
                 },
@@ -950,15 +956,19 @@ impl TileView {
             .into_any_element()
     }
 
-    /// One labeled block inside the details fold: small faint label over a
-    /// mono text block on the chip tint.
+    /// One labeled block inside the details fold: small faint label over the
+    /// body. Structured payloads (sniffed JSON) and arbitrary text render as
+    /// line-numbered code; error payloads keep the plain red block.
     fn detail_section(
         &mut self,
         cache_key: &str,
         label: &str,
         text: &str,
         color: gpui::Rgba,
+        lang: Option<&'static str>,
         fonts: theme::FontTokens,
+        window: &mut Window,
+        cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         div()
             .flex()
@@ -970,8 +980,13 @@ impl TileView {
                     .text_color(theme::TEXT_FAINT)
                     .child(SharedString::from(label.to_string())),
             )
-            .child(
-                div()
+            .child(match lang {
+                Some(lang) => div()
+                    .rounded_md()
+                    .bg(theme::CHIP)
+                    .p_2()
+                    .child(crate::ui::diff::render_code(text, Some(lang), color, fonts.font_detail, window, cx)),
+                None => div()
                     .rounded_md()
                     .bg(theme::CHIP)
                     .p_2()
@@ -979,7 +994,7 @@ impl TileView {
                     .font_family(theme::code_font())
                     .text_color(color)
                     .child(self.selectable_text(cache_key, text, "tooldetails")),
-            )
+            })
             .into_any_element()
     }
 
@@ -1239,7 +1254,7 @@ impl TileView {
                                     .when(open_diff, |d| {
                                         d.child(
                                             fold_body(gpui::ElementId::NamedInteger("perm-diff".into(), Self::hash(item_id)))
-                                                .child(render_diff(perm.diff.as_deref().unwrap_or(""), fonts.font_detail, window)),
+                                                .child(render_diff(perm.diff.as_deref().unwrap_or(""), None, fonts.font_detail, window, cx)),
                                         )
                                     })
                             }),

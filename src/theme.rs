@@ -156,8 +156,12 @@ pub const CODE_FG: Rgba = c(0xE4E4E4FF);
 // ---- diffs (the renderer in ui/diff.rs draws from here) -------------------
 
 pub const DIFF_GUTTER: Rgba = c(0x9A9A9A55); // line-number gutter text
+/// Content wash is the quieter shade; the gutter cell over the line numbers
+/// runs brighter so edited rows read as full bands.
 pub const DIFF_ADD_BG: Hsla = hsla(0.36, 0.44, 0.55, 0.15);
 pub const DIFF_DEL_BG: Hsla = hsla(0.02, 0.83, 0.68, 0.15);
+pub const DIFF_ADD_GUTTER_BG: Hsla = hsla(0.36, 0.44, 0.55, 0.24);
+pub const DIFF_DEL_GUTTER_BG: Hsla = hsla(0.02, 0.83, 0.68, 0.24);
 pub const DIFF_HUNK_BG: Hsla = hsla(0.0, 0.0, 0.6, 0.12);
 
 // ---- accent presets ------------------------------------------------------

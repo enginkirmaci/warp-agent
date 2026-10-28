@@ -21,8 +21,13 @@ const RECONNECT_INITIAL: Duration = Duration::from_secs(1);
 /// Backoff ladder cap.
 const RECONNECT_MAX: Duration = Duration::from_secs(30);
 /// A connection that survived this long counts as stable: the next drop
-/// restarts the ladder at [`RECONNECT_INITIAL`] instead of continuing it.
-const RECONNECT_RESET_AFTER: Duration = Duration::from_secs(60);
+/// restarts the ladder at [`RECONNECT_INITIAL`] instead of continuing it, and
+/// the store closes the combined "connection lost" note.
+pub const RECONNECT_RESET_AFTER: Duration = Duration::from_secs(60);
+
+/// Give up reconnecting after this many consecutive failed tries; a
+/// connection that stayed up for [`RECONNECT_RESET_AFTER`] restarts the count.
+pub const RECONNECT_MAX_ATTEMPTS: u32 = 10;
 /// /global/health poll period feeding the health gauge.
 const HEALTH_POLL_INTERVAL: Duration = Duration::from_secs(10);
 
@@ -799,11 +804,14 @@ pub enum ApiRequest {
 }
 
 /// Live state of a workspace's event pump. Connected is reported on every
-/// successful SSE attach, Reconnecting once per drop of a connected stream.
+/// successful SSE attach, Reconnecting once per drop of a connected stream
+/// (carrying the failing attempt number of [`RECONNECT_MAX_ATTEMPTS`]),
+/// Failed when those tries ran out.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StreamStatus {
     Connected,
-    Reconnecting,
+    Reconnecting { attempt: u32 },
+    Failed,
 }
 
 /// Everything the UI learns from the network thread arrives as one of these.
@@ -1029,7 +1037,8 @@ async fn start_workspace(
     tokio::spawn(async move {
         use std::sync::atomic::Ordering;
         let stop_rx = pump_stop;
-        let mut backoff = RECONNECT_INITIAL;
+        let mut attempts = 0u32;
+        let mut delay = RECONNECT_INITIAL;
         loop {
             // per-attempt cancel channel: shutdown goes through stop_rx (the
             // select below drops the whole future, closing the SSE response);
@@ -1065,23 +1074,39 @@ async fn start_workspace(
                     }
                 }
             }
-            // a connection that lasted a while restarts the ladder; a fast
-            // drop continues it, so flapping servers pace themselves out
+            // a connection that lasted a while restarts the ladder and the
+            // attempt count; a fast drop continues both, so flapping servers
+            // pace themselves out and eventually give up
             if started.elapsed() >= RECONNECT_RESET_AFTER {
-                backoff = RECONNECT_INITIAL;
+                attempts = 0;
+                delay = RECONNECT_INITIAL;
+            }
+            attempts += 1;
+            if attempts >= RECONNECT_MAX_ATTEMPTS {
+                tracing::error!("[{pump_key}] event stream still down after {RECONNECT_MAX_ATTEMPTS} attempts — giving up");
+                let _ = pump_tx.send_blocking(UiEvent::StreamStatus {
+                    ws_key: pump_key.clone(),
+                    status: StreamStatus::Failed,
+                });
+                return;
             }
             // one Reconnecting per drop — retries inside the gate below stay quiet
             if was_connected.swap(false, Ordering::AcqRel) {
-                let _ = pump_tx
-                    .send_blocking(UiEvent::StreamStatus { ws_key: pump_key.clone(), status: StreamStatus::Reconnecting });
+                let _ = pump_tx.send_blocking(UiEvent::StreamStatus {
+                    ws_key: pump_key.clone(),
+                    status: StreamStatus::Reconnecting { attempt: attempts },
+                });
             }
             // paced wait + health gate: the sleep is the pacing mechanism, the
             // health probe only keeps a still-down server from churning SSE
-            // handshakes at every tick
+            // handshakes at every tick. Every failure doubles the wait —
+            // a failed probe while the server is down, and a failed attach
+            // once it answers again — unlike doubling on probes alone, which
+            // kept a health-but-not-SSE server retrying once a second forever.
             loop {
                 tokio::select! {
                     _ = stop_rx.recv() => return,
-                    _ = tokio::time::sleep(backoff) => {}
+                    _ = tokio::time::sleep(delay) => {}
                 }
                 let healthy = tokio::select! {
                     _ = stop_rx.recv() => return,
@@ -1090,9 +1115,10 @@ async fn start_workspace(
                 if healthy {
                     break;
                 }
-                tracing::debug!("[{pump_key}] server still down, next retry in {backoff:?}");
-                backoff = (backoff * 2).min(RECONNECT_MAX);
+                tracing::debug!("[{pump_key}] server still down, next retry in {delay:?}");
+                delay = (delay * 2).min(RECONNECT_MAX);
             }
+            delay = (delay * 2).min(RECONNECT_MAX);
         }
     });
 

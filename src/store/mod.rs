@@ -1580,6 +1580,11 @@ pub struct Store {
     /// consecutive crash restarts per workspace, with the last crash time;
     /// the count decays after a long stable stretch
     crash_restarts: HashMap<String, (u32, Instant)>,
+    /// The one evolving "connection lost" note per workspace: (tile key, note
+    /// key, last event). Drops within oc::RECONNECT_RESET_AFTER of the last
+    /// event update that note in place (its count climbs) instead of stacking
+    /// a new card per drop.
+    reconnect_notes: HashMap<String, (String, usize, Instant)>,
     pub queue: Vec<QueueEntry>,
     workspace_generation: u64,
     running_by_session: HashSet<String>,
@@ -1696,6 +1701,7 @@ impl Store {
             last_prompt_by_session: HashMap::new(),
             retry_due_by_session: HashSet::new(),
             crash_restarts: HashMap::new(),
+            reconnect_notes: HashMap::new(),
             queue: Vec::new(),
             workspace_generation: 0,
             running_by_session: HashSet::new(),
@@ -2040,14 +2046,14 @@ impl Store {
             .and_then(|id| self.effective_workspace_path(id))
             .or_else(|| self.selected_workspace.clone());
         path.and_then(|p| self.runtimes.get(&p))
-            .map(|rt| rt.stream_status == oc::StreamStatus::Reconnecting)
+            .map(|rt| matches!(rt.stream_status, oc::StreamStatus::Reconnecting { .. }))
             .unwrap_or(false)
     }
 
     /// Gauge inputs over every running workspace; any reconnecting server
     /// outranks a merely unhealthy one (checked first at the call site).
     pub fn any_stream_reconnecting(&self) -> bool {
-        self.runtimes.values().any(|rt| rt.stream_status == oc::StreamStatus::Reconnecting)
+        self.runtimes.values().any(|rt| matches!(rt.stream_status, oc::StreamStatus::Reconnecting { .. }))
     }
 
     pub fn any_stream_unhealthy(&self) -> bool {
@@ -2254,6 +2260,7 @@ impl Store {
     fn teardown_runtime(&mut self, path: &str) {
         self.runtimes.remove(path);
         self.crash_restarts.remove(path);
+        self.reconnect_notes.remove(path);
         self.drop_subagent_rows(path);
         if let Some(ws) = self.workspace_by_path_mut(path) {
             ws.is_running = false;
@@ -2448,19 +2455,41 @@ impl Store {
             }
             UiEvent::Ipc { command } => self.handle_ipc(command, cx),
             UiEvent::StreamStatus { ws_key, status } => {
-                // transitions only — the backoff ladder waits silently
+                // transitions only — except Reconnecting, where every drop
+                // rewrites the single combined note with its climbing count
                 if let Some(runtime) = self.runtimes.get_mut(&ws_key) {
-                    if runtime.stream_status != status {
+                    let update = match (&runtime.stream_status, &status) {
+                        (oc::StreamStatus::Reconnecting { .. }, oc::StreamStatus::Reconnecting { .. }) => true,
+                        (current, incoming) => current != incoming,
+                    };
+                    if update {
                         runtime.stream_status = status;
                         match status {
                             oc::StreamStatus::Connected => {
                                 // the server is back: its sessions may have
                                 // changed (restart) while the stream was down
                                 self.net.send(NetCommand::Request { ws_key: ws_key.clone(), request: ApiRequest::ListSessions });
-                                self.announce("Event stream reconnected.", false, cx);
+                                self.settle_reconnect_note(&ws_key, cx);
                             }
-                            oc::StreamStatus::Reconnecting => {
-                                self.announce("Connection lost — reconnecting…", true, cx);
+                            oc::StreamStatus::Reconnecting { attempt } => {
+                                self.reconnect_note(
+                                    &ws_key,
+                                    &format!("Connection lost — reconnecting… ({attempt}/{}).", oc::RECONNECT_MAX_ATTEMPTS),
+                                    true,
+                                    cx,
+                                );
+                            }
+                            oc::StreamStatus::Failed => {
+                                self.reconnect_note(
+                                    &ws_key,
+                                    &format!(
+                                        "Connection lost — gave up after {} attempts. Restart the server to retry.",
+                                        oc::RECONNECT_MAX_ATTEMPTS
+                                    ),
+                                    true,
+                                    cx,
+                                );
+                                self.reconnect_notes.remove(&ws_key);
                             }
                         }
                         self.repaint(cx);
@@ -4782,6 +4811,67 @@ impl Store {
             tile.items.push(Arc::new(ChatItem::SystemNote { key: note_key, text: text.into(), is_error: error }));
         }
         self.repaint(cx);
+    }
+
+    /// Create or evolve the workspace's single "connection lost" note. A drop
+    /// within oc::RECONNECT_RESET_AFTER of the previous event rewrites that
+    /// note in place (its attempt count climbs); an older drop starts a new
+    /// one, so a stable stretch closes the series.
+    fn reconnect_note(&mut self, ws_key: &str, text: &str, error: bool, cx: &mut Context<Self>) {
+        let now = Instant::now();
+        let expired = match self.reconnect_notes.get(ws_key) {
+            Some((_, _, last)) => now.duration_since(*last) >= oc::RECONNECT_RESET_AFTER,
+            None => true,
+        };
+        if expired {
+            let Some(tile_key) = self
+                .focused_tile
+                .clone()
+                .or_else(|| self.open_tiles.first().map(|t| t.key.clone()))
+            else {
+                return;
+            };
+            let note_key = self.next_key;
+            self.next_key += 1;
+            if let Some(tile) = self.tile_by_key_mut(&tile_key) {
+                tile.items.push(Arc::new(ChatItem::SystemNote { key: note_key, text: text.into(), is_error: error }));
+            }
+            self.reconnect_notes.insert(ws_key.to_string(), (tile_key.clone(), note_key, now));
+            self.touch_tile(&tile_key, cx);
+        } else {
+            let Some((tile_key, note_key, last)) = self.reconnect_notes.get_mut(ws_key) else { return };
+            *last = now;
+            let (tile_key, note_key) = (tile_key.clone(), *note_key);
+            self.rewrite_note(&tile_key, note_key, text, error);
+            self.touch_tile(&tile_key, cx);
+        }
+    }
+
+    /// Flip the workspace's live reconnect note to its settled "reconnected"
+    /// text. Only a series with a prior "connection lost" answers: the pump
+    /// reports Connected on every attach, including the quiet first one.
+    fn settle_reconnect_note(&mut self, ws_key: &str, cx: &mut Context<Self>) {
+        let Some((tile_key, note_key)) = self.reconnect_notes.get(ws_key).map(|(t, n, _)| (t.clone(), *n)) else {
+            return;
+        };
+        self.reconnect_notes.get_mut(ws_key).unwrap().2 = Instant::now();
+        self.rewrite_note(&tile_key, note_key, "Event stream reconnected.", false);
+        self.touch_tile(&tile_key, cx);
+    }
+
+    /// Rewrite one SystemNote's text/severity inside its tile's item list.
+    fn rewrite_note(&mut self, tile_key: &str, note_key: usize, text: &str, error: bool) {
+        if let Some(tile) = self.tile_by_key_mut(tile_key) {
+            for item in &mut tile.items {
+                if matches!(item.as_ref(), ChatItem::SystemNote { key, .. } if *key == note_key) {
+                    if let ChatItem::SystemNote { text: t, is_error: e, .. } = Arc::make_mut(item) {
+                        *t = text.into();
+                        *e = error;
+                    }
+                    break;
+                }
+            }
+        }
     }
 
     fn post_note_for_session(&mut self, session_id: &str, text: &str, error: bool) {

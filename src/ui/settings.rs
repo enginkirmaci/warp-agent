@@ -15,6 +15,7 @@ pub struct SettingsBuffers {
     pub auto_allow: bool,
     pub auto_allow_instant: bool,
     pub show_tool_tips: bool,
+    pub mcp_disabled: bool,
     pub auto_allow_default_min: String,
     pub auto_allow_default_max: String,
     pub auto_allow_away_min: String,
@@ -45,6 +46,7 @@ impl SettingsBuffers {
             auto_allow: s.auto_allow_always.unwrap_or(true),
             auto_allow_instant: s.auto_allow_instant,
             show_tool_tips: s.show_tool_tips,
+            mcp_disabled: s.mcp_disabled,
             auto_allow_default_min: s.auto_allow_default_min_seconds.to_string(),
             auto_allow_default_max: s.auto_allow_default_max_seconds.to_string(),
             auto_allow_away_min: s.auto_allow_away_min_seconds.to_string(),
@@ -89,6 +91,7 @@ impl SettingsBuffers {
             set.auto_allow_always = Some(self.auto_allow);
             set.auto_allow_instant = self.auto_allow_instant;
             set.show_tool_tips = self.show_tool_tips;
+            set.mcp_disabled = self.mcp_disabled;
             set.auto_allow_default_min_seconds = Self::parse_int(&self.auto_allow_default_min, set.auto_allow_default_min_seconds, 1);
             set.auto_allow_default_max_seconds = Self::parse_int(&self.auto_allow_default_max, set.auto_allow_default_max_seconds, 15);
             set.auto_allow_away_min_seconds = Self::parse_int(&self.auto_allow_away_min, set.auto_allow_away_min_seconds, 60);

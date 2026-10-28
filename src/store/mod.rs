@@ -1924,20 +1924,24 @@ impl Store {
 
     /// The MCP toggle's state for a tile: `(has servers, enabled)` — `has` is
     /// false when the workspace's server is down or has no `mcp` config, and
-    /// the button renders dimmed.
+    /// the button renders dimmed. The settings master switch overrides.
     pub fn mcp_state(&self, tile_key: &str) -> (bool, bool) {
         let Some(ws_key) = self.tile_ws_key(tile_key) else { return (false, false) };
         let has = self.mcp_names.get(&ws_key).is_some_and(|names| !names.is_empty());
-        let on = has && !self.mcp_disabled.contains(&ws_key);
+        let on = has && !self.settings.mcp_disabled && !self.mcp_disabled.contains(&ws_key);
         (has, on)
     }
 
     /// The composer's MCP toggle: runtime-disconnects (or reconnects) every
     /// configured MCP server of the tile's workspace. Instant, touches no
     /// config file; the choice persists in ui.json and is re-asserted after
-    /// every server (re)start.
+    /// every server (re)start. The settings master switch wins over it.
     pub fn toggle_mcp(&mut self, tile_key: &str, cx: &mut Context<Self>) {
         let Some(ws_key) = self.tile_ws_key(tile_key) else { return };
+        if self.settings.mcp_disabled {
+            self.announce("MCP is disabled for all workspaces in Settings.", true, cx);
+            return;
+        }
         let names = self.mcp_names.get(&ws_key).cloned().unwrap_or_default();
         if names.is_empty() {
             self.announce("No MCP servers configured for this workspace.", true, cx);
@@ -2860,8 +2864,9 @@ impl Store {
                 Ok(names) => {
                     self.mcp_names.insert(ws_key.clone(), names);
                     // a fresh server starts every configured MCP server; keep
-                    // the user's toggle-off in force (best-effort, ignores 404)
-                    if self.mcp_disabled.contains(&ws_key) {
+                    // the user's toggle-off (or the settings master switch) in
+                    // force (best-effort, ignores 404)
+                    if self.settings.mcp_disabled || self.mcp_disabled.contains(&ws_key) {
                         for name in self.mcp_names.get(&ws_key).cloned().unwrap_or_default() {
                             self.net.send(NetCommand::Request {
                                 ws_key: ws_key.clone(),
@@ -4975,6 +4980,25 @@ impl Store {
         theme::apply_kit_theme(self.accent, cx);
         self.tool_tips_visible = self.settings.show_tool_tips;
         crate::ui::tooltip::sync_settings(cx, self.tool_tips_visible, self.fonts.font_xsmall);
+        // push the MCP master switch into running servers right away: disable
+        // severs every configured server, re-enabling reconnects all but the
+        // ones the user individually toggled off (best-effort, ignores 404)
+        for (ws_key, names) in &self.mcp_names {
+            if !self.runtimes.contains_key(ws_key) {
+                continue;
+            }
+            let disabled = self.settings.mcp_disabled || self.mcp_disabled.contains(ws_key);
+            for name in names.clone() {
+                self.net.send(NetCommand::Request {
+                    ws_key: ws_key.clone(),
+                    request: if disabled {
+                        ApiRequest::McpDisconnect { name }
+                    } else {
+                        ApiRequest::McpConnect { name }
+                    },
+                });
+            }
+        }
         self.settings.save();
         self.save_state();
         self.repaint(cx);

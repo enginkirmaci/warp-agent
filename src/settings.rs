@@ -47,6 +47,10 @@ pub struct AppSettings {
     pub accent: Option<String>,
     #[serde(rename = "ShowToolTips", default = "tru")]
     pub show_tool_tips: bool,
+    /// Master switch: keep every workspace's MCP servers disconnected,
+    /// overriding the composer's per-workspace toggle.
+    #[serde(rename = "McpDisabled", default)]
+    pub mcp_disabled: bool,
 }
 
 fn default_executable() -> String {
@@ -83,6 +87,7 @@ impl Default for AppSettings {
             font_scale: None,
             accent: None,
             show_tool_tips: true,
+            mcp_disabled: false,
         }
     }
 }

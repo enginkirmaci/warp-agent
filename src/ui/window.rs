@@ -1563,6 +1563,8 @@ impl WarpWindow {
                                             perm_rows.push(self.settings_hint("Random wait before auto-allow, picked by local time.", &fonts));
                                         }
                                     }
+                                    perm_rows.push(self.check_row("Disable MCP servers (all workspaces)", buffers.mcp_disabled, &fonts, |b| b.mcp_disabled = !b.mcp_disabled, cx));
+                                    perm_rows.push(self.settings_hint("Disconnects every workspace's MCP servers at once and overrides the composer's per-workspace toggle.", &fonts));
                                     self.settings_card(perm_rows)
                                 }),
                         ),

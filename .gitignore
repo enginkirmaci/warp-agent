@@ -5,6 +5,9 @@
 # Windows packaging output
 /packaging/windows/out/
 
+# Linux packaging output
+/packaging/linux/out/
+
 # ZCode workspace
 .zcode/
 .zcodeignore

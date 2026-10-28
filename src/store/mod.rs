@@ -4,6 +4,7 @@
 
 use crate::oc::{self, ApiRequest, CommandInfo, NetCommand, SessionInfo, StoredMessage, UiEvent};
 use crate::settings::{AppSettings, UiState, WorkspaceState, DEFAULT_EXECUTABLE};
+pub mod ipc;
 use crate::theme::{self, AccentColors, FontTokens};
 use chrono::{Local, TimeZone, Timelike};
 use gpui::prelude::*;
@@ -1605,6 +1606,10 @@ pub struct Store {
     /// tiles whose transcript changed since the last stream flush; flushed
     /// as per-tile revision bumps, never as a store-level notify
     stream_dirty: Vec<String>,
+    /// one-shot prompts DevTools runs through the door, keyed by wire id
+    ipc_runs: HashMap<u64, ipc::IpcRun>,
+    /// the door's models command parked while a server spins up
+    ipc_models_waiter: Option<crate::ipc::Reply>,
     /// reused checkout dummy for `with_tile` — hot stream events would
     /// otherwise build a throwaway ChatTile each
     tile_placeholder: Option<ChatTile>,
@@ -1708,6 +1713,8 @@ impl Store {
             stream_repaint_scheduled: false,
             stream_dirty: Vec::new(),
             tile_placeholder: None,
+            ipc_runs: HashMap::new(),
+            ipc_models_waiter: None,
             commands: HashMap::new(),
             file_results: None,
             mcp_names: HashMap::new(),
@@ -2148,6 +2155,7 @@ impl Store {
         self.workspaces.sort_by_key(|w| workspace_order_key(w.folder_path()));
         self.save_state();
         self.select_workspace(&path_key, cx);
+        self.ipc_push_status();
     }
 
     pub fn remove_workspace(&mut self, path: &str, cx: &mut Context<Self>) {
@@ -2207,6 +2215,7 @@ impl Store {
             }
         }
         self.save_state();
+        self.ipc_push_status();
     }
 
     pub fn start_workspace(&mut self, path: &str, cx: &mut Context<Self>) {
@@ -2263,6 +2272,7 @@ impl Store {
             self.sessions.clear();
         }
         self.save_state();
+        self.ipc_push_status();
     }
 
     pub fn shutdown(&mut self) {
@@ -2365,6 +2375,18 @@ impl Store {
                             request: ApiRequest::GetMessages { session_id },
                         });
                     }
+                    // door runs parked while this server spun up: their tile
+                    // still holds the prompt
+                    let parked_runs: Vec<String> = self
+                        .ipc_runs
+                        .values()
+                        .filter(|run| run.workspace == ws_key && run.session_id.is_none())
+                        .map(|run| run.tile_key.clone())
+                        .collect();
+                    for tile_key in parked_runs {
+                        self.send_from_tile(&tile_key, cx);
+                    }
+                    self.ipc_push_status();
                     self.repaint(cx);
                 }
                 Err(err) => {
@@ -2376,6 +2398,8 @@ impl Store {
                         .unwrap_or_else(|| ws_key.clone());
                     tracing::error!("server start failed for {name}: {err:#}");
                     self.announce(&format!("Failed to start: {err:#}"), true, cx);
+                    self.ipc_fail_parked_runs(&ws_key, &format!("server failed to start: {err:#}"));
+                    self.ipc_push_status();
                 }
             },
             UiEvent::ServerStopped { .. } => {}
@@ -2412,11 +2436,13 @@ impl Store {
                     self.announce(&format!("{name}: server crashed — restarting ({crashes}/{MAX_CRASH_RESTARTS})…"), true, cx);
                     self.start_workspace(&ws_key, cx);
                 }
+                self.ipc_push_status();
                 self.repaint(cx);
             }
             UiEvent::Event { ws_key, event } => {
                 self.handle_stream_event(&ws_key, &event, cx);
             }
+            UiEvent::Ipc { command } => self.handle_ipc(command, cx),
             UiEvent::StreamStatus { ws_key, status } => {
                 // transitions only — the backoff ladder waits silently
                 if let Some(runtime) = self.runtimes.get_mut(&ws_key) {
@@ -2547,12 +2573,41 @@ impl Store {
                     self.save_state();
                     // continue the parked send now that the session exists
                     self.send_core(&info.id, text, attachments, cx);
+                    // door runs bound to this draft now have their session
+                    let bound: Vec<u64> = self
+                        .ipc_runs
+                        .iter()
+                        .filter(|(_, run)| run.tile_key == draft_key && run.session_id.is_none())
+                        .map(|(run, _)| *run)
+                        .collect();
+                    for run in bound {
+                        if let Some(entry) = self.ipc_runs.get_mut(&run) {
+                            entry.session_id = Some(info.id.clone());
+                        }
+                        self.ipc_run_log(run, "session ready");
+                    }
                 }
                 Err(err) => {
                     // drop the matching queued send or a later create would
                     // adopt it and fire the stale text into the new session
+                    let dropped_key = self.pending_sends.first().map(|(key, _, _)| key.clone());
                     if !self.pending_sends.is_empty() {
                         self.pending_sends.remove(0);
+                    }
+                    // a door run waiting on that draft fails with it (FIFO:
+                    // the errored create belongs to the oldest pending send)
+                    if let Some(key) = dropped_key {
+                        let doomed: Vec<u64> = self
+                            .ipc_runs
+                            .iter()
+                            .filter(|(_, run)| run.tile_key == key && run.session_id.is_none())
+                            .map(|(run, _)| *run)
+                            .collect();
+                        for run in doomed {
+                            if let Some(entry) = self.ipc_runs.remove(&run) {
+                                let _ = entry.reply.send(Err(format!("could not create a session: {err:#}")));
+                            }
+                        }
                     }
                     self.announce(&format!("Could not create a session: {err:#}"), true, cx);
                     self.repaint(cx);
@@ -2762,6 +2817,11 @@ impl Store {
                                 }
                             }
                         }
+                    }
+                    // the door's models command parked while a server spun
+                    // up: any list answers it
+                    if let Some(reply) = self.ipc_models_waiter.take() {
+                        let _ = reply.send(Ok(serde_json::json!({"models": self.models.clone()})));
                     }
                 }
                 self.repaint(cx);
@@ -3853,6 +3913,7 @@ impl Store {
         }
         self.update_sidebar_running();
         self.refresh_tile_agents();
+        self.ipc_push_status();
     }
 
     fn update_sidebar_running(&mut self) {
@@ -4117,6 +4178,20 @@ impl Store {
                         }
                     }
                     let sid = sid.to_string();
+                    // a door run just finished: answer it with the last
+                    // assistant message
+                    let done: Vec<u64> = self
+                        .ipc_runs
+                        .iter()
+                        .filter(|(_, run)| run.session_id.as_deref() == Some(sid.as_str()))
+                        .map(|(run, _)| *run)
+                        .collect();
+                    for run in done {
+                        if let Some(entry) = self.ipc_runs.remove(&run) {
+                            let text = self.ipc_last_assistant_text(&entry.tile_key);
+                            let _ = entry.reply.send(Ok(serde_json::json!({"text": text})));
+                        }
+                    }
                     if self.retry_due_by_session.remove(&sid) {
                         // the turn died retryable: re-send the stored prompt
                         // after a pause; the queue drains on the retry's idle
@@ -4153,6 +4228,26 @@ impl Store {
                 let error_session = read_session_id(data);
                 if let Some(sid) = error_session {
                     let attempt = if retryable { self.arm_auto_retry(sid) } else { None };
+                    // door runs on this chat: a retry keeps them waiting, a
+                    // dead turn answers with the error
+                    let watched: Vec<u64> = self
+                        .ipc_runs
+                        .iter()
+                        .filter(|(_, run)| run.session_id.as_deref() == Some(sid))
+                        .map(|(run, _)| *run)
+                        .collect();
+                    for run in watched {
+                        match attempt {
+                            Some(attempt) => {
+                                self.ipc_run_log(run, &format!("connection lost — retrying (attempt {attempt}/{MAX_AUTO_RETRY})"));
+                            }
+                            None => {
+                                if let Some(entry) = self.ipc_runs.remove(&run) {
+                                    let _ = entry.reply.send(Err(message.clone()));
+                                }
+                            }
+                        }
+                    }
                     match attempt {
                         Some(attempt) => self.post_note_for_session(
                             sid,

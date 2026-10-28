@@ -765,6 +765,8 @@ pub enum NetCommand {
         attachments: Vec<(String, String, std::sync::Arc<Vec<u8>>)>,
         command: Option<(String, String)>,
     },
+    /// Fan a pre-serialized event frame out to every connected door client.
+    IpcBroadcast { line: String },
 }
 
 pub enum ApiRequest {
@@ -834,6 +836,8 @@ pub enum UiEvent {
     McpNamesLoaded { ws_key: String, result: Result<Vec<String>> },
     MessageSendFailed { session_id: String, error: String },
     Log { ws_key: String, line: String },
+    /// A door command relayed from the ipc listener; answered by the store.
+    Ipc { command: crate::ipc::IpcCommand },
 }
 
 struct WorkspaceNet {
@@ -872,6 +876,16 @@ pub fn spawn_net_thread() -> (std::thread::JoinHandle<()>, NetSender, async_chan
 
 async fn net_main(command_rx: async_channel::Receiver<NetCommand>, event_tx: async_channel::Sender<UiEvent>) {
     let mut workspaces: HashMap<String, WorkspaceNet> = HashMap::new();
+    // the DevTools door rides this runtime; a bind failure logs and the app
+    // keeps working — the door is an integration, not a dependency
+    let (door_tx, _) = tokio::sync::broadcast::channel::<String>(64);
+    let door = match crate::ipc::start(event_tx.clone(), door_tx.clone()).await {
+        Ok(door) => Some(door),
+        Err(err) => {
+            tracing::warn!("ipc door unavailable: {err:#}");
+            None
+        }
+    };
     while let Ok(command) = command_rx.recv().await {
         match command {
             NetCommand::StartServer { ws_key, executable, folder } => {
@@ -961,6 +975,9 @@ async fn net_main(command_rx: async_channel::Receiver<NetCommand>, event_tx: asy
                     }
                 });
             }
+            NetCommand::IpcBroadcast { line } => {
+                let _ = door_tx.send(line);
+            }
         }
     }
     // shutdown: kill every spawned server
@@ -968,6 +985,9 @@ async fn net_main(command_rx: async_channel::Receiver<NetCommand>, event_tx: asy
         if let Some(process) = ws.process.as_mut() {
             process.stop();
         }
+    }
+    if let Some(door) = &door {
+        crate::ipc::unpublish(door);
     }
 }
 

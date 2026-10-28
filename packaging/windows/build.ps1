@@ -9,8 +9,12 @@ param(
 $ErrorActionPreference = 'Stop'
 
 $here   = $PSScriptRoot
-$repo   = Split-Path -Parent $here
 $outDir = Join-Path $here 'out'
+
+# repo root = closest ancestor holding Cargo.toml (script lives at <root>\packaging\windows)
+$repo = $here
+while ($repo -and -not (Test-Path (Join-Path $repo 'Cargo.toml'))) { $repo = Split-Path -Parent $repo }
+if (-not $repo) { throw "Cargo.toml not found in any parent of $here" }
 
 Push-Location $repo
 try {
@@ -18,11 +22,11 @@ try {
     if ($LASTEXITCODE -ne 0) { throw "cargo build failed with exit code $LASTEXITCODE" }
     $meta = cargo metadata --no-deps --format-version 1 | ConvertFrom-Json
     $version = ($meta.packages | Where-Object { $_.name -eq 'warp-agent' }).version
+    $exe = Join-Path $meta.target_directory 'release\warp-agent.exe'
 } finally {
     Pop-Location
 }
 
-$exe = Join-Path $repo 'target\release\warp-agent.exe'
 if (-not (Test-Path $exe)) { throw "release exe not found: $exe" }
 
 New-Item -ItemType Directory -Force -Path $outDir | Out-Null

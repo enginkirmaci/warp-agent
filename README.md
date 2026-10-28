@@ -16,6 +16,16 @@ First build fetches GPUI from the zed git repo and takes a while. Needs the
 usual Wayland/Vulkan dev packages. State (settings.json, ui.json, logs, the
 built-in General workspace) lives in `~/.warp-agent`.
 
+## DevTools door
+
+At startup the app binds a token-authenticated NDJSON server on
+`127.0.0.1` (port + token under `~/.warp-agent/ipc.*`). DevTools drives it:
+`open-workspace` (folder args on the command line do the same, forwarded to
+a running instance — second launches exit), `new-chat`, `run-prompt`
+(one-shot wand runs as real chats, answered at idle), `models`, `status`
+(+ status pushes). The app works fully standalone; the door is only an
+integration surface.
+
 ## Package
 
 - Linux: `packaging/linux/install.sh` installs the desktop entry + hicolor

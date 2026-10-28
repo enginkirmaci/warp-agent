@@ -3,6 +3,7 @@
 #![cfg_attr(all(target_os = "windows", not(debug_assertions)), windows_subsystem = "windows")]
 
 mod assets;
+mod ipc;
 mod logging;
 mod oc;
 mod paths;
@@ -18,9 +19,24 @@ use gpui_platform::application;
 use store::Store;
 use ui::window::WarpWindow;
 
+/// Folder args from the launch command, opened once the store exists.
+static LAUNCH_FOLDERS: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+
 fn main() {
     let _log_guard = logging::initialize();
     services::install_panic_hook();
+
+    // single instance: a live door owner takes the launch folders (a bare
+    // liveness probe when there are none) and this launch exits
+    let folders: Vec<String> = std::env::args()
+        .skip(1)
+        .filter(|arg| !arg.starts_with('-') && std::path::Path::new(arg).is_dir())
+        .collect();
+    if ipc::try_forward(&folders) {
+        return;
+    }
+    let _ = LAUNCH_FOLDERS.set(folders);
+
     application()
         .with_assets(assets::EmbedAssets::new())
         .run(|cx: &mut App| {
@@ -48,6 +64,21 @@ fn main() {
 
             let (_net_handle, net_sender, event_rx) = oc::spawn_net_thread();
             let store = Store::new(cx, net_sender);
+
+            // workspaces named on the launch command open right away
+            if let Some(folders) = LAUNCH_FOLDERS.get() {
+                let folders = folders.clone();
+                let launch_store = store.downgrade();
+                cx.spawn(async move |cx| {
+                    let Some(store) = launch_store.upgrade() else { return };
+                    store.update(cx, |store, cx| {
+                        for folder in &folders {
+                            let _ = store.open_workspace_at(folder, cx);
+                        }
+                    });
+                })
+                .detach();
+            }
 
             // kit theme after the store so the saved accent preset (not the
             // green default) drives input selection/ring/primary from launch

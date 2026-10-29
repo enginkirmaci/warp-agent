@@ -8,11 +8,44 @@ use std::fs;
 use std::io::Write;
 
 pub const DEFAULT_EXECUTABLE: &str = "opencode";
+pub const DEFAULT_DSH_EXECUTABLE: &str = "dsh";
+
+/// Which backend a chat runs on. Sessions carry their own harness so a
+/// workspace can mix opencode and dsh tiles; dsh chats all live on one
+/// shared `dsh web` process (dsh sessions carry their own cwd).
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum HarnessKind {
+    #[default]
+    OpenCode,
+    Dsh,
+}
+
+impl HarnessKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            HarnessKind::OpenCode => "opencode",
+            HarnessKind::Dsh => "dsh",
+        }
+    }
+
+    pub fn from_label(label: &str) -> Self {
+        match label {
+            "dsh" => HarnessKind::Dsh,
+            _ => HarnessKind::OpenCode,
+        }
+    }
+}
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct AppSettings {
     #[serde(default = "default_executable")]
     pub open_code_executable: String,
+    #[serde(default = "default_dsh_executable")]
+    pub dsh_executable: String,
+    /// Harness new chats start on (the composer pill can switch per chat).
+    #[serde(rename = "DefaultHarness", default)]
+    pub default_harness: HarnessKind,
     #[serde(rename = "DefaultModel", default)]
     pub default_model: Option<String>,
     #[serde(rename = "DefaultVariant", default)]
@@ -56,6 +89,9 @@ pub struct AppSettings {
 fn default_executable() -> String {
     DEFAULT_EXECUTABLE.into()
 }
+fn default_dsh_executable() -> String {
+    DEFAULT_DSH_EXECUTABLE.into()
+}
 fn d1() -> i64 { 1 }
 fn d15() -> i64 { 15 }
 fn d60() -> i64 { 60 }
@@ -70,6 +106,8 @@ impl Default for AppSettings {
     fn default() -> Self {
         Self {
             open_code_executable: default_executable(),
+            dsh_executable: default_dsh_executable(),
+            default_harness: HarnessKind::default(),
             default_model: None,
             default_variant: None,
             default_variant_highest: false,
@@ -149,6 +187,10 @@ pub struct UiState {
     /// disconnected; re-applied after every server (re)start.
     #[serde(rename = "McpDisabled", default)]
     pub mcp_disabled_ws: Vec<String>,
+    /// Session id → harness. A chat keeps the backend it was created with
+    /// across restarts, so reopening routes to the right server.
+    #[serde(rename = "HarnessBySession", default)]
+    pub harness_by_session: std::collections::HashMap<String, HarnessKind>,
 }
 
 impl UiState {

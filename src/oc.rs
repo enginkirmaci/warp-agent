@@ -5,6 +5,10 @@
 //! UiEvent out). The chat is driven purely by the /event stream: the message
 //! POST is fire-and-forget, assistant output arrives as message.part.updated
 //! events whose "part" carries the full text-so-far each time.
+//!
+//! A second harness, DeepSeek Harness (`dsh web`), rides the same thread: its
+//! client and event translation live in [`crate::dsh`], keyed by the reserved
+//! workspace key [`DSH_SERVER_KEY`].
 
 use anyhow::{anyhow, Context as _, Result};
 use serde_json::{json, Value};
@@ -12,14 +16,20 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use crate::settings::HarnessKind;
+
 pub const ASK_CONFIG: &str = r#"{"$schema":"https://opencode.ai/config.json","permission":{"edit":"ask","bash":"ask","webfetch":"ask"}}"#;
+
+/// Reserved net-thread key of the shared `dsh web` singleton. dsh sessions
+/// carry their own cwd, so one process serves every workspace's dsh chats.
+pub const DSH_SERVER_KEY: &str = "dsh";
 
 // ---- reconnect policy ------------------------------------------------------
 
 /// Backoff ladder start for the event pump's reconnect loop.
-const RECONNECT_INITIAL: Duration = Duration::from_secs(1);
+pub(crate) const RECONNECT_INITIAL: Duration = Duration::from_secs(1);
 /// Backoff ladder cap.
-const RECONNECT_MAX: Duration = Duration::from_secs(30);
+pub(crate) const RECONNECT_MAX: Duration = Duration::from_secs(30);
 /// A connection that survived this long counts as stable: the next drop
 /// restarts the ladder at [`RECONNECT_INITIAL`] instead of continuing it, and
 /// the store closes the combined "connection lost" note.
@@ -27,7 +37,7 @@ pub const RECONNECT_RESET_AFTER: Duration = Duration::from_secs(60);
 
 /// Give up reconnecting after this many consecutive failed tries; a
 /// connection that stayed up for [`RECONNECT_RESET_AFTER`] restarts the count.
-pub const RECONNECT_MAX_ATTEMPTS: u32 = 10;
+pub(crate) const RECONNECT_MAX_ATTEMPTS: u32 = 10;
 /// /global/health poll period feeding the health gauge.
 const HEALTH_POLL_INTERVAL: Duration = Duration::from_secs(10);
 
@@ -105,6 +115,9 @@ pub struct QuestionRequestInfo {
 
 pub struct ServerProcess {
     pub base_url: String,
+    /// dsh only: the launch token printed on stdout. opencode servers have no
+    /// equivalent (None).
+    pub token: Option<String>,
     /// behind Arc+Mutex so the health poll can watch for an early exit while
     /// the workspace map on the net thread keeps the owning handle; None for
     /// an attached (not spawned) server — there is nothing to watch
@@ -122,26 +135,43 @@ fn child_exited(probe: &Mutex<Option<tokio::process::Child>>) -> bool {
 }
 
 impl ServerProcess {
-    pub async fn start(executable: &str, folder: &str, port: u16, on_log: impl Fn(String) + Clone + Send + Sync + 'static) -> Result<Self> {
+    pub async fn start(
+        kind: HarnessKind,
+        executable: &str,
+        folder: &str,
+        port: u16,
+        on_log: impl Fn(String) + Clone + Send + Sync + 'static,
+    ) -> Result<Self> {
         let base_url = format!("http://127.0.0.1:{port}");
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(2))
             .build()?;
-        if is_healthy(&client, &base_url).await {
+        // dsh's launch token is per-process: an existing server cannot be
+        // attached to (its token is unknowable), so always spawn our own
+        if kind == HarnessKind::OpenCode && is_healthy(&client, &base_url).await {
             tracing::info!("attached to a healthy opencode server at {base_url}");
             on_log(format!("attaching to a healthy opencode server at {base_url}"));
-            return Ok(ServerProcess { base_url, child: Arc::new(Mutex::new(None)) });
+            return Ok(ServerProcess { base_url, token: None, child: Arc::new(Mutex::new(None)) });
         }
 
         let mut command = tokio::process::Command::new(executable);
+        match kind {
+            HarnessKind::OpenCode => {
+                command
+                    .args(["serve", "--hostname", "127.0.0.1", "--port", &port.to_string()])
+                    .env("OPENCODE_CONFIG_CONTENT", ASK_CONFIG);
+            }
+            HarnessKind::Dsh => {
+                command
+                    .args(["web", "--no-open", "--host", "127.0.0.1", "--port", &port.to_string()]);
+            }
+        }
         command
-            .args(["serve", "--hostname", "127.0.0.1", "--port", &port.to_string()])
             .current_dir(std::path::Path::new(if std::path::Path::new(folder).exists() {
                 folder
             } else {
                 "."
             }))
-            .env("OPENCODE_CONFIG_CONTENT", ASK_CONFIG)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
@@ -155,17 +185,25 @@ impl ServerProcess {
         let mut child = command
             .spawn()
             .with_context(|| format!("'{executable}' failed to start"))?;
-        tracing::info!("spawned {executable} serve (pid {:?}) in {folder}", child.id());
+        tracing::info!("spawned {executable} (pid {:?}) in {folder}", child.id());
 
+        // dsh prints its auth token on stdout; the wait loop below polls it
+        let token_slot = Arc::new(Mutex::new(None::<String>));
         // stream stdout/stderr into the log
         let log = std::sync::Arc::new(on_log);
         if let Some(stdout) = child.stdout.take() {
             let log = log.clone();
+            let token_slot = Arc::clone(&token_slot);
             tokio::spawn(async move {
                 use tokio::io::{AsyncBufReadExt, BufReader};
                 let reader = BufReader::new(stdout);
                 let mut lines = reader.lines();
                 while let Ok(Some(line)) = lines.next_line().await {
+                    if let Some(token) = crate::dsh::token_from_line(&line)
+                        && token_slot.lock().expect("dsh token").is_none()
+                    {
+                        *token_slot.lock().expect("dsh token") = Some(token.to_string());
+                    }
                     log(line);
                 }
             });
@@ -182,25 +220,46 @@ impl ServerProcess {
             });
         }
 
-        let process = ServerProcess { base_url: base_url.clone(), child: Arc::new(Mutex::new(Some(child))) };
+        let mut process =
+            ServerProcess { base_url: base_url.clone(), token: None, child: Arc::new(Mutex::new(Some(child))) };
 
-        let deadline = std::time::Instant::now() + Duration::from_secs(25);
+        // dsh is a node app — give its boot far more headroom than opencode
+        let timeout = match kind {
+            HarnessKind::OpenCode => Duration::from_secs(25),
+            HarnessKind::Dsh => Duration::from_secs(40),
+        };
+        let deadline = std::time::Instant::now() + timeout;
         loop {
             if std::time::Instant::now() >= deadline {
-                tracing::warn!("serve did not become healthy within 25 s");
-                return Err(anyhow!("opencode serve did not become healthy within 25 s."));
+                let what = match kind {
+                    HarnessKind::OpenCode => "opencode serve did not become healthy within 25 s.",
+                    HarnessKind::Dsh => "dsh web did not print its URL within 40 s.",
+                };
+                tracing::warn!("{what}");
+                return Err(anyhow!("{what}"));
             }
             {
                 let mut guard = process.child.lock().expect("child lock");
                 if let Some(child) = guard.as_mut() {
                     if let Ok(Some(status)) = child.try_wait() {
-                        tracing::warn!("serve exited early with code {status}");
-                        return Err(anyhow!("opencode serve exited with code {status}."));
+                        tracing::warn!("server exited early with code {status}");
+                        return Err(anyhow!("the server exited with code {status}."));
                     }
                 }
             }
-            if is_healthy(&client, &base_url).await {
-                return Ok(process);
+            match kind {
+                HarnessKind::OpenCode => {
+                    if is_healthy(&client, &base_url).await {
+                        return Ok(process);
+                    }
+                }
+                HarnessKind::Dsh => {
+                    let token = token_slot.lock().expect("dsh token").clone();
+                    if let Some(token) = token {
+                        process.token = Some(token);
+                        return Ok(process);
+                    }
+                }
             }
             tokio::time::sleep(Duration::from_millis(300)).await;
         }
@@ -734,7 +793,7 @@ pub fn read_question_request(r: &Value) -> Option<QuestionRequestInfo> {
     })
 }
 
-fn base64_encode(data: &[u8]) -> String {
+pub(crate) fn base64_encode(data: &[u8]) -> String {
     const TABLE: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
     for chunk in data.chunks(3) {
@@ -752,7 +811,8 @@ fn base64_encode(data: &[u8]) -> String {
 
 pub enum NetCommand {
     /// Spawn (or attach to) the server for a workspace and start its event pump.
-    StartServer { ws_key: String, executable: String, folder: String },
+    /// `ws_key` is [`DSH_SERVER_KEY`] for the shared dsh singleton.
+    StartServer { ws_key: String, kind: HarnessKind, executable: String, folder: String },
     /// Stop the workspace's server and event pump.
     StopServer { ws_key: String },
     /// Run a request against the workspace's API; results come back as UiEvents.
@@ -776,6 +836,16 @@ pub enum NetCommand {
 
 pub enum ApiRequest {
     ListSessions,
+    /// dsh: one workspace folder's sessions, filtered by cwd from the shared
+    /// server's list. The reply carries the folder as ws_key so the store
+    /// applies it like that workspace's own list.
+    ListDshSessions { folder: String },
+    /// dsh: create a session owned by `folder` (dsh sessions carry their own
+    /// cwd). The reply carries the folder as ws_key.
+    CreateDshSession { folder: String, title: String },
+    /// dsh: the fork flow — an empty session whose composer is seeded with
+    /// `context` (the dsh server has no parts-append endpoint either).
+    CreateDshForkSession { folder: String, title: String, context: String },
     ListModels,
     ListAgents,
     GetMessages { session_id: String },
@@ -849,8 +919,12 @@ pub enum UiEvent {
 }
 
 struct WorkspaceNet {
+    kind: HarnessKind,
     process: Option<ServerProcess>,
     api: ApiClient,
+    /// set when kind is Dsh: the shared web client + its event pump feeds
+    /// UiEvents that are already opencode-shaped
+    dsh: Option<crate::dsh::DshHandle>,
     event_stop: Option<async_channel::Sender<()>>,
 }
 
@@ -896,10 +970,10 @@ async fn net_main(command_rx: async_channel::Receiver<NetCommand>, event_tx: asy
     };
     while let Ok(command) = command_rx.recv().await {
         match command {
-            NetCommand::StartServer { ws_key, executable, folder } => {
+            NetCommand::StartServer { ws_key, kind, executable, folder } => {
                 let event_tx = event_tx.clone();
                 // sequential spawn keeps one workspace's failed start from racing others
-                match start_workspace(&mut workspaces, &ws_key, &executable, &folder, &event_tx).await {
+                match start_workspace(&mut workspaces, &ws_key, kind, &executable, &folder, &event_tx).await {
                     Ok(()) => {
                         // async_channel::send is a future — dropping it without
                         // awaiting silently discards the event
@@ -929,17 +1003,29 @@ async fn net_main(command_rx: async_channel::Receiver<NetCommand>, event_tx: asy
                 let _ = event_tx.send(UiEvent::ServerStopped).await;
             }
             NetCommand::Request { ws_key, request } => {
-                let Some(client) = workspaces.get(&ws_key).map(|ws| ws.api.clone()) else {
+                let Some(ws) = workspaces.get(&ws_key) else {
                     continue;
                 };
                 let event_tx = event_tx.clone();
-                tokio::spawn(async move {
-                    let event = run_request(&client, ws_key, request).await;
-                    let _ = event_tx.send(event).await;
-                });
+                match ws.kind {
+                    HarnessKind::OpenCode => {
+                        let client = ws.api.clone();
+                        tokio::spawn(async move {
+                            let event = run_request(&client, ws_key, request).await;
+                            let _ = event_tx.send(event).await;
+                        });
+                    }
+                    HarnessKind::Dsh => {
+                        let Some(handle) = ws.dsh.clone() else { continue };
+                        tokio::spawn(async move {
+                            let event = crate::dsh::run_request(&handle, ws_key, request).await;
+                            let _ = event_tx.send(event).await;
+                        });
+                    }
+                }
             }
             NetCommand::SendMessage { ws_key, session_id, text, model, variant, agent, attachments, command } => {
-                let Some(client) = workspaces.get(&ws_key).map(|ws| ws.api.clone()) else {
+                let Some(ws) = workspaces.get(&ws_key) else {
                     // don't drop silently — the tile would sit "running" forever
                     let _ = event_tx
                         .send(UiEvent::MessageSendFailed {
@@ -950,38 +1036,43 @@ async fn net_main(command_rx: async_channel::Receiver<NetCommand>, event_tx: asy
                     continue;
                 };
                 let event_tx = event_tx.clone();
-                tokio::spawn(async move {
-                    // a connect-phase failure never reached the server, so a
-                    // re-POST cannot double-send; brief blips (serve restarting
-                    // under the chat) retry quietly instead of erroring the turn
-                    let mut blips = 0u32;
-                    let result = loop {
-                        let attempt = match &command {
-                            Some((name, args)) => {
-                                client
-                                    .send_command(&session_id, name, args, model.as_deref(), variant.as_deref(), agent.as_deref(), &attachments)
-                                    .await
-                            }
-                            None => {
-                                client
-                                    .send_message(&session_id, &text, model.as_deref(), variant.as_deref(), agent.as_deref(), &attachments)
-                                    .await
-                            }
-                        };
-                        match attempt {
-                            Ok(()) => break Ok(()),
-                            Err(err) if blips < 2 && is_connect_blip(&err) => {
-                                blips += 1;
-                                tracing::warn!("send to {session_id} could not connect, retry {blips}/2: {err:#}");
-                                tokio::time::sleep(Duration::from_millis(1500 * blips as u64)).await;
-                            }
-                            Err(err) => break Err(err),
-                        }
-                    };
-                    if let Err(err) = result {
-                        let _ = event_tx.send(UiEvent::MessageSendFailed { session_id, error: format!("{err:#}") }).await;
+                match ws.kind {
+                    HarnessKind::OpenCode => {
+                        let client = ws.api.clone();
+                        tokio::spawn(async move {
+                            send_with_blips(&client, session_id, text, model, variant, agent, attachments, command, &event_tx).await;
+                        });
                     }
-                });
+                    HarnessKind::Dsh => {
+                        let Some(handle) = ws.dsh.clone() else {
+                            let _ = event_tx
+                                .send(UiEvent::MessageSendFailed {
+                                    session_id: session_id.clone(),
+                                    error: "this chat's workspace server is not running".into(),
+                                })
+                                .await;
+                            continue;
+                        };
+                        tokio::spawn(async move {
+                            // slash text goes out verbatim: dsh expands it itself
+                            let result = crate::dsh::send_message(
+                                &handle,
+                                &session_id,
+                                &text,
+                                model.as_deref(),
+                                variant.as_deref(),
+                                agent.as_deref(),
+                                &attachments,
+                            )
+                            .await;
+                            if let Err(err) = result {
+                                let _ = event_tx
+                                    .send(UiEvent::MessageSendFailed { session_id, error: format!("{err:#}") })
+                                    .await;
+                            }
+                        });
+                    }
+                }
             }
             NetCommand::IpcBroadcast { line } => {
                 let _ = door_tx.send(line);
@@ -1002,6 +1093,7 @@ async fn net_main(command_rx: async_channel::Receiver<NetCommand>, event_tx: asy
 async fn start_workspace(
     workspaces: &mut HashMap<String, WorkspaceNet>,
     ws_key: &str,
+    kind: HarnessKind,
     executable: &str,
     folder: &str,
     event_tx: &async_channel::Sender<UiEvent>,
@@ -1014,6 +1106,7 @@ async fn start_workspace(
     let log_tx = event_tx.clone();
     let key = ws_key.to_string();
     let process = ServerProcess::start(
+        kind,
         executable,
         folder,
         port,
@@ -1025,6 +1118,61 @@ async fn start_workspace(
     .await?;
     let base_url = process.base_url.clone();
     let api = ApiClient::new(&base_url);
+
+    if kind == HarnessKind::Dsh {
+        let token = process
+            .token
+            .clone()
+            .ok_or_else(|| anyhow!("dsh web started without a launch token"))?;
+        let (stop_tx, stop_rx) = async_channel::bounded::<()>(1);
+        let (frame_tx, frame_rx) = async_channel::bounded::<String>(64);
+        let handle = crate::dsh::DshHandle::new(&base_url, &token, frame_tx);
+        let pump_tx = event_tx.clone();
+        let pump_key = ws_key.to_string();
+        let pump_handle = handle.clone();
+        let pump_stop = stop_rx.clone();
+        tokio::spawn(async move {
+            crate::dsh::run_pump(pump_handle, pump_key, pump_tx, pump_stop, frame_rx).await;
+        });
+        // liveness: the child process plus the HTTP server answering at all
+        // (any status — the trust fence's 401 included); the WS connection
+        // state itself drives StreamStatus
+        let poll_tx = event_tx.clone();
+        let poll_key = ws_key.to_string();
+        let poll_handle = handle.clone();
+        let poll_probe = Arc::clone(&process.child);
+        tokio::spawn(async move {
+            loop {
+                if child_exited(&poll_probe) {
+                    tracing::warn!("[{poll_key}] dsh web exited — reporting crash");
+                    let _ = poll_tx.send(UiEvent::ServerCrashed { ws_key: poll_key.clone() }).await;
+                    return;
+                }
+                let healthy = tokio::select! {
+                    _ = stop_rx.recv() => return,
+                    healthy = poll_handle.alive() => healthy,
+                };
+                let _ = poll_tx
+                    .send(UiEvent::HealthChanged { ws_key: poll_key.clone(), healthy: Some(healthy) })
+                    .await;
+                tokio::select! {
+                    _ = stop_rx.recv() => return,
+                    _ = tokio::time::sleep(HEALTH_POLL_INTERVAL) => {}
+                }
+            }
+        });
+        workspaces.insert(
+            ws_key.to_string(),
+            WorkspaceNet {
+                kind,
+                process: Some(process),
+                api,
+                dsh: Some(handle),
+                event_stop: Some(stop_tx),
+            },
+        );
+        return Ok(());
+    }
 
     // event pump + health poll; both select on the same stop channel, closed
     // by StopServer to cancel them together
@@ -1153,9 +1301,51 @@ async fn start_workspace(
 
     workspaces.insert(
         ws_key.to_string(),
-        WorkspaceNet { process: Some(process), api, event_stop: Some(stop_tx) },
+        WorkspaceNet { kind, process: Some(process), api, dsh: None, event_stop: Some(stop_tx) },
     );
     Ok(())
+}
+
+/// opencode send with the quiet connect-blip retry (a failure in the connect
+/// phase never reached the server, so a re-POST cannot double-send).
+async fn send_with_blips(
+    client: &ApiClient,
+    session_id: String,
+    text: String,
+    model: Option<String>,
+    variant: Option<String>,
+    agent: Option<String>,
+    attachments: Vec<(String, String, std::sync::Arc<Vec<u8>>)>,
+    command: Option<(String, String)>,
+    event_tx: &async_channel::Sender<UiEvent>,
+) {
+    let mut blips = 0u32;
+    let result = loop {
+        let attempt = match &command {
+            Some((name, args)) => {
+                client
+                    .send_command(&session_id, name, args, model.as_deref(), variant.as_deref(), agent.as_deref(), &attachments)
+                    .await
+            }
+            None => {
+                client
+                    .send_message(&session_id, &text, model.as_deref(), variant.as_deref(), agent.as_deref(), &attachments)
+                    .await
+            }
+        };
+        match attempt {
+            Ok(()) => break Ok(()),
+            Err(err) if blips < 2 && is_connect_blip(&err) => {
+                blips += 1;
+                tracing::warn!("send to {session_id} could not connect, retry {blips}/2: {err:#}");
+                tokio::time::sleep(Duration::from_millis(1500 * blips as u64)).await;
+            }
+            Err(err) => break Err(err),
+        }
+    };
+    if let Err(err) = result {
+        let _ = event_tx.send(UiEvent::MessageSendFailed { session_id, error: format!("{err:#}") }).await;
+    }
 }
 
 /// True when a request failed in the connect phase (nothing was sent, the
@@ -1171,6 +1361,21 @@ async fn run_request(client: &ApiClient, ws_key: String, request: ApiRequest) ->
         ApiRequest::ListSessions => UiEvent::SessionsLoaded {
             ws_key,
             result: client.list_sessions().await,
+        },
+        // dsh-only requests never reach the opencode runner (net_main routes
+        // by workspace kind); answer defensively instead of dying on a bug
+        ApiRequest::ListDshSessions { folder } => UiEvent::SessionsLoaded {
+            ws_key: folder,
+            result: Ok(Vec::new()),
+        },
+        ApiRequest::CreateDshSession { folder, .. } => UiEvent::SessionCreated {
+            ws_key: folder,
+            result: Err(anyhow!("dsh request routed to an opencode server")),
+        },
+        ApiRequest::CreateDshForkSession { folder, .. } => UiEvent::ForkSessionCreated {
+            ws_key: folder,
+            context: String::new(),
+            result: Err(anyhow!("dsh request routed to an opencode server")),
         },
         ApiRequest::ListModels => UiEvent::ModelsLoaded {
             result: client.get_models().await,

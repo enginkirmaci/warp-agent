@@ -1,9 +1,12 @@
-# Warp Agent — a chat client over `opencode serve`
+# Warp Agent — a chat client over `opencode serve` and `dsh web`
 
 Rust + [GPUI](https://github.com/zed-industries/zed) desktop client (the Avalonia
 prototype that preceded it lives in git history). One `opencode serve` per
 workspace, a shared tile grid of chats, streaming markdown replies, inline
-permission / question cards, and per-chat message queues.
+permission / question cards, and per-chat message queues. Chats can also run
+on DeepSeek Harness: the composer's harness pill picks `dsh` per chat, and one
+shared `dsh web` process serves every dsh chat (dsh sessions carry their own
+working directory).
 
 ## Run
 

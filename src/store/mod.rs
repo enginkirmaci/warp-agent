@@ -2,8 +2,8 @@
 //! transcripts, queues, permissions, questions and subagent tracking. A 1:1
 //! port of MainViewModel + ChatTileViewModel + the ChatItems model.
 
-use crate::oc::{self, ApiRequest, CommandInfo, NetCommand, SessionInfo, StoredMessage, UiEvent};
-use crate::settings::{AppSettings, UiState, WorkspaceState, DEFAULT_EXECUTABLE};
+use crate::oc::{self, ApiRequest, CommandInfo, NetCommand, SessionInfo, StoredMessage, UiEvent, DSH_SERVER_KEY};
+use crate::settings::{AppSettings, HarnessKind, UiState, WorkspaceState, DEFAULT_EXECUTABLE};
 pub mod ipc;
 use crate::theme::{self, AccentColors, FontTokens};
 use chrono::{Local, TimeZone, Timelike};
@@ -54,7 +54,7 @@ fn session_chat_settings(messages: &[StoredMessage]) -> Option<(String, Option<S
 /// everything. Ties break toward the later list entry (the list is sorted).
 pub(crate) fn variant_rank(v: &str) -> i32 {
     match v.to_lowercase().as_str() {
-        "minimal" | "none" => 0,
+        "off" | "minimal" | "none" => 0,
         "low" => 1,
         "medium" | "mid" => 2,
         "high" => 3,
@@ -519,6 +519,9 @@ pub struct ChatTile {
     pub session_id: Option<String>,
     pub title: String,
     pub input: String,
+    /// Backend this chat runs on; a draft carries the choice until its first
+    /// send creates the session on that server.
+    pub harness: HarnessKind,
     pub selected_model: Option<String>,
     pub selected_variant: Option<String>,
     pub selected_agent: Option<String>,
@@ -594,6 +597,7 @@ impl ChatTile {
             session_id: None,
             title: DRAFT_TITLE.into(),
             input: String::new(),
+            harness: HarnessKind::default(),
             selected_model: seed_model,
             selected_variant,
             selected_agent: seed_agent,
@@ -1598,10 +1602,20 @@ pub struct Store {
     /// draft tiles whose session creation is in flight, with the send payload
     /// (text + attachments) stashed until the reply lands
     pending_sends: Vec<(String, String, Vec<AttachmentItem>)>,
+    /// harness of each in-flight session create, FIFO-aligned with
+    /// pending_sends so a dsh create is recognized on its reply
+    pending_create_harness: std::collections::VecDeque<(String, HarnessKind)>,
+    /// dsh drafts parked while the dsh server starts: (tile key, text,
+    /// attachments, workspace folder). ServerStarted(DSH) converts them into
+    /// pending_sends + CreateDshSession pairs.
+    pending_dsh_drafts: Vec<(String, String, Vec<AttachmentItem>, String)>,
     /// workspaces started by Restore whose open-tile lists reload on ServerStarted
     pending_restores: Vec<(String, Vec<String>)>,
     /// chats requested while their workspace server was still starting
     pending_opens: Vec<(String, String)>,
+    /// workspace folders with a dsh list request in flight; its reply must
+    /// not prune the same workspace's opencode chats (and vice versa)
+    dsh_lists_in_flight: HashSet<String>,
     /// tile whose flyout should spring open after a live todo batch
     pub todos_spring: Option<String>,
     /// when the last coalesced stream repaint ran; None = never
@@ -1728,8 +1742,11 @@ impl Store {
             countdowns: HashMap::new(),
             prompt_history: Vec::new(),
             pending_sends: Vec::new(),
+            pending_create_harness: std::collections::VecDeque::new(),
+            pending_dsh_drafts: Vec::new(),
             pending_restores: Vec::new(),
             pending_opens: Vec::new(),
+            dsh_lists_in_flight: HashSet::new(),
             todos_spring: None,
             stream_repaint_last: None,
             stream_repaint_scheduled: false,
@@ -1902,21 +1919,21 @@ impl Store {
     /// Slash commands for the workspace a tile talks to (its own session's
     /// server, else the selected one). Empty when the server has none.
     pub fn tile_commands(&self, tile_key: &str) -> &[CommandInfo] {
-        self.tile_ws_key(tile_key)
+        self.tile_net_key_or(tile_key)
             .and_then(|ws| self.commands.get(&ws).map(Vec::as_slice))
             .unwrap_or(&[])
     }
 
     /// Fire a /command refresh for the tile's workspace (menu open).
     pub fn refresh_commands(&mut self, tile_key: &str) {
-        if let Some(ws) = self.tile_ws_key(tile_key) {
+        if let Some(ws) = self.tile_net_key_or(tile_key) {
             self.net.send(NetCommand::Request { ws_key: ws, request: ApiRequest::ListCommands });
         }
     }
 
     /// Fire a filename search for the tile's workspace (@ menu keystroke).
     pub fn search_files(&mut self, tile_key: &str, query: &str) {
-        if let Some(ws) = self.tile_ws_key(tile_key) {
+        if let Some(ws) = self.tile_net_key_or(tile_key) {
             self.net.send(NetCommand::Request {
                 ws_key: ws,
                 request: ApiRequest::FindFiles { query: query.to_string() },
@@ -2049,7 +2066,7 @@ impl Store {
     }
 
     pub fn has_runtime(&self, session_id: &str) -> bool {
-        self.effective_workspace_path(session_id)
+        self.net_key_for_session(session_id)
             .map(|p| self.runtimes.contains_key(&p))
             .unwrap_or(false)
     }
@@ -2059,7 +2076,7 @@ impl Store {
     /// workspace; a stopped workspace has no runtime and never reads true.
     pub fn stream_reconnecting(&self, session_id: Option<&str>) -> bool {
         let path = session_id
-            .and_then(|id| self.effective_workspace_path(id))
+            .and_then(|id| self.net_key_for_session(id))
             .or_else(|| self.selected_workspace.clone());
         path.and_then(|p| self.runtimes.get(&p))
             .map(|rt| matches!(rt.stream_status, oc::StreamStatus::Reconnecting { .. }))
@@ -2122,6 +2139,139 @@ impl Store {
             }
         }
         None
+    }
+
+    /// Which backend a session runs on. Sessions predate per-chat harnesses,
+    /// so anything unrecorded is opencode.
+    pub fn session_harness(&self, session_id: &str) -> HarnessKind {
+        match self.ui.harness_by_session.get(session_id) {
+            Some(HarnessKind::Dsh) => HarnessKind::Dsh,
+            _ => HarnessKind::OpenCode,
+        }
+    }
+
+    /// The net-thread key a session's server lives on: the workspace folder
+    /// for opencode, [`DSH_SERVER_KEY`] for dsh (one shared process).
+    fn net_key_for_session(&self, session_id: &str) -> Option<String> {
+        if self.session_harness(session_id) == HarnessKind::Dsh {
+            return Some(DSH_SERVER_KEY.into());
+        }
+        self.effective_workspace_path(session_id)
+    }
+
+    /// Same for a tile: an existing chat routes by its session; a draft by
+    /// the harness pill the composer is showing.
+    fn tile_net_key_or(&self, tile_key: &str) -> Option<String> {
+        if let Some(tile) = self.tile_by_key(tile_key) {
+            if tile.harness == HarnessKind::Dsh {
+                return Some(DSH_SERVER_KEY.into());
+            }
+            if let Some(sid) = &tile.session_id {
+                return self.net_key_for_session(sid);
+            }
+        }
+        self.tile_ws_key(tile_key)
+    }
+
+    /// Starts the shared dsh server unless it is already up. Replies arrive
+    /// as ServerStarted(DSH_SERVER_KEY); parked work drains there.
+    pub fn ensure_dsh(&mut self, cx: &mut Context<Self>) {
+        if self.runtimes.contains_key(DSH_SERVER_KEY) {
+            return;
+        }
+        let executable = self.settings.dsh_executable.clone();
+        tracing::info!("starting the shared dsh server");
+        self.net.send(NetCommand::StartServer {
+            ws_key: DSH_SERVER_KEY.into(),
+            kind: HarnessKind::Dsh,
+            executable: if executable.is_empty() {
+                crate::settings::DEFAULT_DSH_EXECUTABLE.into()
+            } else {
+                executable
+            },
+            folder: ".".into(),
+        });
+        let _ = cx;
+    }
+
+    /// Refreshes every workspace's dsh chat list from the shared server. Each
+    /// request filters by the workspace folder server-side (dsh sessions
+    /// carry their own cwd).
+    fn refresh_dsh_lists(&mut self) {
+        if !self.runtimes.contains_key(DSH_SERVER_KEY) {
+            return;
+        }
+        let folders: Vec<String> = self
+            .workspaces
+            .iter()
+            .filter(|ws| ws.state.sessions.iter().any(|sid| self.session_harness(sid) == HarnessKind::Dsh))
+            .map(|ws| ws.folder_path().to_string())
+            .collect();
+        for folder in folders {
+            self.dsh_lists_in_flight.insert(folder.clone());
+            self.net.send(NetCommand::Request {
+                ws_key: DSH_SERVER_KEY.into(),
+                request: ApiRequest::ListDshSessions { folder },
+            });
+        }
+    }
+
+    /// Restarts whichever server a net key names — a workspace's opencode
+    /// process or the shared dsh singleton.
+    fn start_server_for_key(&mut self, key: &str, cx: &mut Context<Self>) {
+        if key == DSH_SERVER_KEY {
+            self.ensure_dsh(cx);
+        } else {
+            self.start_workspace(key, cx);
+        }
+    }
+
+    /// ServerStarted for the shared dsh server: pickers fill from it, parked
+    /// dsh work starts flowing, every workspace's dsh chat list refreshes.
+    fn on_dsh_started(&mut self, cx: &mut Context<Self>) {
+        self.runtimes.insert(
+            DSH_SERVER_KEY.into(),
+            WorkspaceRuntime { stream_status: oc::StreamStatus::Connected, healthy: None },
+        );
+        self.net.send(NetCommand::Request {
+            ws_key: DSH_SERVER_KEY.into(),
+            request: ApiRequest::ListModels,
+        });
+        self.net.send(NetCommand::Request {
+            ws_key: DSH_SERVER_KEY.into(),
+            request: ApiRequest::ListAgents,
+        });
+        self.refresh_dsh_lists();
+        // drafts parked while the server spun up become real creates now
+        let parked: Vec<(String, String, Vec<AttachmentItem>, String)> =
+            std::mem::take(&mut self.pending_dsh_drafts);
+        for (tile_key, text, attachments, folder) in parked {
+            self.pending_sends.push((tile_key, text, attachments));
+            self.pending_create_harness.push_back((folder.clone(), HarnessKind::Dsh));
+            self.net.send(NetCommand::Request {
+                ws_key: DSH_SERVER_KEY.into(),
+                request: ApiRequest::CreateDshSession { folder, title: DRAFT_TITLE.into() },
+            });
+        }
+        let pending_restores: Vec<(String, Vec<String>)> = self
+            .pending_restores
+            .extract_if(.., |(path, _)| path == DSH_SERVER_KEY)
+            .collect();
+        for (_, wanted) in pending_restores {
+            self.restore_open_tiles(DSH_SERVER_KEY, wanted, cx);
+        }
+        let pending_opens: Vec<(String, String)> = self
+            .pending_opens
+            .extract_if(.., |(path, _)| path == DSH_SERVER_KEY)
+            .collect();
+        for (_, session_id) in pending_opens {
+            self.net.send(NetCommand::Request {
+                ws_key: DSH_SERVER_KEY.into(),
+                request: ApiRequest::GetMessages { session_id },
+            });
+        }
+        self.ipc_push_status();
+        self.repaint(cx);
     }
 
     fn workspace_name_for(&self, session_id: &str) -> String {
@@ -2256,6 +2406,7 @@ impl Store {
         tracing::info!("starting server for {}", ws.name);
         self.net.send(NetCommand::StartServer {
             ws_key: folder,
+            kind: HarnessKind::OpenCode,
             executable: if executable.is_empty() { DEFAULT_EXECUTABLE.into() } else { executable },
             folder: path.into(),
         });
@@ -2366,6 +2517,10 @@ impl Store {
             }
             UiEvent::ServerStarted { ws_key, result } => match result {
                 Ok(()) => {
+                    if ws_key == DSH_SERVER_KEY {
+                        self.on_dsh_started(cx);
+                        return;
+                    }
                     // status starts Connected to match the pump's first attach
                     self.runtimes.insert(
                         ws_key.clone(),
@@ -2461,7 +2616,7 @@ impl Store {
                 } else {
                     tracing::warn!("server for {name} crashed — restarting ({crashes}/{MAX_CRASH_RESTARTS})");
                     self.announce(&format!("{name}: server crashed — restarting ({crashes}/{MAX_CRASH_RESTARTS})…"), true, cx);
-                    self.start_workspace(&ws_key, cx);
+                    self.start_server_for_key(&ws_key, cx);
                 }
                 self.ipc_push_status();
                 self.repaint(cx);
@@ -2484,7 +2639,11 @@ impl Store {
                             oc::StreamStatus::Connected => {
                                 // the server is back: its sessions may have
                                 // changed (restart) while the stream was down
-                                self.net.send(NetCommand::Request { ws_key: ws_key.clone(), request: ApiRequest::ListSessions });
+                                if ws_key == DSH_SERVER_KEY {
+                                    self.refresh_dsh_lists();
+                                } else {
+                                    self.net.send(NetCommand::Request { ws_key: ws_key.clone(), request: ApiRequest::ListSessions });
+                                }
                                 self.settle_reconnect_note(&ws_key, cx);
                             }
                             oc::StreamStatus::Reconnecting { attempt } => {
@@ -2521,7 +2680,13 @@ impl Store {
                 }
             }
             UiEvent::SessionsLoaded { ws_key, result } => match result {
-                Ok(sessions) => self.apply_session_list(&ws_key, sessions, cx),
+                // a dsh list (ListDshSessions) carries the workspace folder and
+                // must never prune the same workspace's opencode chats — and
+                // vice versa
+                Ok(sessions) => {
+                    let source = self.dsh_lists_in_flight.remove(&ws_key);
+                    self.apply_session_list(&ws_key, sessions, Some(source), cx)
+                }
                 Err(err) => tracing::debug!("session list refresh failed: {err:#}"),
             },
             UiEvent::MessagesLoaded { ws_key, session_id, result } => match result {
@@ -2538,6 +2703,7 @@ impl Store {
                     let key = format!("t{}", self.next_tile_key);
                     self.next_tile_key += 1;
                     let mut tile = ChatTile::new(key.clone(), self.seed_model(), self.seed_agent(), self.seed_variant());
+                    tile.harness = self.session_harness(&session_id);
                     // the chat reopens with the model/variant its last turn ran
                     // on; the seeds only stand until the transcript says otherwise
                     if let Some((model, variant)) = session_chat_settings(&messages) {
@@ -2588,6 +2754,12 @@ impl Store {
                         return;
                     };
                     self.pending_sends.remove(0);
+                    // the create's harness rides its own FIFO; a dsh session is
+                    // remembered so every later route picks the shared server
+                    if self.pending_create_harness.front().is_some_and(|(folder, _)| folder == &ws_key) {
+                        let (_, kind) = self.pending_create_harness.pop_front().unwrap();
+                        self.ui.harness_by_session.insert(info.id.clone(), kind);
+                    }
                     self.workspace_by_session.insert(info.id.clone(), ws_key.clone());
                     self.title_by_session.insert(info.id.clone(), info.title.clone());
                     self.tile_by_session.insert(info.id.clone(), draft_key.clone());
@@ -2643,6 +2815,9 @@ impl Store {
                     if !self.pending_sends.is_empty() {
                         self.pending_sends.remove(0);
                     }
+                    if self.pending_create_harness.front().is_some_and(|(folder, _)| folder == &ws_key) {
+                        self.pending_create_harness.pop_front();
+                    }
                     // a door run waiting on that draft fails with it (FIFO:
                     // the errored create belongs to the oldest pending send)
                     if let Some(key) = dropped_key {
@@ -2671,9 +2846,22 @@ impl Store {
                     self.title_by_session.insert(info.id.clone(), info.title.clone());
                     // mint a key directly — create_tile() would push a phantom
                     // draft tile into open_tiles (same as MessagesLoaded)
+                    // the fork rode the create FIFO; a dsh fork is remembered
+                    let fork_harness = if self
+                        .pending_create_harness
+                        .front()
+                        .is_some_and(|(folder, _)| folder == &ws_key)
+                    {
+                        let (_, kind) = self.pending_create_harness.pop_front().unwrap();
+                        self.ui.harness_by_session.insert(info.id.clone(), kind);
+                        kind
+                    } else {
+                        self.session_harness(&info.id)
+                    };
                     let key = format!("t{}", self.next_tile_key);
                     self.next_tile_key += 1;
                     let mut tile = ChatTile::new(key.clone(), self.seed_model(), self.seed_agent(), self.seed_variant());
+                    tile.harness = fork_harness;
                     tile.apply_variant_list(&self.variants_by_model, self.settings.default_variant_highest);
                     tile.session_id = Some(info.id.clone());
                     tile.title = info.title.clone();
@@ -2946,6 +3134,7 @@ impl Store {
         let key = format!("t{}", self.next_tile_key);
         self.next_tile_key += 1;
         let mut tile = ChatTile::new(key.clone(), self.seed_model(), self.seed_agent(), self.seed_variant());
+        tile.harness = self.settings.default_harness;
         tile.apply_variant_list(&self.variants_by_model, self.settings.default_variant_highest);
         tile.rev = Some(cx.new(|_| ()));
         self.open_tiles.push(tile);
@@ -2975,6 +3164,17 @@ impl Store {
             self.start_workspace(&ws_path, cx);
         }
         self.repaint(cx);
+    }
+
+    /// Switches a draft's harness. Only drafts: a chat with a session is
+    /// bound to the server it was created on.
+    pub fn set_tile_harness(&mut self, tile_key: &str, harness: HarnessKind, cx: &mut Context<Self>) {
+        if let Some(tile) = self.tile_by_key_mut(tile_key) {
+            if tile.session_id.is_none() {
+                tile.harness = harness;
+            }
+        }
+        let _ = cx;
     }
 
     pub fn new_chat_for_workspace(&mut self, path: &str, cx: &mut Context<Self>) {
@@ -3098,6 +3298,21 @@ impl Store {
                 self.tile_note(tile_key, "This chat's workspace server is stopped — start it to continue.", true, cx);
                 return;
             }
+        } else if tile.harness == HarnessKind::Dsh {
+            // a dsh draft needs the shared dsh server, not the workspace's
+            if !self.runtimes.contains_key(DSH_SERVER_KEY) {
+                let folder = self.selected_workspace.clone().unwrap_or_default();
+                let attachments = std::mem::take(&mut self.tile_by_key_mut(tile_key).unwrap().attachments);
+                self.pending_dsh_drafts
+                    .push((tile_key.to_string(), text.clone(), attachments, folder));
+                let Some(tile) = self.tile_by_key_mut(tile_key) else { return };
+                tile.input.clear();
+                tile.history_index = 0;
+                self.record_prompt(&text);
+                self.ensure_dsh(cx);
+                self.repaint(cx);
+                return;
+            }
         } else if !self.is_server_running || self.selected_workspace.is_none() {
             return;
         }
@@ -3138,8 +3353,24 @@ impl Store {
         if session_id.is_none() {
             // create the session first; the send continues when the reply lands
             let ws_key = self.selected_workspace.clone().unwrap();
+            let harness = self
+                .tile_by_key(tile_key)
+                .map(|tile| tile.harness)
+                .unwrap_or_default();
             self.pending_sends.push((tile_key.to_string(), text, attachments));
-            self.net.send(NetCommand::Request { ws_key, request: ApiRequest::CreateSession { title: DRAFT_TITLE.into() } });
+            match harness {
+                HarnessKind::Dsh => {
+                    self.pending_create_harness.push_back((ws_key.clone(), HarnessKind::Dsh));
+                    self.net.send(NetCommand::Request {
+                        ws_key: DSH_SERVER_KEY.into(),
+                        request: ApiRequest::CreateDshSession { folder: ws_key, title: DRAFT_TITLE.into() },
+                    });
+                }
+                HarnessKind::OpenCode => {
+                    self.pending_create_harness.push_back((ws_key.clone(), HarnessKind::OpenCode));
+                    self.net.send(NetCommand::Request { ws_key, request: ApiRequest::CreateSession { title: DRAFT_TITLE.into() } });
+                }
+            }
             return;
         }
         self.send_core(&session_id.unwrap(), text, attachments, cx);
@@ -3157,9 +3388,11 @@ impl Store {
         let agent = tile.and_then(|t| t.selected_agent.clone()).filter(|a| a != DEFAULT_AGENT_ENTRY);
         // a leading `/name args` matching a server command/skill goes to the
         // /command route: the server expands the template and honors the
-        // command's own agent/model config (subtask skills included)
+        // command's own agent/model config (subtask skills included). dsh
+        // commands are keyed under the shared server, and its send path
+        // ignores the distinction (dsh expands slash text itself).
         let command = self
-            .effective_workspace_path(session_id)
+            .net_key_for_session(session_id)
             .and_then(|ws_key| self.commands.get(&ws_key))
             .and_then(|commands| parse_slash_command(&text, commands));
         self.dispatch_send(
@@ -3173,7 +3406,7 @@ impl Store {
     /// auto title, then the net command. The auto-retry path replays a stored
     /// [`PromptPayload`] through here unchanged.
     fn dispatch_send(&mut self, session_id: &str, payload: PromptPayload, cx: &mut Context<Self>) {
-        let Some(ws_key) = self.effective_workspace_path(session_id) else { return };
+        let Some(ws_key) = self.net_key_for_session(session_id) else { return };
         let tile_key = self.tile_by_session.get(session_id).cloned();
         // verbatim copy for the auto-retry path (attachment bytes are Arc'd)
         self.last_prompt_by_session.insert(session_id.to_string(), payload.clone());
@@ -3351,13 +3584,13 @@ impl Store {
         if !self.is_busy(&session_id) || !self.has_runtime(&session_id) {
             return;
         }
-        let ws_key = self.effective_workspace_path(&session_id).unwrap();
+        let ws_key = self.net_key_for_session(&session_id).unwrap();
         self.net.send(NetCommand::Request { ws_key, request: ApiRequest::Abort { session_id: session_id.clone() } });
         let _ = cx;
     }
 
     pub fn stop_running(&mut self, session_id: &str, cx: &mut Context<Self>) {
-        let Some(ws_key) = self.effective_workspace_path(session_id) else { return };
+        let Some(ws_key) = self.net_key_for_session(session_id) else { return };
         self.retry_due_by_session.remove(session_id);
         self.net.send(NetCommand::Request { ws_key, request: ApiRequest::Abort { session_id: session_id.to_string() } });
         self.repaint(cx);
@@ -3372,7 +3605,7 @@ impl Store {
             tile.auto_title_pending = false;
         }
         let title = derive_title(text);
-        let Some(ws_key) = self.effective_workspace_path(session_id) else { return };
+        let Some(ws_key) = self.net_key_for_session(session_id) else { return };
         self.net.send(NetCommand::Request {
             ws_key,
             request: ApiRequest::RenameSession { session_id: session_id.to_string(), title },
@@ -3492,7 +3725,7 @@ impl Store {
     pub fn fork_from_message(&mut self, tile_key: &str, stop_key: usize, cx: &mut Context<Self>) {
         let Some(tile) = self.tile_by_key(tile_key) else { return };
         let Some(session_id) = tile.session_id.clone() else { return };
-        let Some(ws_key) = self.effective_workspace_path(&session_id) else { return };
+        let Some(ws_key) = self.net_key_for_session(&session_id) else { return };
         if !self.runtimes.contains_key(&ws_key) {
             self.tile_note(tile_key, "This chat's workspace server is stopped — start it to fork.", true, cx);
             return;
@@ -3503,10 +3736,14 @@ impl Store {
         }
         let title = derive_title(&stop_text);
         let context = fork_transcript(tile, stop_key, &self.title_for(&session_id));
-        self.net.send(NetCommand::Request {
-            ws_key,
-            request: ApiRequest::CreateForkSession { title, context },
-        });
+        let folder = self.effective_workspace_path(&session_id).unwrap_or_default();
+        let harness = self.session_harness(&session_id);
+        self.pending_create_harness.push_back((folder.clone(), harness));
+        let request = match harness {
+            HarnessKind::Dsh => ApiRequest::CreateDshForkSession { folder, title, context },
+            HarnessKind::OpenCode => ApiRequest::CreateForkSession { title, context },
+        };
+        self.net.send(NetCommand::Request { ws_key, request });
         let _ = cx;
     }
 
@@ -3531,7 +3768,13 @@ impl Store {
 
     // ---- session list maintenance ----
 
-    fn apply_session_list(&mut self, ws_key: &str, sessions: Vec<SessionInfo>, cx: &mut Context<Self>) {
+    fn apply_session_list(
+        &mut self,
+        ws_key: &str,
+        sessions: Vec<SessionInfo>,
+        dsh_source: Option<bool>,
+        cx: &mut Context<Self>,
+    ) {
         // keep the subagent→parent map warm from the listing too
         for s in &sessions {
             if let Some(parent_id) = &s.parent_id {
@@ -3598,8 +3841,18 @@ impl Store {
             std::cmp::Reverse((pins.contains_key(&s.id), s.updated_ms, s.created_ms))
         });
         let alive: HashSet<String> = mine.iter().map(|s| s.id.clone()).collect();
-        // drop chats that no longer exist on the server
-        let gone: Vec<String> = state.sessions.iter().filter(|id| !alive.contains(*id)).cloned().collect();
+        // drop chats that no longer exist on the server — only the ones this
+        // list's server owns (a dsh list knows nothing about opencode sessions)
+        let is_dsh_list = dsh_source == Some(true);
+        let gone: Vec<String> = state
+            .sessions
+            .iter()
+            .filter(|id| {
+                let dsh = self.session_harness(id) == HarnessKind::Dsh;
+                dsh == is_dsh_list && !alive.contains(*id)
+            })
+            .cloned()
+            .collect();
         if !gone.is_empty() {
             if let Some(ws) = self.workspace_by_path_mut(ws_key) {
                 ws.state.sessions.retain(|id| alive.contains(id));
@@ -3750,7 +4003,7 @@ impl Store {
         if title.is_empty() || title == current {
             return;
         }
-        let Some(ws_key) = self.effective_workspace_path(session_id) else { return };
+        let Some(ws_key) = self.net_key_for_session(session_id) else { return };
         self.net.send(NetCommand::Request {
             ws_key,
             request: ApiRequest::RenameSession { session_id: session_id.to_string(), title },
@@ -3763,7 +4016,7 @@ impl Store {
             self.announce("Stop the running turn before deleting this chat.", true, cx);
             return;
         }
-        let Some(ws_key) = self.effective_workspace_path(session_id) else { return };
+        let Some(ws_key) = self.net_key_for_session(session_id) else { return };
         self.net.send(NetCommand::Request {
             ws_key,
             request: ApiRequest::DeleteSession { session_id: session_id.to_string() },
@@ -3848,10 +4101,16 @@ impl Store {
             if !known || self.tile_by_session.contains_key(&id) {
                 continue;
             }
-            self.net.send(NetCommand::Request {
-                ws_key: ws_key.to_string(),
-                request: ApiRequest::GetMessages { session_id: id.clone() },
-            });
+            let route = self.net_key_for_session(&id).unwrap_or_else(|| ws_key.to_string());
+            if route == DSH_SERVER_KEY && !self.runtimes.contains_key(DSH_SERVER_KEY) {
+                self.ensure_dsh(cx);
+                self.pending_opens.push((DSH_SERVER_KEY.into(), id.clone()));
+            } else {
+                self.net.send(NetCommand::Request {
+                    ws_key: route,
+                    request: ApiRequest::GetMessages { session_id: id.clone() },
+                });
+            }
             added += 1;
         }
         if added == 0 {
@@ -4139,6 +4398,20 @@ impl Store {
         if let Some(ws) = self.workspace_by_path_mut(ws_path) {
             ws.set_expanded(true); // the opened chat's row belongs in a visible sidebar section
         }
+        if self.session_harness(session_id) == HarnessKind::Dsh {
+            if !self.runtimes.contains_key(DSH_SERVER_KEY) {
+                self.ensure_dsh(cx);
+                self.pending_opens.push((DSH_SERVER_KEY.into(), session_id.to_string()));
+                self.repaint(cx);
+                return;
+            }
+            self.net.send(NetCommand::Request {
+                ws_key: DSH_SERVER_KEY.into(),
+                request: ApiRequest::GetMessages { session_id: session_id.to_string() },
+            });
+            self.repaint(cx);
+            return;
+        }
         if !self.runtimes.contains_key(ws_path) {
             self.start_workspace(ws_path, cx);
             self.pending_opens.push((ws_path.to_string(), session_id.to_string()));
@@ -4221,9 +4494,11 @@ impl Store {
                     self.set_subagent_running(sid, false);
                     self.note_turn_duration(sid, cx);
                     // refresh the chat list of the workspace the chat belongs to
-                    if let Some(idle_path) = self.workspace_by_session.get(sid).cloned() {
+                    if self.session_harness(sid) == HarnessKind::Dsh {
+                        self.refresh_dsh_lists();
+                    } else if let Some(idle_path) = self.workspace_by_session.get(sid).cloned() {
                         if self.selected_workspace.as_deref() == Some(idle_path.as_str()) {
-                            self.net.send(NetCommand::Request { ws_key: idle_path, request: ApiRequest::ListSessions });
+                            self.net.send(NetCommand::Request { ws_key: idle_path.clone(), request: ApiRequest::ListSessions });
                         } else if self.runtimes.contains_key(&idle_path) {
                             self.net.send(NetCommand::Request { ws_key: idle_path, request: ApiRequest::ListSessions });
                         }
@@ -4614,7 +4889,7 @@ impl Store {
             }
         }
         let Some(session_id) = session_id else { return };
-        let Some(ws_key) = self.effective_workspace_path(&session_id) else {
+        let Some(ws_key) = self.net_key_for_session(&session_id) else {
             self.resolve_permission(permission_id, "server unavailable".to_string(), is_auto);
             return;
         };
@@ -4770,7 +5045,7 @@ impl Store {
             }
         }
         let (Some(answers), Some(session_id)) = (answers, session_id) else { return };
-        let Some(ws_key) = self.effective_workspace_path(&session_id) else {
+        let Some(ws_key) = self.net_key_for_session(&session_id) else {
             self.resolve_question(question_id, "server unavailable");
             return;
         };
@@ -4797,7 +5072,7 @@ impl Store {
             }
         }
         let Some(session_id) = session_id else { return };
-        let Some(ws_key) = self.effective_workspace_path(&session_id) else {
+        let Some(ws_key) = self.net_key_for_session(&session_id) else {
             self.resolve_question(question_id, "server unavailable");
             return;
         };

@@ -150,8 +150,11 @@ impl Store {
         if let Some(session_id) = entry.session_id.clone()
             && self.running_by_session.contains(&session_id)
         {
+            let ws_key = self
+                .net_key_for_session(&session_id)
+                .unwrap_or_else(|| entry.workspace.clone());
             self.net.send(NetCommand::Request {
-                ws_key: entry.workspace.clone(),
+                ws_key,
                 request: ApiRequest::Abort { session_id },
             });
         }

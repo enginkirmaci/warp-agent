@@ -2,9 +2,10 @@
 //! single session — the ChatTile view port.
 
 use crate::oc::CommandInfo;
-use crate::store::{at_token_start, ChatItem, QuestionEntry, Store, ToolItem};
+use crate::store::{at_token_start, ChatItem, QuestionEntry, Store, ToolItem, DEFAULT_MODEL_ENTRY};
 use crate::theme;
 use crate::ui::controls::{fold_body, menu_row, popover_card, BtnKind};
+use crate::ui::filtered_picker::FilteredPicker;
 use crate::ui::controls;
 use crate::ui::diff::{render_diff, sniff_lang};
 use crate::ui::markdown::render_markdown;
@@ -80,6 +81,9 @@ pub struct TileView {
     last_max: Pixels,
     expanded: HashSet<String>, // fold state by item id
     picker: Option<PickerKind>,
+    /// the composer model dropdown as its own entity: filter typing repaints
+    /// only the picker (see FilteredPicker::overlay); created on first open
+    model_picker: Option<Entity<FilteredPicker>>,
     menu: Option<TileMenu>,
     /// window-space bounds of the tile root, captured each paint; converts
     /// click positions into tile-local menu coordinates
@@ -276,9 +280,14 @@ impl TileView {
             .map(|t| t.input.clone())
             .unwrap_or_default();
         let initial_text = initial.clone();
+        let harness_label = store
+            .read(cx)
+            .tile_by_key(&key)
+            .map(|t| t.harness.label())
+            .unwrap_or("opencode");
         let composer = cx.new(|cx| {
             let mut state = TextareaState::new(window, cx)
-                .placeholder("Ask opencode…")
+                .placeholder(SharedString::from(format!("Ask {harness_label}…")))
                 .submit_on_enter(true)
                 .auto_grow(2, 9);
             if !initial.is_empty() {
@@ -397,6 +406,7 @@ impl TileView {
             last_max: px(0.),
             expanded: HashSet::new(),
             picker: None,
+            model_picker: None,
             menu: None,
             origin: std::rc::Rc::new(std::cell::Cell::new((0., 0., 0., 0.))),
             composer,
@@ -1598,6 +1608,10 @@ struct TileSnap {
     selected_model_short: String,
     selected_agent: String,
     has_agents: bool,
+    /// Backend of this chat: label for the harness pill, disabled once the
+    /// session exists (a chat is bound to the server it was created on).
+    harness_label: &'static str,
+    harness_locked: bool,
     has_tasks_or_agents: bool,
     has_tasks: bool,
     tasks_progress: String,
@@ -1916,6 +1930,51 @@ impl TileView {
         let fonts = snap.fonts;
         let accent = snap.accent;
         let mut pills = div().flex().items_center().gap_1();
+        // harness pill: click toggles opencode ↔ dsh on a draft; a chat that
+        // already has a session is bound to the server it was created on
+        let next_harness = if snap.harness_label == "dsh" { "opencode" } else { "dsh" };
+        pills = pills.child(
+            tip(
+                div()
+                    .id("pill-harness")
+                    .role(Role::Button)
+                    .aria_label(SharedString::from(format!("Harness: {} — click to use {}", snap.harness_label, next_harness)))
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .px_2()
+                    .py_1()
+                    .rounded_lg()
+                    .cursor_pointer()
+                    .text_color(theme::TEXT_MUTED)
+                    .when(!snap.harness_locked, |d| {
+                        d.hover(|s| s.bg(theme::HOVER).text_color(accent))
+                    })
+                    .when(snap.harness_locked, |d| d.opacity(0.4)),
+                if snap.harness_locked {
+                    format!("runs on {} — new chats can switch", snap.harness_label)
+                } else {
+                    format!("Harness — click to use {}", next_harness)
+                },
+            )
+            .on_click(cx.listener(move |this, _, _, cx| {
+                let key = this.key.clone();
+                let store = this.store.clone();
+                let locked = store
+                    .read(cx)
+                    .tile_by_key(&key)
+                    .map(|t| t.session_id.is_some())
+                    .unwrap_or(true);
+                if locked {
+                    return;
+                }
+                let next = crate::settings::HarnessKind::from_label(next_harness);
+                store.update(cx, |s, cx| s.set_tile_harness(&key, next, cx));
+                cx.notify();
+            }))
+            .child(div().text_size(px(fonts.font_small)).child(SharedString::from(snap.harness_label)))
+            .child(crate::ui::icon("icons/chevron-down.svg", px(fonts.icon_tiny), theme::TEXT_MUTED)),
+        );
         if snap.has_agents {
             pills = pills.child(
                 tip(
@@ -1974,8 +2033,14 @@ impl TileView {
                         .hover(|s| s.bg(theme::HOVER).text_color(accent)),
                     "Model",
                 )
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.picker = if matches!(this.picker, Some(PickerKind::Model)) { None } else { Some(PickerKind::Model) };
+                .on_click(cx.listener(|this, _, window, cx| {
+                    if matches!(this.picker, Some(PickerKind::Model)) {
+                        this.picker = None;
+                    } else {
+                        this.picker = Some(PickerKind::Model);
+                        let picker = this.ensure_model_picker(window, cx);
+                        picker.update(cx, |p, cx| p.reset_filter(window, cx));
+                    }
                     cx.notify();
                 }))
                 .child(div().text_size(px(fonts.font_small)).child(SharedString::from(
@@ -2272,95 +2337,154 @@ impl TileView {
         flyout.into_any_element()
     }
 
+    /// Create (once) the filtered model dropdown for the composer pill. It
+    /// applies picks and closes itself through these callbacks; the tile is
+    /// held weakly so picker ↔ tile can't keep each other alive.
+    fn ensure_model_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Entity<FilteredPicker> {
+        if let Some(picker) = &self.model_picker {
+            return picker.clone();
+        }
+        let store = self.store.clone();
+        let key = self.key.clone();
+        let tile = cx.entity().downgrade();
+        let selected = {
+            let store = store.clone();
+            let key = key.clone();
+            Box::new(move |cx: &App| {
+                store
+                    .read(cx)
+                    .tile_by_key(&key)
+                    .and_then(|t| t.selected_model.clone())
+                    .filter(|m| m != DEFAULT_MODEL_ENTRY)
+                    .unwrap_or_default()
+            }) as Box<dyn Fn(&App) -> String>
+        };
+        let pick = {
+            let store = store.clone();
+            let key = key.clone();
+            let tile = tile.clone();
+            Box::new(move |value: &str, cx: &mut App| {
+                let model = if value.is_empty() { Some(DEFAULT_MODEL_ENTRY.into()) } else { Some(value.to_string()) };
+                store.update(cx, |s, _| s.set_tile_model(&key, model));
+                if let Some(tile) = tile.upgrade() {
+                    let _ = tile.update(cx, |tv, cx| {
+                        tv.picker = None;
+                        cx.notify();
+                    });
+                }
+            }) as Box<dyn Fn(&str, &mut App)>
+        };
+        let close = {
+            let tile = tile.clone();
+            Box::new(move |cx: &mut App| {
+                if let Some(tile) = tile.upgrade() {
+                    let _ = tile.update(cx, |tv, cx| {
+                        tv.picker = None;
+                        cx.notify();
+                    });
+                }
+            }) as Box<dyn Fn(&mut App)>
+        };
+        let picker = cx.new(|cx| FilteredPicker::overlay(store, selected, pick, close, window, cx));
+        self.model_picker = Some(picker.clone());
+        picker
+    }
+
     /// Model/variant/agent dropdown, anchored above the composer's right side.
-    fn render_picker(&mut self, snap: &TileSnap, cx: &mut Context<Self>) -> gpui::AnyElement {
+    /// Model is the filtered picker entity (filter typing repaints only it);
+    /// variant and agent stay flat server lists.
+    fn render_picker(&mut self, snap: &TileSnap, window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
         let fonts = snap.fonts;
         let mut picker_el: gpui::AnyElement = div().into_any_element();
         if let Some(kind) = &self.picker {
-            let entries: Vec<String> = match kind {
+            match kind {
                 PickerKind::Model => {
-                    let store = self.store.read(cx);
-                    store.models.clone()
+                    picker_el = self.ensure_model_picker(window, cx).into_any_element();
                 }
-                PickerKind::Variant => {
-                    let store = self.store.read(cx);
-                    store.tile_by_key(&self.key).map(|t| t.variants.clone()).unwrap_or_default()
-                }
-                PickerKind::Agent => {
-                    let store = self.store.read(cx);
-                    store.agents.clone()
-                }
-            };
-            let kind_tag = match kind {
-                PickerKind::Model => 0u64,
-                PickerKind::Variant => 1,
-                PickerKind::Agent => 2,
-            };
-            let mut menu = div().id("picker-list").flex().flex_col().min_w(px(220.)).max_h(px(320.)).overflow_y_scroll();
-            for entry in &entries {
-                let value = entry.clone();
-                let is_sentinel = value.starts_with('(');
-                let key = format!("pk{kind_tag}{value}");
-                menu = menu.child(
-                    div()
-                        .id(gpui::ElementId::NamedInteger("pkrow".into(), TileView::hash(&key)))
-                        .role(Role::ListBoxOption)
-                        .aria_label(SharedString::from(value.clone()))
-                        .px_2()
-                        .py_1()
-                        .rounded_md()
-                        .text_size(px(fonts.font_small))
-                        .text_color(theme::TEXT)
-                        .cursor_pointer()
-                        .hover(|s| s.bg(theme::HOVER))
-                        .on_click({
-                            let value = value.clone();
-                            cx.listener(move |this, _, _, cx| {
-                                let kind = this.picker.take();
-                                let key = this.key.clone();
-                                let store = this.store.clone();
-                                let value = value.clone();
-                                store.update(cx, move |s, _| {
-                                    match kind {
-                                        Some(PickerKind::Model) => {
-                                            s.set_tile_model(&key, if is_sentinel { Some("(server default)".into()) } else { Some(value) });
-                                        }
-                                        Some(PickerKind::Variant) => {
-                                            s.set_tile_variant(&key, if is_sentinel { Some("(default)".into()) } else { Some(value) });
-                                        }
-                                        Some(PickerKind::Agent) => {
-                                            s.set_tile_agent(&key, if is_sentinel { Some("(default build)".into()) } else { Some(value) });
-                                        }
-                                        None => {}
-                                    }
-                                });
-                                cx.notify();
-                            })
-                        })
-                        .child(SharedString::from(value)),
-                );
-            }
-            picker_el = div()
-                .id("picker-catcher")
-                .absolute()
-                .inset_0()
-                // hitbox hover is geometric in gpui: without occlusion the
-                // composer/transcript under the dropdown keeps receiving clicks
-                .occlude()
-                // click-elsewhere dismiss; menu rows are children, so they
-                // stay above the catcher and keep working
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.picker = None;
-                    cx.notify();
-                }))
-                .child(
-                    div()
+                PickerKind::Variant | PickerKind::Agent => {
+                    let entries: Vec<String> = match kind {
+                        PickerKind::Variant => {
+                            let store = self.store.read(cx);
+                            store.tile_by_key(&self.key).map(|t| t.variants.clone()).unwrap_or_default()
+                        }
+                        PickerKind::Agent => {
+                            let store = self.store.read(cx);
+                            store.agents.clone()
+                        }
+                        PickerKind::Model => unreachable!(),
+                    };
+                    let kind_tag = match kind {
+                        PickerKind::Model => 0u64,
+                        PickerKind::Variant => 1,
+                        PickerKind::Agent => 2,
+                    };
+                    let mut menu = div().id("picker-list").flex().flex_col().min_w(px(220.)).max_h(px(320.)).overflow_y_scroll();
+                    for entry in &entries {
+                        let value = entry.clone();
+                        let is_sentinel = value.starts_with('(');
+                        let key = format!("pk{kind_tag}{value}");
+                        menu = menu.child(
+                            div()
+                                .id(gpui::ElementId::NamedInteger("pkrow".into(), TileView::hash(&key)))
+                                .role(Role::ListBoxOption)
+                                .aria_label(SharedString::from(value.clone()))
+                                .px_2()
+                                .py_1()
+                                .rounded_md()
+                                .text_size(px(fonts.font_small))
+                                .text_color(theme::TEXT)
+                                .cursor_pointer()
+                                .hover(|s| s.bg(theme::HOVER))
+                                .on_click({
+                                    let value = value.clone();
+                                    cx.listener(move |this, _, _, cx| {
+                                        let kind = this.picker.take();
+                                        let key = this.key.clone();
+                                        let store = this.store.clone();
+                                        let value = value.clone();
+                                        store.update(cx, move |s, _| {
+                                            match kind {
+                                                Some(PickerKind::Model) => {
+                                                    s.set_tile_model(&key, if is_sentinel { Some("(server default)".into()) } else { Some(value) });
+                                                }
+                                                Some(PickerKind::Variant) => {
+                                                    s.set_tile_variant(&key, if is_sentinel { Some("(default)".into()) } else { Some(value) });
+                                                }
+                                                Some(PickerKind::Agent) => {
+                                                    s.set_tile_agent(&key, if is_sentinel { Some("(default build)".into()) } else { Some(value) });
+                                                }
+                                                None => {}
+                                            }
+                                        });
+                                        cx.notify();
+                                    })
+                                })
+                                .child(SharedString::from(value)),
+                        );
+                    }
+                    picker_el = div()
+                        .id("picker-catcher")
                         .absolute()
-                        .bottom_10()
-                        .right_8()
-                        .child(popover_card().child(menu)),
-                )
-                .into_any_element();
+                        .inset_0()
+                        // hitbox hover is geometric in gpui: without occlusion the
+                        // composer/transcript under the dropdown keeps receiving clicks
+                        .occlude()
+                        // click-elsewhere dismiss; menu rows are children, so they
+                        // stay above the catcher and keep working
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.picker = None;
+                            cx.notify();
+                        }))
+                        .child(
+                            div()
+                                .absolute()
+                                .bottom_10()
+                                .right_8()
+                                .child(popover_card().child(menu)),
+                        )
+                        .into_any_element();
+                }
+            }
         }
         picker_el
     }
@@ -2747,6 +2871,8 @@ impl Render for TileView {
                 selected_model_short: tile.selected_model_short(),
                 selected_agent: tile.selected_agent.clone().unwrap_or_default(),
                 has_agents: store.has_agents(),
+                harness_label: tile.harness.label(),
+                harness_locked: tile.session_id.is_some(),
                 has_tasks_or_agents: tile.has_tasks_or_agents(),
                 has_tasks: tile.has_tasks(),
                 tasks_progress: tile.tasks_progress(),
@@ -2893,7 +3019,7 @@ impl Render for TileView {
         let header = self.render_header(&snap, cx);
         let queue_el = self.render_queue_strip(&snap);
         let flyout = self.render_flyout(&snap);
-        let picker_el = self.render_picker(&snap, cx);
+        let picker_el = self.render_picker(&snap, window, cx);
         let menu_el = self.render_menu(&snap, cx);
         let composer_frame = self.render_composer_frame(&snap, window, cx);
 
@@ -3442,7 +3568,11 @@ impl Render for ComposerField {
         // role and the current text (store copy, updated by every Change
         // event); an AT click lands at the wrapper's center, the textarea
         // itself, so focus still reaches the real field
-        let text = store.read(cx).tile_by_key(&key).map(|t| t.input.clone()).unwrap_or_default();
+        let (text, harness_label) = store
+            .read(cx)
+            .tile_by_key(&key)
+            .map(|t| (t.input.clone(), t.harness.label()))
+            .unwrap_or_else(|| (String::new(), "opencode"));
         // chrome-less inside: the composer frame (border/bg) is the tile's,
         // the textarea only edits.
         // image paste → attachment instead of text insertion
@@ -3450,7 +3580,7 @@ impl Render for ComposerField {
             .id("composer-field")
             .role(Role::MultilineTextInput)
             .aria_label("Message composer")
-            .aria_placeholder("Ask opencode…")
+            .aria_placeholder(SharedString::from(format!("Ask {harness_label}…")))
             .aria_value(SharedString::from(text))
             .flex_1()
             .min_h_0()

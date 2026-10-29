@@ -1,6 +1,11 @@
 //! The filtered picker: a select-style trigger over a filtered, virtualized
 //! list of the server catalog. A standalone entity so filter typing repaints
-//! only the picker, never the settings page around it.
+//! only the picker, never the page around it.
+//!
+//! Two targets: `Field` (the settings page — an owned trigger reading and
+//! writing an InputState) and `Overlay` (the composer — no trigger; the tile
+//! mounts it while its model pill is open, and picks and dismissal land
+//! through callbacks that hold the tile only weakly).
 
 use crate::store::Store;
 use crate::theme;
@@ -12,6 +17,7 @@ use gpui_kit::component::Sizable as _;
 
 const ROW_HEIGHT: f32 = 28.;
 const VISIBLE_ROWS: usize = 10;
+const OVERLAY_WIDTH: f32 = 280.;
 
 enum PickerRow {
     Default,
@@ -28,8 +34,23 @@ fn model_name(model: &str) -> &str {
     model.split_once('/').map(|(_, name)| name).unwrap_or(model)
 }
 
+/// Where a picked model lands.
+enum PickerTarget {
+    /// settings field: the trigger writes the model straight into the input
+    Field(Entity<InputState>),
+    /// composer overlay: selection and dismissal go through the owner tile
+    Overlay {
+        /// current selection for the check mark, re-read each render
+        selected: Box<dyn Fn(&App) -> String>,
+        /// apply the picked model ("" = server default)
+        pick: Box<dyn Fn(&str, &mut App)>,
+        /// close the overlay (the tile unmounts the picker element)
+        close: Box<dyn Fn(&mut App)>,
+    },
+}
+
 pub struct FilteredPicker {
-    state: Entity<InputState>,
+    target: PickerTarget,
     filter: Entity<InputState>,
     store: Entity<Store>,
     open: bool,
@@ -48,12 +69,73 @@ impl FilteredPicker {
         let sub_state = cx.observe(&state, |_, _, cx| cx.notify());
         let sub_store = cx.observe(&store, |_, _, cx| cx.notify());
         Self {
-            state,
+            target: PickerTarget::Field(state),
             filter,
             store,
             open: false,
             _subscriptions: vec![sub_filter, sub_state, sub_store],
         }
+    }
+
+    /// The composer variant: renders the popup on its own (catcher + anchored
+    /// card), the tile mounts it only while the model pill's dropdown is open.
+    pub fn overlay(
+        store: Entity<Store>,
+        selected: Box<dyn Fn(&App) -> String>,
+        pick: Box<dyn Fn(&str, &mut App)>,
+        close: Box<dyn Fn(&mut App)>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let filter = cx.new(|cx| InputState::new(window, cx).placeholder("Filter models"));
+        let sub_filter = cx.observe(&filter, |_, _, cx| cx.notify());
+        let sub_store = cx.observe(&store, |_, _, cx| cx.notify());
+        Self {
+            target: PickerTarget::Overlay { selected, pick, close },
+            filter,
+            store,
+            open: true,
+            _subscriptions: vec![sub_filter, sub_store],
+        }
+    }
+
+    /// Clear and focus the filter; the composer pill calls this on open.
+    pub fn reset_filter(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.filter.update(cx, |state, cx| {
+            state.set_value("", window, cx);
+            state.focus(window, cx);
+        });
+        cx.notify();
+    }
+
+    fn selected_value(&self, cx: &App) -> String {
+        match &self.target {
+            PickerTarget::Field(state) => state.read(cx).value().trim().to_string(),
+            PickerTarget::Overlay { selected, .. } => (selected)(cx),
+        }
+    }
+
+    fn choose(&mut self, value: &str, window: &mut Window, cx: &mut Context<Self>) {
+        match &self.target {
+            PickerTarget::Field(state) => {
+                let state = state.clone();
+                state.update(cx, |state, cx| state.set_value(value, window, cx));
+                self.open = false;
+            }
+            PickerTarget::Overlay { pick, close, .. } => {
+                (pick)(value, cx);
+                (close)(cx);
+            }
+        }
+        cx.notify();
+    }
+
+    fn dismiss(&mut self, cx: &mut Context<Self>) {
+        match &self.target {
+            PickerTarget::Field(_) => self.open = false,
+            PickerTarget::Overlay { close, .. } => (close)(cx),
+        }
+        cx.notify();
     }
 
     fn rows(&self, cx: &App) -> Vec<PickerRow> {
@@ -99,6 +181,76 @@ impl FilteredPicker {
         rows
     }
 
+    /// The dropdown card contents: filter input over the virtualized list.
+    fn popup_body(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let fonts = self.store.read(cx).fonts;
+        let accent = self.store.read(cx).accent.accent;
+        let rows_selected = self.selected_value(cx);
+        let rows = self.rows(cx);
+        let list_height = rows.len().min(VISIBLE_ROWS) as f32 * ROW_HEIGHT;
+        let font_small = fonts.font_small;
+        let icon_small = fonts.icon_small;
+        let list = uniform_list(
+            "model-dd-list",
+            rows.len(),
+            cx.processor(move |_this, range: std::ops::Range<usize>, _window, cx| {
+                range
+                    .map(|ix| match &rows[ix] {
+                        PickerRow::Default => Self::model_row(
+                            gpui::ElementId::Name("model-default".into()),
+                            "Server default".to_string(),
+                            rows_selected.is_empty(),
+                            String::new(),
+                            accent,
+                            font_small,
+                            icon_small,
+                            cx,
+                        ),
+                        PickerRow::Provider(provider) => Self::provider_row(
+                            gpui::ElementId::Name(
+                                SharedString::from(format!("model-provider-{provider}")),
+                            ),
+                            provider.clone(),
+                            font_small,
+                        ),
+                        PickerRow::Model(model) => Self::model_row(
+                            gpui::ElementId::Name(SharedString::from(format!("model-{model}"))),
+                            model_name(model).to_string(),
+                            model.eq_ignore_ascii_case(&rows_selected),
+                            model.clone(),
+                            accent,
+                            font_small,
+                            icon_small,
+                            cx,
+                        ),
+                        PickerRow::Message(message) => Self::message_row(
+                            gpui::ElementId::Name("model-message".into()),
+                            message.clone(),
+                            font_small,
+                        ),
+                    })
+                    .collect()
+            }),
+        )
+        .w_full()
+        .h(px(list_height));
+
+        div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .child(
+                div()
+                    .id("model-dd-filter")
+                    .role(Role::SearchInput)
+                    .aria_label("Filter models")
+                    .aria_placeholder("Filter models")
+                    .child(Input::new(&self.filter).small()),
+            )
+            .child(list)
+            .into_any_element()
+    }
+
     fn provider_row(id: gpui::ElementId, label: String, font_size: f32) -> gpui::AnyElement {
         div()
             .id(id)
@@ -137,7 +289,6 @@ impl FilteredPicker {
         label: String,
         selected: bool,
         value: String,
-        state: Entity<InputState>,
         accent: gpui::Rgba,
         font_size: f32,
         icon_size: f32,
@@ -159,9 +310,7 @@ impl FilteredPicker {
             .when(selected, |row| row.bg(theme::HOVER))
             .hover(|s| s.bg(theme::HOVER))
             .on_click(cx.listener(move |this, _, window, cx| {
-                state.update(cx, |state, cx| state.set_value(value.as_str(), window, cx));
-                this.open = false;
-                cx.notify();
+                this.choose(&value, window, cx);
             }))
             .child(
                 div()
@@ -186,168 +335,124 @@ impl FilteredPicker {
 
 impl Render for FilteredPicker {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let fonts = self.store.read(cx).fonts;
-        let accent = self.store.read(cx).accent.accent;
-        let selected = self.state.read(cx).value().trim().to_string();
-        let selected_label = if selected.is_empty() {
-            "Server default".to_string()
-        } else {
-            model_name(&selected).to_string()
-        };
-        let selected_provider = model_provider(&selected).to_string();
-        let rows = self.rows(cx);
-        let list_height = rows.len().min(VISIBLE_ROWS) as f32 * ROW_HEIGHT;
-        let state = self.state.clone();
-        let rows_selected = selected.clone();
-        let font_small = fonts.font_small;
-        let icon_small = fonts.icon_small;
-        let list = uniform_list(
-            "model-dd-list",
-            rows.len(),
-            cx.processor(move |_this, range: std::ops::Range<usize>, _window, cx| {
-                range
-                    .map(|ix| match &rows[ix] {
-                        PickerRow::Default => Self::model_row(
-                            gpui::ElementId::Name("model-default".into()),
-                            "Server default".to_string(),
-                            rows_selected.is_empty(),
-                            String::new(),
-                            state.clone(),
-                            accent,
-                            font_small,
-                            icon_small,
-                            cx,
-                        ),
-                        PickerRow::Provider(provider) => Self::provider_row(
-                            gpui::ElementId::Name(
-                                SharedString::from(format!("model-provider-{provider}")),
-                            ),
-                            provider.clone(),
-                            font_small,
-                        ),
-                        PickerRow::Model(model) => Self::model_row(
-                            gpui::ElementId::Name(SharedString::from(format!("model-{model}"))),
-                            model_name(model).to_string(),
-                            model.eq_ignore_ascii_case(&rows_selected),
-                            model.clone(),
-                            state.clone(),
-                            accent,
-                            font_small,
-                            icon_small,
-                            cx,
-                        ),
-                        PickerRow::Message(message) => Self::message_row(
-                            gpui::ElementId::Name("model-message".into()),
-                            message.clone(),
-                            font_small,
-                        ),
-                    })
-                    .collect()
-            }),
-        )
-        .w_full()
-        .h(px(list_height));
-
-        div()
-            .id("model-dd-root")
-            .flex()
-            .flex_col()
-            .gap_1()
-            .flex_1()
-            .min_w_0()
-            .when(self.open, |root| {
-                root.on_mouse_down_out(cx.listener(|this, _, _, cx| {
-                    this.open = false;
-                    cx.notify();
-                }))
-            })
-            .child(
+        match &self.target {
+            PickerTarget::Overlay { .. } => {
+                let body = self.popup_body(cx);
                 div()
-                    .id("model-dd-toggle")
-                    .role(Role::ComboBox)
-                    .aria_label("Default model")
-                    .aria_value(SharedString::from(selected_label.clone()))
-                    .aria_expanded(self.open)
-                    .w_full()
-                    .min_h(px(26.))
-                    .cursor_pointer()
-                    .rounded_lg()
-                    .border_1()
-                    .border_color(if self.open { accent } else { theme::HAIRLINE })
-                    .bg(theme::INPUT)
-                    .px_2()
-                    .py_1()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .hover(|s| s.border_color(theme::TEXT_MUTED))
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.open = !this.open;
-                        if this.open {
-                            let filter = this.filter.clone();
-                            filter.update(cx, |state, cx| {
-                                state.set_value("", window, cx);
-                                state.focus(window, cx);
-                            });
-                        }
-                        cx.notify();
-                    }))
+                    .id("picker-catcher")
+                    .absolute()
+                    .inset_0()
+                    // hitbox hover is geometric in gpui: without occlusion the
+                    // composer/transcript under the dropdown keeps receiving clicks
+                    .occlude()
+                    // click-elsewhere dismiss; popup rows are children, so
+                    // they stay above the catcher and keep working
+                    .on_click(cx.listener(|this, _, _, cx| this.dismiss(cx)))
                     .child(
                         div()
-                            .flex_1()
-                            .min_w_0()
+                            .absolute()
+                            .bottom_10()
+                            .right_8()
+                            .child(popover_card().w(px(OVERLAY_WIDTH)).child(body)),
+                    )
+                    .into_any_element()
+            }
+            PickerTarget::Field(_) => {
+                let fonts = self.store.read(cx).fonts;
+                let accent = self.store.read(cx).accent.accent;
+                let selected = self.selected_value(cx);
+                let selected_label = if selected.is_empty() {
+                    "Server default".to_string()
+                } else {
+                    model_name(&selected).to_string()
+                };
+                let selected_provider = model_provider(&selected).to_string();
+                let body = self.open.then(|| self.popup_body(cx));
+                div()
+                    .id("model-dd-root")
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .flex_1()
+                    .min_w_0()
+                    .when(self.open, |root| {
+                        root.on_mouse_down_out(cx.listener(|this, _, _, cx| this.dismiss(cx)))
+                    })
+                    .child(
+                        div()
+                            .id("model-dd-toggle")
+                            .role(Role::ComboBox)
+                            .aria_label("Default model")
+                            .aria_value(SharedString::from(selected_label.clone()))
+                            .aria_expanded(self.open)
+                            .w_full()
+                            .min_h(px(26.))
+                            .cursor_pointer()
+                            .rounded_lg()
+                            .border_1()
+                            .border_color(if self.open { accent } else { theme::HAIRLINE })
+                            .bg(theme::INPUT)
+                            .px_2()
+                            .py_1()
                             .flex()
                             .items_center()
                             .gap_2()
-                            .when(!selected_provider.is_empty(), |row| {
-                                row.child(
-                                    div()
-                                        .px_1p5()
-                                        .py_0p5()
-                                        .rounded_sm()
-                                        .bg(theme::CHIP)
-                                        .text_size(px(fonts.font_micro))
-                                        .text_color(theme::TEXT_MUTED)
-                                        .child(selected_provider.clone()),
-                                )
-                            })
+                            .hover(|s| s.border_color(theme::TEXT_MUTED))
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.open = !this.open;
+                                if this.open {
+                                    let filter = this.filter.clone();
+                                    filter.update(cx, |state, cx| {
+                                        state.set_value("", window, cx);
+                                        state.focus(window, cx);
+                                    });
+                                }
+                                cx.notify();
+                            }))
                             .child(
                                 div()
-                                    .truncate()
-                                    .text_size(px(fonts.font_body))
-                                    .text_color(if selected.is_empty() {
-                                        theme::TEXT_MUTED
-                                    } else {
-                                        theme::TEXT
+                                    .flex_1()
+                                    .min_w_0()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .when(!selected_provider.is_empty(), |row| {
+                                        row.child(
+                                            div()
+                                                .px_1p5()
+                                                .py_0p5()
+                                                .rounded_sm()
+                                                .bg(theme::CHIP)
+                                                .text_size(px(fonts.font_micro))
+                                                .text_color(theme::TEXT_MUTED)
+                                                .child(selected_provider.clone()),
+                                        )
                                     })
-                                    .child(selected_label.clone()),
-                            ),
+                                    .child(
+                                        div()
+                                            .truncate()
+                                            .text_size(px(fonts.font_body))
+                                            .text_color(if selected.is_empty() {
+                                                theme::TEXT_MUTED
+                                            } else {
+                                                theme::TEXT
+                                            })
+                                            .child(selected_label.clone()),
+                                    ),
+                            )
+                            .child(crate::ui::icon(
+                                "icons/chevron-down.svg",
+                                px(fonts.icon_small),
+                                theme::TEXT_MUTED,
+                            )),
                     )
-                    .child(crate::ui::icon(
-                        "icons/chevron-down.svg",
-                        px(fonts.icon_small),
-                        theme::TEXT_MUTED,
-                    )),
-            )
-            .when(self.open, |root| {
-                // the kit Input has no a11y of its own — the wrapper carries the
-                // role; an AT click lands at its center, the input itself
-                root.child(
-                    popover_card()
-                        .w_full()
-                        .flex()
-                        .flex_col()
-                        .gap_1()
-                        .child(
-                            div()
-                                .id("model-dd-filter")
-                                .role(Role::SearchInput)
-                                .aria_label("Filter models")
-                                .aria_placeholder("Filter models")
-                                .child(Input::new(&self.filter).small()),
-                        )
-                        .child(list),
-                )
-            })
+                    .when(self.open, move |root| {
+                        // the kit Input has no a11y of its own — the wrapper carries the
+                        // role; an AT click lands at its center, the input itself
+                        root.child(popover_card().w_full().child(body.unwrap()))
+                    })
+                    .into_any_element()
+            }
+        }
     }
 }

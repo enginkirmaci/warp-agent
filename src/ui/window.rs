@@ -1076,6 +1076,7 @@ impl WarpWindow {
         let b = self.settings_buffers.clone();
         let rows: Vec<(&'static str, String)> = vec![
             ("executable", b.open_code_executable),
+            ("dsh_executable", b.dsh_executable),
             ("model", b.default_model),
             ("variant", b.default_variant),
             ("agent", b.default_agent),
@@ -1496,7 +1497,25 @@ impl WarpWindow {
                                         .child(settings_label("OpenCode executable", &fonts))
                                         .child(self.settings_field_wrap("executable", cx))
                                         .into_any_element(),
+                                    div().flex().items_center().gap_2p5()
+                                        .child(settings_label("DSH executable", &fonts))
+                                        .child(self.settings_field_wrap("dsh_executable", cx))
+                                        .into_any_element(),
                                     self.settings_hint("Running servers keep their current binary until stopped and started again.", &fonts),
+                                ]))
+                                .child(self.settings_section("Harness", &fonts))
+                                .child(self.settings_card(vec![
+                                    div().flex().items_center().gap_2p5()
+                                        .child(settings_label("Default for new chats", &fonts))
+                                        .child(self.radio_row(
+                                            &[("opencode", "opencode"), ("dsh", "DeepSeek (dsh)")],
+                                            if buffers.default_harness_dsh { "dsh" } else { "opencode" },
+                                            &fonts,
+                                            |b, key| b.default_harness_dsh = key == "dsh",
+                                            cx,
+                                        ))
+                                        .into_any_element(),
+                                    self.settings_hint("The composer's harness pill switches each chat before its first message.", &fonts),
                                 ]))
                                 .child(self.settings_section("Chat defaults", &fonts))
                                 .child(self.settings_card(vec![
@@ -1626,6 +1645,7 @@ impl WarpWindow {
             let text = field.read(cx).value().to_string();
             match *key {
                 "executable" => buffers.open_code_executable = text,
+                "dsh_executable" => buffers.dsh_executable = text,
                 "model" => buffers.default_model = text,
                 "variant" => buffers.default_variant = text,
                 "agent" => buffers.default_agent = text,

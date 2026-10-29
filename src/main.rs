@@ -3,6 +3,7 @@
 #![cfg_attr(all(target_os = "windows", not(debug_assertions)), windows_subsystem = "windows")]
 
 mod assets;
+mod dsh;
 mod ipc;
 mod logging;
 mod oc;

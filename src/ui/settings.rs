@@ -8,6 +8,8 @@ use gpui::Entity;
 #[derive(Clone)]
 pub struct SettingsBuffers {
     pub open_code_executable: String,
+    pub dsh_executable: String,
+    pub default_harness_dsh: bool,
     pub default_model: String,
     pub default_variant: String,
     pub variant_highest: bool,
@@ -39,6 +41,8 @@ impl SettingsBuffers {
         };
         Self {
             open_code_executable: s.open_code_executable.clone(),
+            dsh_executable: s.dsh_executable.clone(),
+            default_harness_dsh: s.default_harness == crate::settings::HarnessKind::Dsh,
             default_model: s.default_model.clone().unwrap_or_default(),
             default_variant: s.default_variant.clone().unwrap_or_default(),
             variant_highest: s.default_variant_highest,
@@ -79,6 +83,16 @@ impl SettingsBuffers {
                 crate::settings::DEFAULT_EXECUTABLE.into()
             } else {
                 self.open_code_executable.trim().to_string()
+            };
+            set.dsh_executable = if self.dsh_executable.trim().is_empty() {
+                crate::settings::DEFAULT_DSH_EXECUTABLE.into()
+            } else {
+                self.dsh_executable.trim().to_string()
+            };
+            set.default_harness = if self.default_harness_dsh {
+                crate::settings::HarnessKind::Dsh
+            } else {
+                crate::settings::HarnessKind::OpenCode
             };
             let null_if_blank = |v: &String| {
                 let t = v.trim();

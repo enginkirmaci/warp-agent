@@ -6,7 +6,7 @@
 
 use crate::theme;
 use gpui::prelude::*;
-use gpui::{div, px, AnyElement, App, ClickEvent, Div, ElementId, FontWeight, SharedString, Window};
+use gpui::{div, px, AnyElement, App, ClickEvent, Div, ElementId, FontWeight, Role, SharedString, Window};
 
 /// The button looks: accent-filled pill, quiet chip pill, and the outlined
 /// settings/restore style (hairline border, 26px min height).
@@ -29,8 +29,11 @@ pub fn button(
     enabled: bool,
     on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> AnyElement {
+    let label: SharedString = label.into();
     let mut el = div()
         .id(id.into())
+        .role(Role::Button)
+        .aria_label(label.clone())
         .px_3()
         .py_1()
         .text_size(px(text_size))
@@ -65,7 +68,7 @@ pub fn button(
     })
     .when(!enabled, |d| d.opacity(0.5))
     .on_click(on_click)
-    .child(label.into())
+    .child(label)
     .into_any_element()
 }
 
@@ -78,8 +81,11 @@ pub fn menu_row(
     text_size: f32,
     on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> AnyElement {
+    let label: SharedString = label.into();
     div()
         .id(id.into())
+        .role(Role::MenuItem)
+        .aria_label(label.clone())
         .px_3()
         .py_1p5()
         .rounded_md()
@@ -89,7 +95,7 @@ pub fn menu_row(
         .when(!destructive, |d| d.text_color(theme::TEXT))
         .hover(|s| s.bg(theme::HOVER))
         .on_click(on_click)
-        .child(label.into())
+        .child(label)
         .into_any_element()
 }
 

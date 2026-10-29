@@ -20,6 +20,9 @@ impl AppPaths {
     pub fn ui_state_file() -> PathBuf {
         Self::config_dir().join("ui.json")
     }
+    pub fn models_cache_file() -> PathBuf {
+        Self::config_dir().join("models.cache.json")
+    }
     /// Cwd of the built-in General workspace: general-purpose chats that belong
     /// to no project folder. The server still needs a directory; this one is ours.
     pub fn general_workspace_path() -> PathBuf {

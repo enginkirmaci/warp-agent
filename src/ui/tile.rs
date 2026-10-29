@@ -12,7 +12,7 @@ use crate::ui::tooltip::tip;
 use gpui::prelude::*;
 use gpui::{
     canvas, div, img, px, relative, actions, App, Context, Entity, Focusable,
-    ImageFormat, MouseButton, Pixels, Render, ScrollHandle, SharedString, Window,
+    ImageFormat, MouseButton, Pixels, Render, Role, ScrollHandle, SharedString, Toggled, Window,
 };
 use gpui_kit::component::input::{
     Enter, Escape, Input, InputEvent, InputState, MoveDown, MoveUp, Position, Textarea,
@@ -586,6 +586,8 @@ impl TileView {
                                                 "ucopy".into(),
                                                 TileView::hash(item_id),
                                             ))
+                                            .role(Role::Button)
+                                            .aria_label("Copy message")
                                             .cursor_pointer()
                                             .p_0p5()
                                             .rounded_sm()
@@ -666,6 +668,8 @@ impl TileView {
                                                 "acopy".into(),
                                                 TileView::hash(item_id),
                                             ))
+                                            .role(Role::Button)
+                                            .aria_label("Copy message")
                                             .cursor_pointer()
                                             .p_0p5()
                                             .rounded_sm()
@@ -1075,6 +1079,9 @@ impl TileView {
         let label = label.to_string();
         div()
             .id(gpui::ElementId::NamedInteger("fold".into(), Self::hash(key.as_str())))
+            .role(Role::Button)
+            .aria_label(SharedString::from(label.clone()))
+            .aria_expanded(open)
             .flex()
             .items_center()
             .gap_2()
@@ -1331,6 +1338,8 @@ impl TileView {
                     .child(
                         div()
                             .id(gpui::ElementId::NamedInteger("dismiss".into(), Self::hash(&id)))
+                            .role(Role::Button)
+                            .aria_label("Dismiss question")
                             .cursor_pointer()
                             .p_1()
                             .rounded_sm()
@@ -1457,6 +1466,13 @@ impl TileView {
             column = column.child(
                 div()
                     .id(gpui::ElementId::NamedInteger("qopt".into(), Self::hash(&format!("{item_id}:{qi}:{oi}"))))
+                    .role(if is_multi { Role::CheckBox } else { Role::RadioButton })
+                    .aria_label(SharedString::from(format!(
+                        "{} — {}",
+                        entry.question.lines().next().unwrap_or("").chars().take(60).collect::<String>(),
+                        option.label
+                    )))
+                    .aria_toggled(if selected { Toggled::True } else { Toggled::False })
                     .w_full()
                     .flex()
                     .items_start()
@@ -1635,7 +1651,13 @@ impl TileView {
         if snap.has_ctx {
             header_right = header_right.child(
                 tip(
-                    div().id("ctx-readout").flex().items_center().gap_1(),
+                    div()
+                        .id("ctx-readout")
+                        .role(Role::Label)
+                        .aria_label(SharedString::from(format!("Context used: {}", snap.ctx)))
+                        .flex()
+                        .items_center()
+                        .gap_1(),
                     format!("Context used: {}", snap.ctx),
                 )
                 .child(context_ring(snap.ctx_frac))
@@ -1654,6 +1676,9 @@ impl TileView {
                 tip(
                     div()
                         .id("tasks-btn")
+                        .role(Role::Button)
+                        .aria_label("Tasks & agents")
+                        .aria_expanded(self.flyout_open)
                         .relative()
                         .flex()
                         .items_center()
@@ -1685,6 +1710,8 @@ impl TileView {
                 tip(
                     div()
                         .id("close-tile")
+                        .role(Role::Button)
+                        .aria_label(SharedString::from(format!("Close chat {}", snap.title)))
                         .cursor_pointer()
                         .p_1()
                         .rounded_md()
@@ -1763,6 +1790,8 @@ impl TileView {
                             tip(
                                 div()
                                     .id(gpui::ElementId::NamedInteger("steer".into(), steer_key as u64))
+                                    .role(Role::Button)
+                                    .aria_label(SharedString::from(format!("Steer — {}", entry.text.chars().take(40).collect::<String>())))
                                     .px_2()
                                     .py_1()
                                     .rounded_md()
@@ -1789,6 +1818,8 @@ impl TileView {
                             tip(
                                 div()
                                     .id(gpui::ElementId::NamedInteger("qedit".into(), edit_key as u64))
+                                    .role(Role::Button)
+                                    .aria_label(SharedString::from(format!("Edit queued — {}", entry.text.chars().take(40).collect::<String>())))
                                     .cursor_pointer()
                                     .p_1()
                                     .rounded_sm()
@@ -1807,6 +1838,8 @@ impl TileView {
                             tip(
                                 div()
                                     .id(gpui::ElementId::NamedInteger("qrm".into(), remove_key as u64))
+                                    .role(Role::Button)
+                                    .aria_label(SharedString::from(format!("Remove queued — {}", entry.text.chars().take(40).collect::<String>())))
                                     .cursor_pointer()
                                     .p_1()
                                     .rounded_sm()
@@ -1856,6 +1889,8 @@ impl TileView {
                 chip = chip.child(
                     div()
                         .id(gpui::ElementId::NamedInteger("att-rm".into(), akey as u64))
+                        .role(Role::Button)
+                        .aria_label(SharedString::from(format!("Remove attachment {}", att.file_name)))
                         .cursor_pointer()
                         .on_click({
                             let store_handle = store_handle.clone();
@@ -1884,6 +1919,12 @@ impl TileView {
                 tip(
                     div()
                         .id("pill-agent")
+                        .role(Role::ComboBox)
+                        .aria_label("Agent")
+                        .aria_value(SharedString::from(
+                            if snap.selected_agent.is_empty() { crate::store::DEFAULT_AGENT_ENTRY } else { snap.selected_agent.as_str() },
+                        ))
+                        .aria_expanded(matches!(self.picker, Some(PickerKind::Agent)))
                         .flex()
                         .items_center()
                         .gap_1()
@@ -1914,6 +1955,12 @@ impl TileView {
                 tip(
                     div()
                         .id("pill-model")
+                        .role(Role::ComboBox)
+                        .aria_label("Model")
+                        .aria_value(SharedString::from(
+                            if snap.selected_model_short.is_empty() { crate::store::DEFAULT_MODEL_ENTRY } else { snap.selected_model_short.as_str() },
+                        ))
+                        .aria_expanded(matches!(self.picker, Some(PickerKind::Model)))
                         .flex()
                         .items_center()
                         .gap_1()
@@ -1942,6 +1989,10 @@ impl TileView {
                 tip(
                     div()
                         .id("pill-variant")
+                        .role(Role::ComboBox)
+                        .aria_label("Response variant")
+                        .aria_value(SharedString::from(snap.selected_variant.clone()))
+                        .aria_expanded(matches!(self.picker, Some(PickerKind::Variant)))
                         .flex()
                         .items_center()
                         .gap_1()
@@ -1980,6 +2031,8 @@ impl TileView {
             tip(
                 div()
                     .id("stop")
+                    .role(Role::Button)
+                    .aria_label("Stop")
                     .size(px(34.))
                     .rounded_lg()
                     .border_1()
@@ -2003,6 +2056,8 @@ impl TileView {
             tip(
                 div()
                     .id("send")
+                    .role(Role::Button)
+                    .aria_label("Send")
                     .size(px(34.))
                     .rounded_lg()
                     .border_1()
@@ -2122,6 +2177,8 @@ impl TileView {
                                     // the whole row opens the agent's chat; the stop
                                     // button below keeps itself click-exclusive
                                     .id(gpui::ElementId::NamedInteger("open-agent".into(), TileView::hash(&sid_open)))
+                                    .role(Role::Button)
+                                    .aria_label(SharedString::from(format!("Open agent {}", agent.title)))
                                     .flex()
                                     .items_center()
                                     .gap_2()
@@ -2174,6 +2231,8 @@ impl TileView {
                                     .child(
                                         div()
                                             .id(gpui::ElementId::NamedInteger("stop-agent".into(), TileView::hash(&sid_stop)))
+                                            .role(Role::Button)
+                                            .aria_label(SharedString::from(format!("Stop agent {}", agent.title)))
                                             .cursor_pointer()
                                             .p_1()
                                             .rounded_sm()
@@ -2243,6 +2302,8 @@ impl TileView {
                 menu = menu.child(
                     div()
                         .id(gpui::ElementId::NamedInteger("pkrow".into(), TileView::hash(&key)))
+                        .role(Role::ListBoxOption)
+                        .aria_label(SharedString::from(value.clone()))
                         .px_2()
                         .py_1()
                         .rounded_md()
@@ -2430,6 +2491,8 @@ impl TileView {
                         tip(
                             div()
                                 .id("attach")
+                                .role(Role::Button)
+                                .aria_label("Attach files")
                                 .cursor_pointer()
                                 .p_1()
                                 .rounded_md()
@@ -2446,6 +2509,9 @@ impl TileView {
                         tip(
                             div()
                                 .id("allow-toggle")
+                                .role(Role::Button)
+                                .aria_label("Auto-allow tool permissions")
+                                .aria_toggled(if snap.allow_on { Toggled::True } else { Toggled::False })
                                 .cursor_pointer()
                                 .p_1()
                                 .rounded_md()
@@ -2473,6 +2539,9 @@ impl TileView {
                         tip(
                             div()
                                 .id("mcp-toggle")
+                                .role(Role::Button)
+                                .aria_label("Toggle MCP servers")
+                                .aria_toggled(if snap.mcp_on { Toggled::True } else { Toggled::False })
                                 .when(!snap.has_mcp, |d| d.opacity(0.4))
                                 .cursor_pointer()
                                 .p_1()
@@ -2919,6 +2988,8 @@ impl Render for TileView {
                             .bottom(px(150.))
                             .right_2()
                             .id("jump")
+                            .role(Role::Button)
+                            .aria_label("Jump to latest")
                             .rounded_full()
                             .border_1()
                             .border_color(theme::HAIRLINE)
@@ -3203,6 +3274,9 @@ impl Render for SuggestMenu {
                     rows = rows.child(
                         div()
                             .id(gpui::ElementId::NamedInteger("suggest-row".into(), ix as u64))
+                            .role(Role::ListBoxOption)
+                            .aria_label(SharedString::from(format!("/{} — {}", cmd.name, cmd.description.lines().next().unwrap_or(""))))
+                            .aria_selected(selected)
                             .flex()
                             .items_center()
                             .gap_2()
@@ -3263,6 +3337,9 @@ impl Render for SuggestMenu {
                             rows = rows.child(
                                 div()
                                     .id(gpui::ElementId::NamedInteger("suggest-row".into(), ix as u64))
+                                    .role(Role::ListBoxOption)
+                                    .aria_label(SharedString::from(path.clone()))
+                                    .aria_selected(selected)
                                     .flex()
                                     .items_center()
                                     .gap_2()
@@ -3330,7 +3407,17 @@ struct QuestionField {
 
 impl Render for QuestionField {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        Input::new(&self.state)
+        // the kit Input has no a11y of its own — the wrapper carries the role;
+        // an AT click lands at the wrapper's center, the input itself
+        div()
+            .id(gpui::ElementId::NamedInteger(
+                "qfield".into(),
+                TileView::hash(&format!("{}#{}", self.question_id, self.qi)),
+            ))
+            .role(Role::TextInput)
+            .aria_label("Custom answer")
+            .aria_placeholder("custom answer…")
+            .child(Input::new(&self.state))
     }
 }
 
@@ -3346,29 +3433,45 @@ struct ComposerField {
 }
 
 impl Render for ComposerField {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let store = self.store.clone();
         let key = self.key.clone();
+        // the kit Textarea has no a11y of its own — the wrapper carries the
+        // role and the current text (store copy, updated by every Change
+        // event); an AT click lands at the wrapper's center, the textarea
+        // itself, so focus still reaches the real field
+        let text = store.read(cx).tile_by_key(&key).map(|t| t.input.clone()).unwrap_or_default();
         // chrome-less inside: the composer frame (border/bg) is the tile's,
         // the textarea only edits.
         // image paste → attachment instead of text insertion
-        Textarea::new(&self.state)
-            .appearance(false)
-            .bordered(false)
-            .on_paste(move |item: &gpui::ClipboardItem, _, cx| {
-                let image = item.entries().iter().find_map(|entry| match entry {
-                    gpui::ClipboardEntry::Image(image) => Some(image),
-                    _ => None,
-                });
-                if let Some(image) = image {
-                    let png = image.bytes.clone();
-                    let key = key.clone();
-                    store.update(cx, move |s, _| s.attach_image(&key, png));
-                    true
-                } else {
-                    false
-                }
-            })
+        div()
+            .id("composer-field")
+            .role(Role::MultilineTextInput)
+            .aria_label("Message composer")
+            .aria_placeholder("Ask opencode…")
+            .aria_value(SharedString::from(text))
+            .flex_1()
+            .min_h_0()
+            .w_full()
+            .child(
+                Textarea::new(&self.state)
+                    .appearance(false)
+                    .bordered(false)
+                    .on_paste(move |item: &gpui::ClipboardItem, _, cx| {
+                        let image = item.entries().iter().find_map(|entry| match entry {
+                            gpui::ClipboardEntry::Image(image) => Some(image),
+                            _ => None,
+                        });
+                        if let Some(image) = image {
+                            let png = image.bytes.clone();
+                            let key = key.clone();
+                            store.update(cx, move |s, _| s.attach_image(&key, png));
+                            true
+                        } else {
+                            false
+                        }
+                    }),
+            )
             .into_any_element()
     }
 }

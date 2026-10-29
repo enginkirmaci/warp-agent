@@ -103,6 +103,21 @@ impl AppSettings {
     }
 }
 
+pub fn load_models_cache() -> Vec<String> {
+    read_json(AppPaths::models_cache_file()).unwrap_or_default()
+}
+
+pub fn save_models_cache(models: &[String]) {
+    let keys: Vec<String> = models
+        .iter()
+        .filter(|model| !model.trim().is_empty() && !model.starts_with('('))
+        .cloned()
+        .collect();
+    if !keys.is_empty() {
+        write_json_pretty(AppPaths::models_cache_file(), &keys);
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 pub struct UiState {
     #[serde(rename = "Pins", default)]

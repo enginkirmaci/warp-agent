@@ -4,6 +4,7 @@ pub mod code_highlight;
 pub mod controls;
 pub mod diff;
 pub mod markdown;
+pub mod filtered_picker;
 pub mod settings;
 pub mod tile;
 pub mod tooltip;

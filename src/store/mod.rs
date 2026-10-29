@@ -1661,6 +1661,22 @@ impl Store {
             }
         }
 
+        let mut startup_models = vec![DEFAULT_MODEL_ENTRY.to_string()];
+        for model in crate::settings::load_models_cache() {
+            if !model.trim().is_empty() && !startup_models.contains(&model) {
+                startup_models.push(model);
+            }
+        }
+        if let Some(model) = settings
+            .default_model
+            .as_deref()
+            .map(str::trim)
+            .filter(|model| !model.is_empty())
+            && !startup_models.iter().any(|known| known == model)
+        {
+            startup_models.push(model.to_string());
+        }
+
         let mut store = Self {
             settings: settings.clone(),
             ui: ui.clone(),
@@ -1671,7 +1687,7 @@ impl Store {
             workspaces: Vec::new(),
             selected_workspace: None,
             sessions: Vec::new(),
-            models: vec![DEFAULT_MODEL_ENTRY.into()],
+            models: startup_models,
             agents: vec![DEFAULT_AGENT_ENTRY.into()],
             running_agents: Vec::new(),
             open_tiles: Vec::new(),
@@ -2816,6 +2832,7 @@ impl Store {
                             self.models.push(m.key);
                         }
                     }
+                    crate::settings::save_models_cache(&self.models);
                     // tiles restored before this list arrived computed their
                     // context fraction against an empty map — re-resolve the
                     // limit and the % readout for every open tile now

@@ -5,11 +5,12 @@ use crate::store::{Store, WorkspaceItem};
 use crate::theme;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use crate::ui::controls::{self, menu_row, popover_card, BtnKind};
+use crate::ui::filtered_picker::FilteredPicker;
 use crate::ui::settings::SettingsBuffers;
 use crate::ui::tile::TileView;
 use crate::ui::tooltip::{self, tip};
 use gpui::prelude::*;
-use gpui::{canvas, div, px, App, Context, Entity, MouseButton, Render, SharedString, StyleRefinement, Window, WindowControlArea};
+use gpui::{canvas, div, px, App, Context, Entity, MouseButton, Render, Role, SharedString, StyleRefinement, Toggled, Window, WindowControlArea};
 use std::collections::HashMap;
 
 #[derive(Clone)]
@@ -98,9 +99,8 @@ pub struct WarpWindow {
     /// leaf renderers for the plain settings fields — keystrokes repaint
     /// only the field, never the window (see InputLeaf below)
     settings_leafs: Vec<(&'static str, Entity<InputLeaf>)>,
-    /// the Model field + its live-filtered dropdown, one leaf (see
-    /// ModelFieldLeaf): typing refilters the list inside the leaf
-    settings_model_leaf: Option<Entity<ModelFieldLeaf>>,
+    /// the Model field + its standalone picker component
+    settings_model_picker: Option<Entity<FilteredPicker>>,
     /// session being renamed + its edit field (state for the Enter
     /// subscription, leaf for the per-keystroke renderer)
     rename: Option<(String, Entity<InputState>, Entity<InputLeaf>)>,
@@ -143,7 +143,7 @@ impl WarpWindow {
             settings_buffers,
             settings_fields: Vec::new(),
             settings_leafs: Vec::new(),
-            settings_model_leaf: None,
+            settings_model_picker: None,
             rename: None,
             sidebar_filter: String::new(),
             sidebar_filter_leaf: None,
@@ -407,6 +407,8 @@ impl WarpWindow {
                 tip(
                     div()
                         .id("toggle-sidebar")
+                        .role(Role::Button)
+                        .aria_label(if visible { "Hide sidebar" } else { "Show sidebar" })
                         .cursor_pointer()
                         .size(px(26.))
                         .rounded_md()
@@ -442,6 +444,8 @@ impl WarpWindow {
                 tip(
                     div()
                         .id("minimize-window")
+                        .role(Role::Button)
+                        .aria_label("Minimize")
                         .cursor_pointer()
                         .size(px(26.))
                         .rounded_md()
@@ -458,6 +462,8 @@ impl WarpWindow {
                 tip(
                     div()
                         .id("zoom")
+                        .role(Role::Button)
+                        .aria_label("Zoom · server health")
                         .cursor_pointer()
                         .size(px(26.))
                         .rounded_md()
@@ -479,6 +485,8 @@ impl WarpWindow {
                 tip(
                     div()
                         .id("close-window")
+                        .role(Role::Button)
+                        .aria_label("Close")
                         .cursor_pointer()
                         .size(px(26.))
                         .rounded_md()
@@ -596,6 +604,8 @@ impl WarpWindow {
                         tip(
                             div()
                                 .id("add-workspace")
+                                .role(Role::Button)
+                                .aria_label("Add a workspace folder")
                                 .cursor_pointer()
                                 .p_1()
                                 .rounded_sm()
@@ -611,7 +621,19 @@ impl WarpWindow {
                     ),
             )
             .child(
-                div().w_full().min_w_0().mt_1().child(filter_leaf),
+                // the kit Input has no a11y of its own — the wrapper carries the
+                // role/value; an AT click lands at the wrapper's center, which is
+                // the input itself, so focus still reaches the real field
+                div()
+                    .id("sidebar-filter")
+                    .role(Role::SearchInput)
+                    .aria_label("Filter workspaces")
+                    .aria_placeholder("Filter workspaces")
+                    .aria_value(self.sidebar_filter.clone())
+                    .w_full()
+                    .min_w_0()
+                    .mt_1()
+                    .child(filter_leaf),
             )
             .child(
                 div()
@@ -626,6 +648,8 @@ impl WarpWindow {
                 tip(
                     div()
                         .id("open-settings")
+                        .role(Role::Button)
+                        .aria_label("Settings")
                         .w_full()
                         .flex()
                         .items_center()
@@ -640,10 +664,10 @@ impl WarpWindow {
                                 s.is_settings_open = true;
                             });
                             this.settings_buffers = SettingsBuffers::from_settings(&this.store.read(cx).settings);
-                            let (fields, leafs, model_leaf) = this.make_settings_fields(window, cx);
+                            let (fields, leafs, model_picker) = this.make_settings_fields(window, cx);
                             this.settings_fields = fields;
                             this.settings_leafs = leafs;
-                            this.settings_model_leaf = model_leaf;
+                            this.settings_model_picker = model_picker;
                             cx.notify();
                         })),
                     "Settings",
@@ -683,6 +707,9 @@ impl WarpWindow {
 
         div()
             .id(gpui::ElementId::NamedInteger("ws".into(), TileView::hash(&path)))
+            .role(Role::Button)
+            .aria_label(SharedString::from(ws.name.clone()))
+            .aria_expanded(ws.is_expanded())
             .relative()
             .group("wsrow")
             .flex()
@@ -773,6 +800,8 @@ impl WarpWindow {
                                 tip(
                                     div()
                                         .id(gpui::ElementId::NamedInteger("ws-kebab".into(), TileView::hash(&path)))
+                                        .role(Role::Button)
+                                        .aria_label(SharedString::from(format!("{} — workspace actions", ws.name)))
                                         .cursor_pointer()
                                         .p_1()
                                         .rounded_sm()
@@ -800,6 +829,8 @@ impl WarpWindow {
                                 tip(
                                     div()
                                         .id(gpui::ElementId::NamedInteger("ws-new".into(), TileView::hash(&path)))
+                                        .role(Role::Button)
+                                        .aria_label(SharedString::from(format!("New chat in {}", ws.name)))
                                         .cursor_pointer()
                                         .p_1()
                                         .rounded_sm()
@@ -859,6 +890,9 @@ impl WarpWindow {
 
         let mut row = div()
             .id(gpui::ElementId::NamedInteger("chat".into(), TileView::hash(&id)))
+            .role(Role::Button)
+            .aria_label(SharedString::from(chat.title.clone()))
+            .aria_selected(chat.is_selected)
             .relative()
             .group("chatrow")
             .flex()
@@ -933,6 +967,8 @@ impl WarpWindow {
                             tip(
                                 div()
                                     .id(gpui::ElementId::NamedInteger("chat-del".into(), TileView::hash(&id)))
+                                    .role(Role::Button)
+                                    .aria_label(SharedString::from(format!("Delete {}", chat.title)))
                                     .cursor_pointer()
                                     .p_1()
                                     .rounded_sm()
@@ -1035,7 +1071,7 @@ impl WarpWindow {
     ) -> (
         Vec<(&'static str, Entity<InputState>)>,
         Vec<(&'static str, Entity<InputLeaf>)>,
-        Option<Entity<ModelFieldLeaf>>,
+        Option<Entity<FilteredPicker>>,
     ) {
         let b = self.settings_buffers.clone();
         let rows: Vec<(&'static str, String)> = vec![
@@ -1054,35 +1090,14 @@ impl WarpWindow {
         ];
         let mut fields = Vec::new();
         let mut leafs = Vec::new();
-        let mut model_leaf = None;
+        let mut model_picker = None;
         for (key, value) in rows {
             if key == "model" {
                 let state = cx.new(|cx| InputState::new(window, cx).placeholder("").default_value(value));
                 let store = self.store.clone();
-                let leaf = cx.new(|cx| {
-                    // focus opens the dropdown on the full list, typing
-                    // refilters it, blur (another field took focus) closes it
-                    cx.subscribe(&state, |this: &mut ModelFieldLeaf, field, event: &InputEvent, cx| match event {
-                        InputEvent::Focus => {
-                            this.open = true;
-                            this.filter.clear();
-                            cx.notify();
-                        }
-                        InputEvent::Blur => {
-                            this.open = false;
-                            cx.notify();
-                        }
-                        InputEvent::Change => {
-                            this.filter = field.read(cx).value().to_lowercase();
-                            cx.notify();
-                        }
-                        InputEvent::PressEnter { .. } => {}
-                    })
-                    .detach();
-                    ModelFieldLeaf { state: state.clone(), store, open: false, filter: String::new() }
-                });
+                let picker = cx.new(|cx| FilteredPicker::new(state.clone(), store, window, cx));
                 fields.push((key, state));
-                model_leaf = Some(leaf);
+                model_picker = Some(picker);
             } else {
                 let entity = cx.new(|cx| InputState::new(window, cx).placeholder("").default_value(value));
                 let leaf = cx.new(|_| InputLeaf { state: entity.clone(), disabled: false });
@@ -1090,7 +1105,7 @@ impl WarpWindow {
                 leafs.push((key, leaf));
             }
         }
-        (fields, leafs, model_leaf)
+        (fields, leafs, model_picker)
     }
 
     fn settings_field_wrap(&self, key: &str, cx: &mut App) -> gpui::AnyElement {
@@ -1107,7 +1122,24 @@ impl WarpWindow {
                         cx.notify();
                     }
                 });
-                div().flex_1().min_w_0().child(leaf.clone()).into_any_element()
+                // the kit Input has no a11y of its own — the wrapper carries the
+                // role/value; an AT click lands at the wrapper's center, which
+                // is the input itself
+                let value = self
+                    .settings_fields
+                    .iter()
+                    .find(|(k, _)| *k == key)
+                    .map(|(_, field)| field.read(cx).value().to_string())
+                    .unwrap_or_default();
+                div()
+                    .id(gpui::ElementId::Name(SharedString::from(format!("field-{key}"))))
+                    .role(Role::TextInput)
+                    .aria_label(SharedString::from(format!("{key} field")))
+                    .aria_value(value)
+                    .flex_1()
+                    .min_w_0()
+                    .child(leaf.clone())
+                    .into_any_element()
             })
             .unwrap_or_else(|| div().into_any_element())
     }
@@ -1169,6 +1201,9 @@ impl WarpWindow {
         };
         div()
             .id(gpui::ElementId::NamedInteger("chk".into(), TileView::hash(text)))
+            .role(Role::CheckBox)
+            .aria_label(text)
+            .aria_toggled(if checked { Toggled::True } else { Toggled::False })
             .flex()
             .items_center()
             .gap_2()
@@ -1203,6 +1238,9 @@ impl WarpWindow {
             row = row.child(
                 div()
                     .id(gpui::ElementId::NamedInteger("radio".into(), TileView::hash(key)))
+                    .role(Role::RadioButton)
+                    .aria_label(*label_text)
+                    .aria_selected(is_on)
                     .flex()
                     .items_center()
                     .gap_1p5()
@@ -1421,10 +1459,12 @@ impl WarpWindow {
                         .flex()
                         .items_center()
                         .gap_2()
-                        .child(
-                            div()
-                                .id("settings-back")
-                                .cursor_pointer()
+                                .child(
+                                    div()
+                                        .id("settings-back")
+                                        .role(Role::Button)
+                                        .aria_label("Back to chats")
+                                        .cursor_pointer()
                                 .p_1()
                                 .rounded_md()
                                 .hover(|s| s.bg(theme::HOVER))
@@ -1460,11 +1500,12 @@ impl WarpWindow {
                                 ]))
                                 .child(self.settings_section("Chat defaults", &fonts))
                                 .child(self.settings_card(vec![
-                                    // the Model field + its filtered dropdown render in
-                                    // their own leaf so typing refilters only that leaf
-                                    self.settings_model_leaf.clone()
-                                        .map(|leaf| leaf.into_any_element())
-                                        .unwrap_or_else(|| div().into_any_element()),
+                                    div().flex().items_center().gap_2p5()
+                                        .child(settings_label("Model", &fonts))
+                                        .child(self.settings_model_picker.clone()
+                                            .map(|picker| picker.into_any_element())
+                                            .unwrap_or_else(|| div().into_any_element()))
+                                        .into_any_element(),
                                     div().flex().items_center().gap_2p5()
                                         .child(settings_label("Variant", &fonts))
                                         .child(self.settings_field_wrap("variant", cx)).into_any_element(),
@@ -1511,6 +1552,9 @@ impl WarpWindow {
                                                 swatches = swatches.child(
                                                     div()
                                                         .id(gpui::ElementId::NamedInteger("accent".into(), TileView::hash(preset.key)))
+                                                        .role(Role::RadioButton)
+                                                        .aria_label(SharedString::from(format!("Accent {}", preset.key)))
+                                                        .aria_selected(selected)
                                                         .size(px(24.))
                                                         .flex_shrink_0()
                                                         .rounded_full()
@@ -1600,8 +1644,7 @@ impl WarpWindow {
     }
 }
 
-/// Fixed-width settings field label (free fn: the ModelFieldLeaf renders
-/// its own label without borrowing the window).
+/// Fixed-width label shared by the settings rows.
 fn settings_label(text: &str, fonts: &theme::FontTokens) -> gpui::AnyElement {
     div()
         .w(px(150.))
@@ -1628,93 +1671,3 @@ impl Render for InputLeaf {
     }
 }
 
-/// The settings Model field with its live-filtered dropdown, isolated in
-/// one leaf: focus opens the list on all models, typing refilters it, blur
-/// closes it — every one of those re-renders only this leaf instead of the
-/// whole window.
-struct ModelFieldLeaf {
-    state: Entity<InputState>,
-    store: Entity<Store>,
-    open: bool,
-    filter: String,
-}
-
-impl Render for ModelFieldLeaf {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let fonts = self.store.read(cx).fonts;
-        let mut col = div().flex().flex_col().gap_1().flex_1().min_w_0();
-        col = col.child(
-            div()
-                .flex()
-                .items_center()
-                .gap_2p5()
-                .child(settings_label("Model", &fonts))
-                .child(div().flex_1().min_w_0().child(Input::new(&self.state)))
-                .child(
-                    div()
-                        .id("model-dd-toggle")
-                        .cursor_pointer()
-                        .p_1()
-                        .rounded_md()
-                        .hover(|s| s.bg(theme::HOVER))
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.open = !this.open;
-                            this.filter.clear();
-                            cx.notify();
-                        }))
-                        .child(crate::ui::icon("icons/chevron-down.svg", px(fonts.icon_medium), theme::TEXT_MUTED)),
-                ),
-        );
-        if self.open {
-            let filter = self.filter.clone();
-            let entries: Vec<String> = {
-                let store = self.store.read(cx);
-                store
-                    .models
-                    .iter()
-                    .filter(|m| filter.is_empty() || m.to_lowercase().contains(&filter))
-                    .cloned()
-                    .collect()
-            };
-            let state = self.state.clone();
-            let mut list = div().id("model-dd-list").flex().flex_col().max_h(px(220.)).overflow_y_scroll();
-            if entries.is_empty() {
-                list = list.child(
-                    div()
-                        .px_2()
-                        .py_1()
-                        .text_size(px(fonts.font_small))
-                        .text_color(theme::TEXT_FAINT)
-                        .child("No matching model"),
-                );
-            }
-            for entry in entries {
-                let is_sentinel = entry.starts_with('(');
-                list = list.child(
-                    div()
-                        .id(gpui::ElementId::NamedInteger("model-row".into(), TileView::hash(&entry)))
-                        .px_2()
-                        .py_1()
-                        .rounded_md()
-                        .text_size(px(fonts.font_small))
-                        .text_color(if is_sentinel { theme::TEXT_MUTED } else { theme::TEXT })
-                        .cursor_pointer()
-                        .hover(|s| s.bg(theme::HOVER))
-                        .on_click({
-                            let entry = entry.clone();
-                            let state = state.clone();
-                            cx.listener(move |this, _, window, cx| {
-                                let value: String = if is_sentinel { String::new() } else { entry.clone() };
-                                state.update(cx, |state, cx| state.set_value(value.as_str(), window, cx));
-                                this.open = false;
-                                cx.notify();
-                            })
-                        })
-                        .child(SharedString::from(entry)),
-                );
-            }
-            col = col.child(div().ml(px(160.)).child(popover_card().child(list)));
-        }
-        col
-    }
-}

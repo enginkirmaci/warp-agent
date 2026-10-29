@@ -9,9 +9,10 @@ use gpui::prelude::*;
 use gpui::{div, px, AnyElement, App, ClickEvent, Div, ElementId, FontWeight, Role, SharedString, Window};
 
 /// The button looks: accent-filled pill, quiet chip pill, and the outlined
-/// settings/restore style (hairline border, 26px min height).
+/// settings/restore style (hairline border, 26px min height). Primary carries
+/// the preset's on-accent text color (white under the default blue).
 pub enum BtnKind {
-    Primary,
+    Primary(gpui::Rgba),
     Chip,
     Outline,
 }
@@ -39,12 +40,12 @@ pub fn button(
         .text_size(px(text_size))
         .cursor_pointer();
     match kind {
-        BtnKind::Primary => {
+        BtnKind::Primary(on_accent) => {
             el = el
                 .rounded_md()
                 .font_weight(FontWeight::SEMIBOLD)
                 .bg(accent)
-                .text_color(theme::ON_ACCENT);
+                .text_color(on_accent);
         }
         BtnKind::Chip => {
             el = el
@@ -63,7 +64,7 @@ pub fn button(
         }
     }
     el.when(enabled, |d| match kind {
-        BtnKind::Primary | BtnKind::Chip => d.hover(|s| s.opacity(0.9)),
+        BtnKind::Primary(_) | BtnKind::Chip => d.hover(|s| s.opacity(0.9)),
         BtnKind::Outline => d.hover(|s| s.bg(theme::HOVER)),
     })
     .when(!enabled, |d| d.opacity(0.5))
@@ -99,14 +100,14 @@ pub fn menu_row(
         .into_any_element()
 }
 
-/// The shared popover card chrome: rounded_lg, hairline border, settings bg,
+/// The shared popover card chrome: rounded_lg, hairline border, popup bg,
 /// soft shadow. Returns a Div so callers keep chaining (p_2, min_w, children).
 pub fn popover_card() -> Div {
     div()
         .rounded_lg()
         .border_1()
         .border_color(theme::HAIRLINE)
-        .bg(theme::SETTINGS_BG)
+        .bg(theme::POPUP)
         .p_1()
         .shadow_lg()
 }

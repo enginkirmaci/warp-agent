@@ -134,6 +134,9 @@ fn apply_factor(store: &Entity<Store>, factor: f32, cx: &mut App) {
         if (s.system_font_factor - factor).abs() > 0.001 {
             s.system_font_factor = factor;
             s.fonts = crate::theme::font_tokens(s.settings.font_scale.as_deref(), factor);
+            // the kit sizes Input/Textarea in rem off the theme's font_size,
+            // so it has to re-map for kit components to rescale too
+            crate::theme::apply_kit_theme(s.accent, &s.fonts, cx);
             cx.notify();
         }
     });
@@ -191,6 +194,7 @@ pub fn init_font_scale(store: &Entity<Store>, cx: &mut App) {
                     if (s.system_font_factor - factor).abs() > 0.001 {
                         s.system_font_factor = factor;
                         s.fonts = crate::theme::font_tokens(s.settings.font_scale.as_deref(), factor);
+                        crate::theme::apply_kit_theme(s.accent, &s.fonts, cx);
                         cx.notify();
                     }
                 });

@@ -5084,7 +5084,7 @@ impl Store {
         self.accent = AccentColors::for_preset(theme::normalize_accent(self.settings.accent.as_deref()));
         // re-map the kit theme so input selection/ring/primary follow the preset
         // (Theme::update refreshes every window)
-        theme::apply_kit_theme(self.accent, cx);
+        theme::apply_kit_theme(self.accent, &self.fonts, cx);
         self.tool_tips_visible = self.settings.show_tool_tips;
         crate::ui::tooltip::sync_settings(cx, self.tool_tips_visible, self.fonts.font_xsmall);
         // push the MCP master switch into running servers right away: disable

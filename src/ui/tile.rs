@@ -800,7 +800,7 @@ impl TileView {
                             div()
                                 .max_w(px(640.))
                                 .rounded_lg()
-                                .bg(theme::DANGER_DIM)
+                                .bg(theme::tint(theme::DANGER))
                                 .flex()
                                 .overflow_hidden()
                                 .child(
@@ -1135,6 +1135,7 @@ impl TileView {
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let open_diff = self.expanded.contains(&format!("{item_id}:diff"));
+        let on_accent = self.store.read(cx).accent.on;
         div()
             .w_full()
             .flex()
@@ -1142,7 +1143,7 @@ impl TileView {
                 div()
                     .max_w(px(640.))
                     .rounded_lg()
-                    .bg(theme::WARN_BG)
+                    .bg(theme::tint(theme::WARN))
                     .mr_10()
                     .overflow_hidden()
                     .flex()
@@ -1194,7 +1195,7 @@ impl TileView {
                                         .child(controls::button(
                                             gpui::ElementId::NamedInteger("pill".into(), Self::hash("Allow")),
                                             "Allow",
-                                            BtnKind::Primary,
+                                            BtnKind::Primary(on_accent),
                                             accent,
                                             fonts.font_body,
                                             true,
@@ -1280,6 +1281,7 @@ impl TileView {
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let pending = question.is_pending();
+        let on_accent = self.store.read(cx).accent.on;
         let mut card = div().flex().flex_col().gap_1().flex_1().min_w_0();
         if pending {
             card = card.child(
@@ -1320,7 +1322,7 @@ impl TileView {
                         controls::button(
                             gpui::ElementId::NamedInteger("answer".into(), Self::hash(&id)),
                             "Answer",
-                            BtnKind::Primary,
+                            BtnKind::Primary(on_accent),
                             accent,
                             fonts.font_body,
                             can_submit,
@@ -1635,7 +1637,7 @@ impl TileView {
                         .px_2()
                         .py_1()
                         .rounded_lg()
-                        .bg(theme::WARN_BG),
+                        .bg(theme::tint(theme::WARN)),
                     "Connection lost — retrying…",
                 )
                 .child(div().size(px(5.)).rounded_full().bg(theme::WARN).flex_shrink_0())

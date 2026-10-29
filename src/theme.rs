@@ -1,6 +1,8 @@
-//! The palette port of App.xaml: neutral gray surfaces, green accent, salmon red,
-//! amber, deliberately no blue. Font/icon size tokens ride one factor so the
-//! settings text-size variant rescales the whole UI.
+//! The DevTools palette: the SukiUI dark theme ramp plus the ChipPalette hues,
+//! shared with the DevTools app so both desktop clients read as one family.
+//! Surfaces step canvas < titlebar < card < popup < field; font/icon size
+//! tokens ride one factor so the settings text-size variant rescales the whole
+//! UI.
 
 use gpui::{hsla, rgba, App, Hsla, Rgba};
 
@@ -62,16 +64,19 @@ pub fn code_font() -> &'static str {
 
 /// Map the WarpAgent palette onto gpui-kit's shadcn-style theme tokens so kit
 /// components (Input/Textarea/TextView/popovers) render in our colors.
-/// The accent family is a parameter so a settings-page preset swap can re-run
-/// the mapping (`Theme::update` refreshes every window). Call after
-/// [`gpui_kit::init`], before opening windows.
-pub fn apply_kit_theme(accent: AccentColors, cx: &mut App) {
+/// The accent family and font tokens are parameters so a settings-page preset
+/// swap can re-run the mapping (`Theme::update` refreshes every window). Call
+/// after [`gpui_kit::init`], before opening windows.
+pub fn apply_kit_theme(accent: AccentColors, fonts: &FontTokens, cx: &mut App) {
     use gpui_kit::component::{Theme, ThemeMode};
 
     resolve_fonts(cx);
+    // A mode flip inside the color-edit closure makes the kit reload the
+    // registered theme's colors AFTER the closure (Theme::update docs),
+    // wiping every override — flip first, then edit.
+    Theme::update(cx, |t| t.mode = ThemeMode::Dark);
     Theme::update(cx, |t| {
-        t.mode = ThemeMode::Dark;
-        t.background = WINDOW_CHROME.into();
+        t.background = SURFACE.into();
         t.foreground = TEXT.into();
         t.primary = accent.accent.into();
         t.primary_foreground = accent.on.into();
@@ -82,14 +87,17 @@ pub fn apply_kit_theme(accent: AccentColors, cx: &mut App) {
         t.accent = HOVER;
         t.accent_foreground = TEXT.into();
         t.danger = DANGER.into();
-        t.danger_foreground = TEXT.into();
+        t.danger_foreground = ON_ACCENT.into();
         t.border = HAIRLINE.into();
-        t.input = INPUT.into();
+        // the kit paints an input's border with `input` and its fill with
+        // `input` mixed over the surface, so a fill-coloured token made the
+        // border vanish on popups; the hairline gives fields a real edge
+        t.input = HAIRLINE.into();
         t.ring = accent.accent.into();
         t.selection = selection(&accent).into();
         t.caret = TEXT.into();
         t.link = accent.accent.into();
-        t.popover = SETTINGS_CARD.into();
+        t.popover = POPUP.into();
         t.popover_foreground = TEXT.into();
         t.sidebar = WINDOW_CHROME.into();
         t.sidebar_foreground = TEXT.into();
@@ -101,27 +109,94 @@ pub fn apply_kit_theme(accent: AccentColors, cx: &mut App) {
 
         t.font_family = gpui::SharedString::from(ui_font());
         t.mono_font_family = gpui::SharedString::from(code_font());
+        // the rem base: kit components size text/padding in rem — ride the
+        // same factor as our own tokens (font_small is the 12px base)
+        let factor = fonts.font_small / 12.0;
+        t.font_size = gpui::px(16. * factor);
+        t.mono_font_size = gpui::px(13. * factor);
+
+        t.highlight_theme = highlight_theme();
     });
 }
 
-// ---- surfaces ------------------------------------------------------------
+// ---- highlight theme -------------------------------------------------------
 
-pub const SURFACE: Rgba = c(0x121212FF); // main-area card + tiles
-pub const CARD: Rgba = c(0x121212FF); // tile surface, restore bar, error dialog
-pub const WINDOW_CHROME: Rgba = c(0x1E1E1EFF); // titlebar, sidebar, ring around the main card
-pub const SETTINGS_BG: Rgba = c(0x202020FF); // settings sheet
-pub const SETTINGS_CARD: Rgba = c(0x1A1A1AFF);
-pub const INPUT: Rgba = c(0x2A2A2AFF);
-pub const HAIRLINE: Rgba = c(0x3E3E3EFF);
-pub const TILE_HEADER_SEPARATOR: Rgba = c(0x333333FF);
-pub const CHIP: Rgba = c(0x343434FF);
-pub const DIFF_BG: Rgba = c(0x171717FF); // inset code/diff/fold body
-pub const HOVER: Hsla = hsla(0.0, 0.0, 1.0, 0.08); // #14FFFFFF
+/// Syntax token colors for markdown code fences and diff lines: the DevTools
+/// mapping (comment faint italic, string green, number amber, keyword purple,
+/// type amber-bright, function blue, attribute gold). The kit's HighlightTheme
+/// deserializes from the Zed theme JSON format — ThemeStyle fields are private,
+/// so building the struct by hand is not possible.
+const HIGHLIGHT_THEME_JSON: &str = r##"{
+  "name": "devtools",
+  "appearance": "dark",
+  "style": {
+    "editor.foreground": "#EDEDF0",
+    "syntax": {
+      "attribute": { "color": "#F5B400" },
+      "boolean": { "color": "#FA8C16" },
+      "comment": { "color": "#85878F", "font_style": "italic" },
+      "comment.doc": { "color": "#85878F", "font_style": "italic" },
+      "constant": { "color": "#FA8C16" },
+      "constructor": { "color": "#FFAB40" },
+      "function": { "color": "#6E9BF7" },
+      "keyword": { "color": "#A78BFA" },
+      "number": { "color": "#FA8C16" },
+      "operator": { "color": "#A5A7AF" },
+      "preproc": { "color": "#A78BFA" },
+      "property": { "color": "#EDEDF0" },
+      "punctuation": { "color": "#A5A7AF" },
+      "punctuation.bracket": { "color": "#A5A7AF" },
+      "punctuation.delimiter": { "color": "#A5A7AF" },
+      "punctuation.list_marker": { "color": "#A5A7AF" },
+      "string": { "color": "#4EC94E" },
+      "string.escape": { "color": "#FFAB40" },
+      "tag": { "color": "#F5B400" },
+      "type": { "color": "#FFAB40" },
+      "variable": { "color": "#EDEDF0" },
+      "variable.special": { "color": "#FFAB40" }
+    }
+  }
+}"##;
 
-pub const TEXT: Rgba = c(0xE4E4E4FF);
-pub const TEXT_DIM: Rgba = c(0xB4B4B4FF); // secondary body text
-pub const TEXT_MUTED: Rgba = c(0x9A9A9AFF); // labels, metadata
-pub const TEXT_FAINT: Rgba = c(0x707070FF); // hints, quietest meta
+static HIGHLIGHT_THEME: std::sync::OnceLock<std::sync::Arc<gpui_kit::component::highlighter::HighlightTheme>> =
+    std::sync::OnceLock::new();
+
+/// The installed token theme; fixed hues, so built once and pointer-stable for
+/// the process lifetime (the highlight caches key on the Arc).
+fn highlight_theme() -> std::sync::Arc<gpui_kit::component::highlighter::HighlightTheme> {
+    HIGHLIGHT_THEME
+        .get_or_init(|| {
+            serde_json::from_str(HIGHLIGHT_THEME_JSON).unwrap_or_else(|e| {
+                tracing::warn!("highlight theme JSON unparsable ({e}); using kit default");
+                gpui_kit::component::highlighter::HighlightTheme::default_dark()
+            })
+        })
+        .clone()
+}
+
+// ---- surfaces --------------------------------------------------------------
+// One neutral ramp from the window canvas up to fields, every step a few
+// points apart so panels read as raised layers:
+// main card < chrome < tile/card < popup < field.
+
+pub const SURFACE: Rgba = c(0x1C1D20FF); // main-area card
+pub const CARD: Rgba = c(0x26272BFF); // tile surface, restore bar, error dialog
+pub const WINDOW_CHROME: Rgba = c(0x232428FF); // titlebar, sidebar, ring around the main card
+pub const SETTINGS_BG: Rgba = c(0x232428FF); // settings sheet
+pub const SETTINGS_CARD: Rgba = c(0x26272BFF);
+pub const POPUP: Rgba = c(0x2B2C31FF); // popovers, menus, tooltips
+pub const INPUT: Rgba = c(0x2E2F35FF);
+pub const HAIRLINE: Rgba = c(0x3A3B42FF);
+pub const BORDER_LIGHT: Rgba = c(0x2A2B30FF); // quiet dividers
+pub const TILE_HEADER_SEPARATOR: Rgba = BORDER_LIGHT;
+pub const CHIP: Rgba = c(0x32333AFF);
+pub const DIFF_BG: Rgba = c(0x202125FF); // inset code/diff/fold body (16% black over CARD)
+pub const HOVER: Hsla = hsla(0.0, 0.0, 1.0, 0.07);
+
+pub const TEXT: Rgba = c(0xEDEDF0FF);
+pub const TEXT_DIM: Rgba = c(0xC6C7CEFF); // secondary body text
+pub const TEXT_MUTED: Rgba = c(0xA5A7AFFF); // labels, metadata
+pub const TEXT_FAINT: Rgba = c(0x85878FFF); // hints, quietest meta
 
 /// Text selection in fields: the accent at 25% alpha.
 pub fn selection(accent: &AccentColors) -> Rgba {
@@ -130,39 +205,45 @@ pub fn selection(accent: &AccentColors) -> Rgba {
 }
 
 // ---- chat surfaces -------------------------------------------------------
+// DevTools has no chat; these derive from the same ramp (user bubble = chip
+// tone, assistant bubble = popup tone raised off the tile card).
 
-pub const BUBBLE_USER: Rgba = c(0x343434FF);
-pub const BUBBLE_ASSISTANT: Rgba = c(0x282828FF);
-pub const Q_OPT_SELECTED: Rgba = c(0x333333FF);
-pub const BUBBLE_QUEUED: Rgba = c(0x272727FF);
-pub const QUEUED_BORDER: Rgba = c(0x4E4E4EFF);
-pub const FLYOUT_SURFACE: Rgba = c(0x1C1C1CB3); // dark gray at 0.7 alpha over the chat
+pub const BUBBLE_USER: Rgba = CHIP;
+pub const BUBBLE_ASSISTANT: Rgba = POPUP;
+pub const Q_OPT_SELECTED: Rgba = CHIP;
+pub const BUBBLE_QUEUED: Rgba = WINDOW_CHROME;
+pub const QUEUED_BORDER: Rgba = HAIRLINE;
+pub const FLYOUT_SURFACE: Rgba = c(0x1C1D20B3); // canvas dark at 0.7 alpha over the chat
 
 // ---- fixed semantic colors (never follow the accent preset) --------------
+// The DevTools ChipPalette hues.
 
-pub const DANGER: Rgba = c(0xF47067FF);
-pub const DANGER_DIM: Rgba = c(0x3B2523FF);
-pub const WARN: Rgba = c(0xE8A348FF);
-pub const WARN_BG: Rgba = c(0x3A2D1AFF);
-pub const ADD: Rgba = c(0x56C272FF);
-pub const DEL: Rgba = c(0xF47067FF);
-pub const WORKING: Rgba = c(0x4AC265FF); // pulse dot + sidebar spinner stay green
-pub const RUNNING: Rgba = c(0x56D364FF); // sidebar running indicators: brighter than WORKING
+pub const DANGER: Rgba = c(0xF5222DFF);
+pub const WARN: Rgba = c(0xFA8C16FF);
+pub const ADD: Rgba = c(0x4EC94EFF);
+pub const DEL: Rgba = DANGER;
+pub const WORKING: Rgba = ADD; // working dot + sidebar spinner stay green
+pub const RUNNING: Rgba = ADD; // sidebar running indicators
+
+/// Tinted wash for a bright hue — the universal chip background and the
+/// destructive/close hover (the ChipPalette TintAlpha).
+pub fn tint(color: Rgba) -> Hsla {
+    let h: Hsla = color.into();
+    Hsla { a: 0.18, ..h }
+}
 
 // ---- code ----------------------------------------------------------------
 
-pub const CODE_FG: Rgba = c(0xE4E4E4FF);
+pub const CODE_FG: Rgba = TEXT;
 
 // ---- diffs (the renderer in ui/diff.rs draws from here) -------------------
 
-pub const DIFF_GUTTER: Rgba = c(0x9A9A9A55); // line-number gutter text
-/// Content wash is the quieter shade; the gutter cell over the line numbers
-/// runs brighter so edited rows read as full bands.
-pub const DIFF_ADD_BG: Hsla = hsla(0.36, 0.44, 0.55, 0.15);
-pub const DIFF_DEL_BG: Hsla = hsla(0.02, 0.83, 0.68, 0.15);
-pub const DIFF_ADD_GUTTER_BG: Hsla = hsla(0.36, 0.44, 0.55, 0.24);
-pub const DIFF_DEL_GUTTER_BG: Hsla = hsla(0.02, 0.83, 0.68, 0.24);
-pub const DIFF_HUNK_BG: Hsla = hsla(0.0, 0.0, 0.6, 0.12);
+pub const DIFF_GUTTER: Rgba = c(0xB4B4B49E); // line-number gutter text
+/// Full-width bands; the gutter cell over the line numbers paints the same
+/// shade so an edited row reads as one flat band.
+pub const DIFF_ADD_BG: Hsla = hsla(0.28, 0.50, 0.45, 0.22);
+pub const DIFF_DEL_BG: Hsla = hsla(0.012, 0.70, 0.48, 0.24);
+pub const DIFF_HUNK_BG: Hsla = hsla(0.0, 0.0, 0.6, 0.10);
 
 // ---- accent presets ------------------------------------------------------
 
@@ -175,9 +256,11 @@ pub struct AccentPreset {
     pub success_dim: u32,
 }
 
+/// The first preset is the default (`normalize_accent` fallback): the DevTools
+/// Suki blue.
 pub const ACCENT_PRESETS: [AccentPreset; 8] = [
+    AccentPreset { key: "blue", accent: 0x7090CF, dim: 0x1E2C42, on: 0xFFFFFF, success_dim: 0x1C2E45 },
     AccentPreset { key: "green", accent: 0x4AC265, dim: 0x223322, on: 0x0C140C, success_dim: 0x1D3122 },
-    AccentPreset { key: "blue", accent: 0x4C8EFF, dim: 0x1E2C42, on: 0x0C1219, success_dim: 0x1C2E45 },
     AccentPreset { key: "amber", accent: 0xE8A348, dim: 0x33270F, on: 0x171006, success_dim: 0x382B12 },
     AccentPreset { key: "salmon", accent: 0xF47067, dim: 0x38201D, on: 0x1A0B09, success_dim: 0x3B2523 },
     AccentPreset { key: "gray", accent: 0xA8A8A8, dim: 0x262626, on: 0x101010, success_dim: 0x2F2F2F },
@@ -219,9 +302,12 @@ impl AccentColors {
     }
 }
 
+/// White — text on filled danger and on the default blue accent.
+pub const ON_ACCENT: Rgba = c(0xFFFFFFFF);
+
 // ---- font scale ----------------------------------------------------------
 
-/// Text-size variant tokens (exact App.xaml values); everything multiplies the
+/// Text-size variant tokens (the DevTools ladder); everything multiplies the
 /// user factor (settings) and the system factor (gsettings text-scaling).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FontTokens {
@@ -245,19 +331,19 @@ pub struct FontTokens {
     pub icon_xl: f32,
 }
 
+// The DevTools ladder: 10 / 11 / 12 / 13 / 14 / 15 — small is the workhorse,
+// title stays 15 semibold. Icons keep the +2-bumped ladder (user preference).
 const BASE_TOKENS: FontTokens = FontTokens {
-    font_micro: 10.5,
+    font_micro: 10.0,
     font_xsmall: 11.0,
-    font_detail: 11.5,
+    font_detail: 11.0,
     font_small: 12.0,
-    font_body: 12.5,
-    font_body_large: 13.0,
-    font_h1: 18.0,
-    font_h2: 16.0,
-    font_h3: 14.5,
-    font_title: 19.0,
-    // icon ladder runs ~+2 over the 2026-09 baseline (user found the old
-    // sizes too quiet); nano only +1 so the check glyph fits its 13px box
+    font_body: 13.0,
+    font_body_large: 14.0,
+    font_h1: 16.0,
+    font_h2: 15.0,
+    font_h3: 14.0,
+    font_title: 15.0,
     icon_nano: 10.0,
     icon_tiny: 12.0,
     icon_xsmall: 13.0,
@@ -319,4 +405,3 @@ pub const SIDEBAR_DEFAULT_WIDTH: f32 = 250.0;
 pub const SPLITTER_WIDTH: f32 = 12.0;
 pub const CODE_FONT: &str = "DejaVu Sans Mono";
 pub const FONT_UI: &str = "Inter";
-pub const ON_ACCENT: Rgba = c(0x0C140CFF);

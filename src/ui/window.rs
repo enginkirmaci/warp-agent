@@ -493,7 +493,7 @@ impl WarpWindow {
                         .flex()
                         .items_center()
                         .justify_center()
-                        .hover(|s| s.bg(theme::DANGER_DIM))
+                        .hover(|s| s.bg(theme::tint(theme::DANGER)))
                         .on_click(|_, window, _| window.remove_window()),
                     "Close",
                 )

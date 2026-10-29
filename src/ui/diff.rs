@@ -73,8 +73,8 @@ pub fn render_diff(
                     _ => (" ", theme::DIFF_GUTTER),
                 };
                 let (gutter_bg, content_bg) = match kind {
-                    Kind::Add => (Some(theme::DIFF_ADD_GUTTER_BG), Some(theme::DIFF_ADD_BG)),
-                    Kind::Del => (Some(theme::DIFF_DEL_GUTTER_BG), Some(theme::DIFF_DEL_BG)),
+                    Kind::Add => (Some(theme::DIFF_ADD_BG), Some(theme::DIFF_ADD_BG)),
+                    Kind::Del => (Some(theme::DIFF_DEL_BG), Some(theme::DIFF_DEL_BG)),
                     _ => (None, None),
                 };
                 let number = numbers[i];

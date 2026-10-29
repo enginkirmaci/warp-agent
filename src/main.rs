@@ -81,9 +81,12 @@ fn main() {
             }
 
             // kit theme after the store so the saved accent preset (not the
-            // green default) drives input selection/ring/primary from launch
-            let accent = store.read(cx).accent;
-            theme::apply_kit_theme(accent, cx);
+            // blue default) drives input selection/ring/primary from launch
+            let (accent, fonts) = {
+                let snap = store.read(cx);
+                (snap.accent, snap.fonts)
+            };
+            theme::apply_kit_theme(accent, &fonts, cx);
 
             // network events → store. Polled with a timer fallback: this gpui rev
             // does not service cross-thread channel wakeups on foreground tasks,

@@ -62,7 +62,7 @@ impl Render for Tip {
             .rounded_md()
             .border_1()
             .border_color(theme::HAIRLINE)
-            .bg(theme::SETTINGS_BG)
+            .bg(theme::POPUP)
             .shadow_md()
             .text_size(px(size))
             .text_color(theme::TEXT_DIM)

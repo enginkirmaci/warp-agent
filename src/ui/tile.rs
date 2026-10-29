@@ -2,6 +2,7 @@
 //! single session — the ChatTile view port.
 
 use crate::oc::CommandInfo;
+use crate::settings::HarnessKind;
 use crate::store::{at_token_start, ChatItem, QuestionEntry, Store, ToolItem, DEFAULT_MODEL_ENTRY};
 use crate::theme;
 use crate::ui::controls::{fold_body, menu_row, popover_card, BtnKind};
@@ -12,7 +13,7 @@ use crate::ui::markdown::render_markdown;
 use crate::ui::tooltip::tip;
 use gpui::prelude::*;
 use gpui::{
-    canvas, div, img, px, relative, actions, App, Context, Entity, Focusable,
+    canvas, div, img, px, relative, actions, AccessibleAction, App, Context, Entity, Focusable,
     ImageFormat, MouseButton, Pixels, Render, Role, ScrollHandle, SharedString, Toggled, Window,
 };
 use gpui_kit::component::input::{
@@ -1957,21 +1958,8 @@ impl TileView {
                     format!("Harness — click to use {}", next_harness)
                 },
             )
-            .on_click(cx.listener(move |this, _, _, cx| {
-                let key = this.key.clone();
-                let store = this.store.clone();
-                let locked = store
-                    .read(cx)
-                    .tile_by_key(&key)
-                    .map(|t| t.session_id.is_some())
-                    .unwrap_or(true);
-                if locked {
-                    return;
-                }
-                let next = crate::settings::HarnessKind::from_label(next_harness);
-                store.update(cx, |s, cx| s.set_tile_harness(&key, next, cx));
-                cx.notify();
-            }))
+                .on_click(cx.listener(|this, _, window, cx| this.toggle_tile_harness(window, cx)))
+                .on_a11y_action(AccessibleAction::Click, TileView::a11y_activator(cx, TileView::toggle_tile_harness))
             .child(div().text_size(px(fonts.font_small)).child(SharedString::from(snap.harness_label)))
             .child(crate::ui::icon("icons/chevron-down.svg", px(fonts.icon_tiny), theme::TEXT_MUTED)),
         );
@@ -1997,10 +1985,8 @@ impl TileView {
                         .hover(|s| s.bg(theme::HOVER).text_color(accent)),
                     "Agent",
                 )
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.picker = if matches!(this.picker, Some(PickerKind::Agent)) { None } else { Some(PickerKind::Agent) };
-                    cx.notify();
-                }))
+                .on_click(cx.listener(|this, _, window, cx| this.toggle_agent_picker(window, cx)))
+                .on_a11y_action(AccessibleAction::Click, TileView::a11y_activator(cx, TileView::toggle_agent_picker))
                 .child(div().text_size(px(fonts.font_small)).child(SharedString::from(
                     if snap.selected_agent.is_empty() {
                         crate::store::DEFAULT_AGENT_ENTRY.to_string()
@@ -2033,16 +2019,8 @@ impl TileView {
                         .hover(|s| s.bg(theme::HOVER).text_color(accent)),
                     "Model",
                 )
-                .on_click(cx.listener(|this, _, window, cx| {
-                    if matches!(this.picker, Some(PickerKind::Model)) {
-                        this.picker = None;
-                    } else {
-                        this.picker = Some(PickerKind::Model);
-                        let picker = this.ensure_model_picker(window, cx);
-                        picker.update(cx, |p, cx| p.reset_filter(window, cx));
-                    }
-                    cx.notify();
-                }))
+                .on_click(cx.listener(|this, _, window, cx| this.toggle_model_picker(window, cx)))
+                .on_a11y_action(AccessibleAction::Click, TileView::a11y_activator(cx, TileView::toggle_model_picker))
                 .child(div().text_size(px(fonts.font_small)).child(SharedString::from(
                     if snap.selected_model_short.is_empty() {
                         crate::store::DEFAULT_MODEL_ENTRY.to_string()
@@ -2073,18 +2051,76 @@ impl TileView {
                         .when(!snap.has_variants, |d| d.opacity(0.4)),
                     "Response variant",
                 )
-                .on_click(cx.listener(|this, _, _, cx| {
-                    if this.store.read(cx).tile_by_key(&this.key).map(|t| t.has_variants()).unwrap_or(false) {
-                        this.picker = if matches!(this.picker, Some(PickerKind::Variant)) { None } else { Some(PickerKind::Variant) };
-                        cx.notify();
-                    }
-                }))
+                .on_click(cx.listener(|this, _, window, cx| this.toggle_variant_picker(window, cx)))
+                .on_a11y_action(AccessibleAction::Click, TileView::a11y_activator(cx, TileView::toggle_variant_picker))
                 .child(crate::ui::icon("icons/gauge.svg", px(fonts.icon_body), theme::TEXT_MUTED))
                 .child(div().text_size(px(fonts.font_small)).child(SharedString::from(snap.selected_variant.clone())))
                 .child(crate::ui::icon("icons/chevron-down.svg", px(fonts.icon_tiny), theme::TEXT_MUTED)),
             );
 
         pills.into_any_element()
+    }
+
+    /// AT activation for the pill row: gpui's fallback for the Click action
+    /// synthesizes a mouse event at the node's reported bounds, and those
+    /// land off the painted control for these pills (the composer row hugs
+    /// the card's clipped bottom edge), so the fallback click never reaches
+    /// them. The direct listener runs the same handler the mouse uses.
+    fn a11y_activator(
+        cx: &Context<Self>,
+        activate: fn(&mut Self, &mut Window, &mut Context<Self>),
+    ) -> impl FnMut(Option<&gpui::accesskit::ActionData>, &mut Window, &mut App) + 'static {
+        let listener = cx.listener(move |this, _: &(), window, cx| activate(this, window, cx));
+        move |_, window, cx| listener(&(), window, cx)
+    }
+
+    /// Harness pill: toggles opencode ↔ dsh on a draft; a chat that already
+    /// has a session is bound to the server it was created on.
+    fn toggle_tile_harness(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let key = self.key.clone();
+        let store = self.store.clone();
+        let locked = store
+            .read(cx)
+            .tile_by_key(&key)
+            .map(|t| t.session_id.is_some())
+            .unwrap_or(true);
+        if locked {
+            return;
+        }
+        let is_dsh = store.read(cx).tile_by_key(&key).map(|t| t.harness == HarnessKind::Dsh).unwrap_or(false);
+        let next = HarnessKind::from_label(if is_dsh { "opencode" } else { "dsh" });
+        store.update(cx, |s, cx| s.set_tile_harness(&key, next, cx));
+        // the kit placeholder was baked in at construction; the flip rewrites
+        // it (the leaf's aria_placeholder follows via notify)
+        let label = next.label();
+        self.composer.update(cx, |state, cx| {
+            state.set_placeholder(format!("Ask {label}…"), window, cx);
+        });
+        self.composer_field.update(cx, |_, cx| cx.notify());
+        cx.notify();
+    }
+
+    fn toggle_agent_picker(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        self.picker = if matches!(self.picker, Some(PickerKind::Agent)) { None } else { Some(PickerKind::Agent) };
+        cx.notify();
+    }
+
+    fn toggle_model_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if matches!(self.picker, Some(PickerKind::Model)) {
+            self.picker = None;
+        } else {
+            self.picker = Some(PickerKind::Model);
+            let picker = self.ensure_model_picker(window, cx);
+            picker.update(cx, |p, cx| p.reset_filter(window, cx));
+        }
+        cx.notify();
+    }
+
+    fn toggle_variant_picker(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        if self.store.read(cx).tile_by_key(&self.key).map(|t| t.has_variants()).unwrap_or(false) {
+            self.picker = if matches!(self.picker, Some(PickerKind::Variant)) { None } else { Some(PickerKind::Variant) };
+            cx.notify();
+        }
     }
 
     /// The 34px send/stop square: stop while busy, otherwise send (muted out
@@ -2095,6 +2131,8 @@ impl TileView {
         if snap.is_busy {
             let store = self.store.clone();
             let key = self.key.clone();
+            let a11y_store = store.clone();
+            let a11y_key = key.clone();
             tip(
                 div()
                     .id("stop")
@@ -2112,6 +2150,9 @@ impl TileView {
                     .hover(|s| s.bg(theme::HOVER).text_color(theme::DANGER))
                     .on_click(move |_, _, cx| {
                         store.update(cx, |s, cx| s.abort_tile(&key, cx));
+                    })
+                    .on_a11y_action(AccessibleAction::Click, move |_, _, cx| {
+                        a11y_store.update(cx, |s, cx| s.abort_tile(&a11y_key, cx));
                     }),
                 "Stop",
             )
@@ -2120,6 +2161,8 @@ impl TileView {
         } else {
             let store = self.store.clone();
             let key = self.key.clone();
+            let a11y_store = store.clone();
+            let a11y_key = key.clone();
             tip(
                 div()
                     .id("send")
@@ -2140,6 +2183,9 @@ impl TileView {
                     .when(!snap.is_connected, |d| d.opacity(0.4))
                     .on_click(move |_, _, cx| {
                         store.update(cx, |s, cx| s.send_from_tile(&key, cx));
+                    })
+                    .on_a11y_action(AccessibleAction::Click, move |_, _, cx| {
+                        a11y_store.update(cx, |s, cx| s.send_from_tile(&a11y_key, cx));
                     }),
                 "Send",
             )
@@ -2930,6 +2976,8 @@ impl Render for TileView {
         self.question_keys_seen.clear();
         let mut transcript = div()
             .id("transcript")
+            .role(Role::Log)
+            .aria_label("Transcript")
             .flex_1()
             .min_h_0()
             .overflow_hidden()
@@ -3056,6 +3104,18 @@ impl Render for TileView {
 
         let root = div()
             .id(gpui::ElementId::NamedInteger("tile".into(), TileView::hash(&self.key)))
+            .role(Role::Group)
+            .aria_label(SharedString::from(format!("Chat: {}", snap.title)))
+            // the a11y Click action (AT "press") lands here: same effect as
+            // the mouse-down focus path below, and it makes the tile
+            // discoverable/clickable by name in accessibility tooling
+            .on_click(cx.listener({
+                let store = self.store.clone();
+                let key = self.key.clone();
+                move |_, _, _, cx| {
+                    store.update(cx, |s, cx| s.focus_tile(&key, cx));
+                }
+            }))
             .relative()
             .size_full()
             // let the grid track shrink below long-word min-content
@@ -3534,15 +3594,17 @@ struct QuestionField {
 }
 
 impl Render for QuestionField {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // the kit Input has no a11y of its own — the wrapper carries the role;
         // an AT click lands at the wrapper's center, the input itself
+        let focus = self.state.read(cx).focus_handle(cx);
         div()
             .id(gpui::ElementId::NamedInteger(
                 "qfield".into(),
                 TileView::hash(&format!("{}#{}", self.question_id, self.qi)),
             ))
             .role(Role::TextInput)
+            .track_focus(&focus)
             .aria_label("Custom answer")
             .aria_placeholder("custom answer…")
             .child(Input::new(&self.state))
@@ -3566,8 +3628,10 @@ impl Render for ComposerField {
         let key = self.key.clone();
         // the kit Textarea has no a11y of its own — the wrapper carries the
         // role and the current text (store copy, updated by every Change
-        // event); an AT click lands at the wrapper's center, the textarea
-        // itself, so focus still reaches the real field
+        // event); an AT click lands at the wrapper's center, so the wrapper
+        // must hug the textarea: self_start keeps the surrounding flex from
+        // stretching it over the pill row, where an AT click toggled pills
+        // instead of focusing the field
         let (text, harness_label) = store
             .read(cx)
             .tile_by_key(&key)
@@ -3576,14 +3640,18 @@ impl Render for ComposerField {
         // chrome-less inside: the composer frame (border/bg) is the tile's,
         // the textarea only edits.
         // image paste → attachment instead of text insertion
+        let focus = self.state.read(cx).focus_handle(cx);
         div()
             .id("composer-field")
             .role(Role::MultilineTextInput)
+            // the node carries the kit field's own focus handle: an AT focus
+            // reaches the real textarea and the focused-handle a11y warning
+            // names this node instead of announcing the whole window
+            .track_focus(&focus)
             .aria_label("Message composer")
             .aria_placeholder(SharedString::from(format!("Ask {harness_label}…")))
             .aria_value(SharedString::from(text))
-            .flex_1()
-            .min_h_0()
+            .self_start()
             .w_full()
             .child(
                 Textarea::new(&self.state)

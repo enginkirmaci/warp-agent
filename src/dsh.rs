@@ -143,6 +143,10 @@ struct Inner {
     client_id: Mutex<Option<String>>,
     /// open question waterfalls by eventId, for reply mapping
     pub pending_questions: Mutex<HashMap<String, Vec<QuestionPromptInfo>>>,
+    /// last session.error per session: one backend failure arrives twice (a
+    /// transient `$events` emit plus the durable `turn/end` reason) and the
+    /// second copy must not render a second error card
+    recent_errors: Mutex<HashMap<String, (String, std::time::Instant)>>,
     rpc_counter: std::sync::atomic::AtomicU64,
 }
 
@@ -161,6 +165,7 @@ impl DshHandle {
                 sessions: Mutex::new(HashMap::new()),
                 client_id: Mutex::new(None),
                 pending_questions: Mutex::new(HashMap::new()),
+                recent_errors: Mutex::new(HashMap::new()),
                 rpc_counter: std::sync::atomic::AtomicU64::new(0),
             }),
         }
@@ -168,6 +173,24 @@ impl DshHandle {
 
     pub fn base_url(&self) -> &str {
         &self.inner.base_url
+    }
+
+    /// True when this exact error message was already folded for the session
+    /// seconds ago (the backend mirrors one failure through both the transient
+    /// `$events` emit and the durable `turn/end`); records it otherwise.
+    fn error_seen(&self, session_id: &str, message: &str) -> bool {
+        let mut recent = self.inner.recent_errors.lock().expect("dsh errors");
+        let fresh = !matches!(
+            recent.get(session_id),
+            Some((last, at)) if *last == message && at.elapsed() < std::time::Duration::from_secs(10)
+        );
+        if fresh {
+            recent.insert(
+                session_id.to_string(),
+                (message.to_string(), std::time::Instant::now()),
+            );
+        }
+        fresh
     }
 
     pub fn set_cookie(&self, cookie: String) {
@@ -1323,12 +1346,12 @@ pub async fn run_pump(
         };
         handle.set_cookie(cookie.clone());
 
-        // 2) websocket
-        let request = tokio_tungstenite::tungstenite::http::Request::builder()
-            .uri(format!("{}/api/remote.mux", handle.base_url()).replace("http", "ws"))
-            .header("cookie", &cookie)
-            .body(())
-            .expect("ws request");
+        // 2) websocket — the builder fills the handshake headers; the
+        // pre-built http::Request path adds nothing (no sec-websocket-key)
+        let uri: tokio_tungstenite::tungstenite::http::Uri =
+            format!("{}/api/remote.mux", handle.base_url()).replace("http", "ws").parse().expect("ws uri");
+        let request = tokio_tungstenite::tungstenite::client::ClientRequestBuilder::new(uri)
+            .with_header("cookie", cookie.clone());
         let connected = tokio::select! {
             _ = stop.recv() => return,
             result = tokio_tungstenite::connect_async(request) => result.map(|(socket, _)| socket),
@@ -1350,6 +1373,14 @@ pub async fn run_pump(
         was_connected.store(true, std::sync::atomic::Ordering::Release);
         let _ = event_tx
             .send(UiEvent::StreamStatus { ws_key: ws_key.clone(), status: StreamStatus::Connected })
+            .await;
+        // the store's connect note keys off this event; scoped announce keeps
+        // it inside dsh tiles (opencode's own server.connected must not land here)
+        let _ = event_tx
+            .send(UiEvent::Event {
+                ws_key: ws_key.clone(),
+                event: serde_json::json!({ "type": "server.connected" }),
+            })
             .await;
 
         // 3) open the streams this generation needs
@@ -1454,6 +1485,17 @@ async fn reconnect_pace(
     Ok(())
 }
 
+/// Guards the store from a second error card for one backend failure: both
+/// the `$events` emit and the durable `turn/end` reason carry it.
+fn error_is_duplicate(handle: &DshHandle, event: &Value) -> bool {
+    if event.get("type").and_then(Value::as_str) != Some("session.error") {
+        return false;
+    }
+    let session = event.pointer("/properties/sessionID").and_then(Value::as_str).unwrap_or("");
+    let message = event.pointer("/properties/error/message").and_then(Value::as_str).unwrap_or("");
+    !handle.error_seen(session, message)
+}
+
 /// Routes one mux frame: follow items fold into session state (and emit
 /// opencode events), $events items handle remote notifications and waterfalls.
 fn dispatch_frame(
@@ -1484,6 +1526,9 @@ fn dispatch_frame(
             return;
         }
         for event in fold_remote_event(value) {
+            if error_is_duplicate(handle, &event) {
+                continue;
+            }
             let _ = event_tx.send_blocking(UiEvent::Event {
                 ws_key: ws_key.to_string(),
                 event,
@@ -1552,6 +1597,9 @@ fn dispatch_frame(
                 });
             }
             for extra in outcome.extra {
+                if error_is_duplicate(handle, &extra) {
+                    continue;
+                }
                 let _ = event_tx.send_blocking(UiEvent::Event {
                     ws_key: ws_key.to_string(),
                     event: extra,

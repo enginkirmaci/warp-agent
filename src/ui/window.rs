@@ -10,7 +10,7 @@ use crate::ui::settings::SettingsBuffers;
 use crate::ui::tile::TileView;
 use crate::ui::tooltip::{self, tip};
 use gpui::prelude::*;
-use gpui::{canvas, div, px, App, Context, Entity, MouseButton, Render, Role, SharedString, StyleRefinement, Toggled, Window, WindowControlArea};
+use gpui::{canvas, div, px, App, Context, Entity, Focusable, MouseButton, Render, Role, SharedString, StyleRefinement, Toggled, Window, WindowControlArea};
 use std::collections::HashMap;
 
 #[derive(Clone)]
@@ -627,6 +627,7 @@ impl WarpWindow {
                 div()
                     .id("sidebar-filter")
                     .role(Role::SearchInput)
+                    .track_focus(&filter_leaf.read(cx).state.read(cx).focus_handle(cx))
                     .aria_label("Filter workspaces")
                     .aria_placeholder("Filter workspaces")
                     .aria_value(self.sidebar_filter.clone())
@@ -1126,15 +1127,12 @@ impl WarpWindow {
                 // the kit Input has no a11y of its own — the wrapper carries the
                 // role/value; an AT click lands at the wrapper's center, which
                 // is the input itself
-                let value = self
-                    .settings_fields
-                    .iter()
-                    .find(|(k, _)| *k == key)
-                    .map(|(_, field)| field.read(cx).value().to_string())
-                    .unwrap_or_default();
+                let state = leaf.read(cx).state.clone();
+                let value = state.read(cx).value().to_string();
                 div()
                     .id(gpui::ElementId::Name(SharedString::from(format!("field-{key}"))))
                     .role(Role::TextInput)
+                    .track_focus(&state.read(cx).focus_handle(cx))
                     .aria_label(SharedString::from(format!("{key} field")))
                     .aria_value(value)
                     .flex_1()

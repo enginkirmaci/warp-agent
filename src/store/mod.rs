@@ -3135,6 +3135,15 @@ impl Store {
         self.next_tile_key += 1;
         let mut tile = ChatTile::new(key.clone(), self.seed_model(), self.seed_agent(), self.seed_variant());
         tile.harness = self.settings.default_harness;
+        if tile.harness == HarnessKind::Dsh {
+            // the seed names an opencode model ("provider/model" of the
+            // workspace server); the dsh catalog has its own — start from the
+            // server default and warm the shared server so the picker lists
+            // the real catalog by the time it opens
+            tile.selected_model = None;
+            tile.selected_variant = None;
+            self.ensure_dsh(cx);
+        }
         tile.apply_variant_list(&self.variants_by_model, self.settings.default_variant_highest);
         tile.rev = Some(cx.new(|_| ()));
         self.open_tiles.push(tile);
@@ -3169,10 +3178,21 @@ impl Store {
     /// Switches a draft's harness. Only drafts: a chat with a session is
     /// bound to the server it was created on.
     pub fn set_tile_harness(&mut self, tile_key: &str, harness: HarnessKind, cx: &mut Context<Self>) {
-        if let Some(tile) = self.tile_by_key_mut(tile_key) {
-            if tile.session_id.is_none() {
-                tile.harness = harness;
-            }
+        if let Some(tile) = self.tile_by_key_mut(tile_key)
+            && tile.session_id.is_none()
+            && tile.harness != harness
+        {
+            tile.harness = harness;
+            // the two catalogs name different models (dsh's deepseek-flash is
+            // not opencode's deepseek-v4.1-flash) — a draft must not carry a
+            // model the new harness never listed; back to server default
+            tile.selected_model = None;
+            tile.selected_variant = None;
+        }
+        // switching a draft to dsh warms the shared server so the model
+        // picker can list its catalog by the time the pill opens
+        if harness == HarnessKind::Dsh {
+            self.ensure_dsh(cx);
         }
         let _ = cx;
     }
@@ -3781,6 +3801,39 @@ impl Store {
                 self.track_session_info(Some(&s.id), Some(parent_id), None);
             }
         }
+        let is_dsh_list = dsh_source == Some(true);
+        // a dsh list's entries are dsh chats by definition: mark them and
+        // track the ones this workspace doesn't know yet (revealed here by
+        // cwd, e.g. created from another window)
+        if is_dsh_list {
+            let unknown: Vec<SessionInfo> = {
+                let known = self
+                    .workspaces
+                    .iter()
+                    .find(|w| w.folder_path() == ws_key)
+                    .map(|w| w.state.sessions.clone())
+                    .unwrap_or_default();
+                sessions
+                    .iter()
+                    .filter(|s| !known.contains(&s.id))
+                    .cloned()
+                    .collect()
+            };
+            for s in &sessions {
+                self.ui.harness_by_session.insert(s.id.clone(), HarnessKind::Dsh);
+            }
+            if !unknown.is_empty() {
+                if let Some(ws) = self.workspace_by_path_mut(ws_key) {
+                    for s in &unknown {
+                        ws.state.sessions.insert(0, s.id.clone());
+                    }
+                }
+                for s in &unknown {
+                    self.workspace_by_session.insert(s.id.clone(), ws_key.to_string());
+                    self.title_by_session.insert(s.id.clone(), s.title.clone());
+                }
+            }
+        }
         if self.selected_workspace.as_deref() != Some(ws_key) {
             // a background chat load for another workspace: fill its sidebar section
             let known: HashSet<String> = self
@@ -3825,6 +3878,28 @@ impl Store {
                 })
                 .collect();
             chats.sort_by_key(session_recency);
+            // this server's list knows nothing about the other harness's chats
+            // the section already shows — keep those instead of flip-flopping
+            let keep: Vec<SessionItem> = {
+                let existing = self
+                    .workspaces
+                    .iter()
+                    .find(|w| w.folder_path() == ws_key)
+                    .map(|w| w.chats.clone())
+                    .unwrap_or_default();
+                existing
+                    .into_iter()
+                    .filter(|chat| {
+                        (self.session_harness(&chat.id) == HarnessKind::Dsh) != is_dsh_list
+                    })
+                    .collect()
+            };
+            for chat in keep {
+                if !chats.iter().any(|c| c.id == chat.id) {
+                    chats.push(chat);
+                }
+            }
+            chats.sort_by_key(session_recency);
             if let Some(ws) = self.workspace_by_path_mut(ws_key) {
                 ws.chats = chats;
             }
@@ -3868,26 +3943,10 @@ impl Store {
             self.drop_queue(&gone);
             self.drop_pending(&gone);
         }
-        // an idle fires at the end of every turn; when nothing visible changed,
-        // skip the full rebuild + disk save (the common case while chatting)
-        let unchanged = self.sessions.len() == mine.len()
-            && self.sessions.iter().zip(mine.iter()).all(|(cur, s)| {
-                cur.id == s.id
-                    && cur.title == s.title
-                    && cur.updated_ms == s.updated_ms
-                    && cur.is_pinned == pins.contains_key(&s.id)
-                    && cur.is_running == self.running_by_session.contains(&s.id)
-            });
-        if unchanged {
-            return;
-        }
-        for s in &mine {
-            self.title_by_session.insert(s.id.clone(), s.title.clone());
-            if let Some(tile) = self.tile_for_session_mut(&s.id) {
-                tile.title = s.title.clone();
-            }
-        }
-        self.sessions = mine
+        // this server's list knows nothing about the other harness's chats the
+        // sidebar already shows — keep those instead of flip-flopping the
+        // section between servers on every list refresh
+        let mut items: Vec<SessionItem> = mine
             .iter()
             .map(|s| SessionItem {
                 id: s.id.clone(),
@@ -3901,6 +3960,38 @@ impl Store {
                 draft_title: String::new(),
             })
             .collect();
+        let keep: Vec<SessionItem> = self
+            .sessions
+            .iter()
+            .filter(|item| (self.session_harness(&item.id) == HarnessKind::Dsh) != is_dsh_list)
+            .cloned()
+            .collect();
+        for item in keep {
+            if !items.iter().any(|c| c.id == item.id) {
+                items.push(item);
+            }
+        }
+        items.sort_by_key(session_recency);
+        // an idle fires at the end of every turn; when nothing visible changed,
+        // skip the full rebuild + disk save (the common case while chatting)
+        let unchanged = self.sessions.len() == items.len()
+            && self.sessions.iter().zip(items.iter()).all(|(cur, s)| {
+                cur.id == s.id
+                    && cur.title == s.title
+                    && cur.updated_ms == s.updated_ms
+                    && cur.is_pinned == s.is_pinned
+                    && cur.is_running == s.is_running
+            });
+        if unchanged {
+            return;
+        }
+        for s in &mine {
+            self.title_by_session.insert(s.id.clone(), s.title.clone());
+            if let Some(tile) = self.tile_for_session_mut(&s.id) {
+                tile.title = s.title.clone();
+            }
+        }
+        self.sessions = items;
         let titles: Vec<(String, String)> = self
             .running_agents
             .iter()
@@ -4432,7 +4523,8 @@ impl Store {
         let data = evt.get("properties").unwrap_or(evt);
         match type_ {
             "server.connected" => {
-                self.announce("Connected to the opencode event stream.", false, cx);
+                let harness = if ws_key == DSH_SERVER_KEY { "dsh" } else { "opencode" };
+                self.announce_for_key(ws_key, &format!("Connected to the {harness} event stream."), cx);
             }
             "session.created" | "session.updated" => {
                 if let Some(info) = data.get("info") {
@@ -5093,6 +5185,26 @@ impl Store {
             .or_else(|| self.open_tiles.first().map(|t| t.key.clone()));
         if let Some(target) = target {
             self.tile_note(&target, text, error, cx);
+        }
+    }
+
+    /// Same note, but only into a tile that actually talks to `ws_key` — a
+    /// server's connect/status notes must not surface in a chat that runs on
+    /// another server (a dsh draft must not greet with opencode's note).
+    fn announce_for_key(&mut self, ws_key: &str, text: &str, cx: &mut Context<Self>) {
+        let matches_key = |this: &Self, key: &str| this.tile_net_key_or(key).as_deref() == Some(ws_key);
+        let target = self
+            .focused_tile
+            .clone()
+            .filter(|key| matches_key(self, key))
+            .or_else(|| {
+                self.open_tiles
+                    .iter()
+                    .map(|t| t.key.clone())
+                    .find(|key| matches_key(self, key))
+            });
+        if let Some(target) = target {
+            self.tile_note(&target, text, false, cx);
         }
     }
 

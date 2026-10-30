@@ -16,6 +16,25 @@ winresource = "0.1"
 # gpui-kit 0.7 is built against (=zed@1a28cff). Bump together with gpui-kit.
 gpui = { package = "gpui-pre", version = "=0.3.7" }
 gpui_platform = { package = "gpui-pre-platform", version = "=0.3.7", features = ["wayland", "x11"] }
+# the shared component family (local sibling repos; swap to version deps to publish)
+warpui-kit-core = { path = "../warpui-kit-core" }
+warpui-kit-diff = { path = "../warpui-kit-diff", features = [
+    "tree-sitter-bash",
+    "tree-sitter-c",
+    "tree-sitter-cpp",
+    "tree-sitter-css",
+    "tree-sitter-go",
+    "tree-sitter-html",
+    "tree-sitter-javascript",
+    "tree-sitter-python",
+    "tree-sitter-rust",
+    "tree-sitter-toml",
+    "tree-sitter-typescript",
+    "tree-sitter-tsx",
+    "tree-sitter-yaml",
+] }
+warpui-kit-picker = { path = "../warpui-kit-picker" }
+
 gpui-kit = { version = "0.7", features = [
     # tree-sitter grammars for chat code-block highlighting
     "tree-sitter-bash",

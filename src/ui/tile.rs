@@ -6,9 +6,16 @@ use crate::settings::HarnessKind;
 use crate::store::{at_token_start, ChatItem, QuestionEntry, Store, ToolItem, DEFAULT_MODEL_ENTRY};
 use crate::theme;
 use crate::ui::controls::{fold_body, menu_row, popover_card, BtnKind};
-use crate::ui::filtered_picker::FilteredPicker;
+use warpui_kit_picker::{
+    model_name, model_provider, DismissFn, FilteredPicker, OverlayAnchor, PanelChrome, PickerBody,
+    PickerData, PickerIcons, PickerItem, PickerRow, PickerSpec, PickerTarget, Selection,
+    TriggerScale,
+};
+
+/// A model pick from the composer pill: applies through the store/tile.
+type ModelPick = Box<dyn Fn(&str, &mut App)>;
 use crate::ui::controls;
-use crate::ui::diff::{render_diff, sniff_lang};
+use warpui_kit_diff::{render_diff, render_code, sniff_lang};
 use crate::ui::markdown::render_markdown;
 use crate::ui::tooltip::tip;
 use gpui::prelude::*;
@@ -1000,7 +1007,7 @@ impl TileView {
                     .rounded_md()
                     .bg(theme::CHIP)
                     .p_2()
-                    .child(crate::ui::diff::render_code(text, Some(lang), color, fonts.font_detail, window, cx)),
+                    .child(render_code(text, Some(lang), color, fonts.font_detail, window, cx)),
                 None => div()
                     .rounded_md()
                     .bg(theme::CHIP)
@@ -2431,7 +2438,7 @@ impl TileView {
                 }
             }) as Box<dyn Fn(&mut App)>
         };
-        let picker = cx.new(|cx| FilteredPicker::overlay(store, selected, pick, close, window, cx));
+        let picker = composer_model_picker(&store, selected, pick, close, window, cx);
         self.model_picker = Some(picker.clone());
         picker
     }
@@ -3673,5 +3680,162 @@ impl Render for ComposerField {
                     }),
             )
             .into_any_element()
+    }
+}
+
+// ---- the composer model picker ---------------------------------------------
+
+/// The app's icon paths for the shared picker shell.
+const PICKER_ICONS: PickerIcons = PickerIcons {
+    check: "icons/check.svg",
+    chevron_down: "icons/chevron-down.svg",
+    trash: "icons/trash.svg",
+    refresh: "icons/refresh.svg",
+};
+
+/// The composer's model dropdown: a shared FilteredPicker mounted by the tile
+/// only while the model pill is open. Picks and dismissal land through these
+/// callbacks; the catalog comes from the store.
+fn composer_model_picker(
+    store: &Entity<Store>,
+    selected: Box<dyn Fn(&App) -> String>,
+    pick: ModelPick,
+    close: DismissFn,
+    window: &mut Window,
+    cx: &mut Context<TileView>,
+) -> Entity<FilteredPicker> {
+    let spec = PickerSpec {
+        key: "composer",
+        trigger_label: "Model",
+        filter_placeholder: "Filter models",
+        icons: PICKER_ICONS,
+        trigger_icon: None,
+        provider_badge: false,
+        refresh: false,
+        refresh_label: "",
+        stop_trigger_mousedown: false,
+        visible_rows: 10,
+        selected_accent: false,
+        overlay: true,
+        anchor: OverlayAnchor::Composer,
+        trigger_scale: TriggerScale::Regular,
+        trigger_rounded_lg: true,
+        trigger_min_h: None,
+        panel_chrome: PanelChrome::Cards,
+        trigger_id: None,
+        panel_id: None,
+        filter_selector: Some("model-dd-filter"),
+        list_id: Some("model-dd-list"),
+    };
+    cx.new(|cx| {
+        let data = {
+            let store = store.clone();
+            // the selected readout is not clonable through the box — wrap it
+            let selected: std::rc::Rc<dyn Fn(&App) -> String> = std::rc::Rc::from(selected);
+            Box::new(move |filter: &str, _window: &Window, cx: &App| {
+                composer_model_data(&store, &selected, filter, cx)
+            }) as Box<dyn Fn(&str, &Window, &App) -> PickerData>
+        };
+        let mut picker = FilteredPicker::new(
+            spec,
+            PickerTarget::Callback(Box::new(move |value, _window, cx| {
+                pick(value, cx);
+            })),
+            data,
+            window,
+            cx,
+        );
+        picker.set_on_dismiss(close);
+        picker.observe_entity(store, cx);
+        picker
+    })
+}
+
+/// One render's worth of the model catalog: the server-default row, provider
+/// groups and the filtered, deduped models.
+fn composer_model_data(
+    store: &Entity<Store>,
+    selected: &std::rc::Rc<dyn Fn(&App) -> String>,
+    filter: &str,
+    cx: &App,
+) -> PickerData {
+    let fonts = store.read(cx).fonts;
+    let accent = store.read(cx).accent.accent;
+    let selected_value = selected(cx);
+    let filter = filter.to_lowercase();
+    let mut models: Vec<String> = store
+        .read(cx)
+        .models
+        .iter()
+        .filter(|model| {
+            let model = model.trim();
+            !model.is_empty()
+                && !model.starts_with('(')
+                && (filter.is_empty() || model.to_lowercase().contains(&filter))
+        })
+        .cloned()
+        .collect();
+    models.sort_by(|a, b| {
+        model_provider(a)
+            .to_lowercase()
+            .cmp(&model_provider(b).to_lowercase())
+            .then_with(|| a.to_lowercase().cmp(&b.to_lowercase()))
+    });
+    models.dedup_by(|a, b| a.eq_ignore_ascii_case(b));
+
+    let mut rows = Vec::with_capacity(models.len() + 4);
+    rows.push(PickerRow::Item(PickerItem {
+        id: "model-default".into(),
+        selector: "model-default".into(),
+        value: String::new(),
+        label: "Server default".to_string(),
+        selected: selected_value.is_empty(),
+        muted: false,
+        trailing_delete: None,
+    }));
+    if models.is_empty() {
+        rows.push(PickerRow::Message {
+            id: "model-message".into(),
+            label: "No models yet. Start a workspace to load models.".to_string(),
+        });
+    } else {
+        let mut last_provider = String::new();
+        for model in models {
+            let provider = model_provider(&model).to_string();
+            if !provider.is_empty() && provider != last_provider {
+                rows.push(PickerRow::Group {
+                    id: format!("model-provider-{provider}"),
+                    label: provider.to_uppercase(),
+                    selector: None,
+                });
+                last_provider = provider;
+            }
+            rows.push(PickerRow::Item(PickerItem {
+                id: format!("model-{model}"),
+                selector: format!("model-{model}"),
+                value: model.clone(),
+                label: model_name(&model).to_string(),
+                selected: model.eq_ignore_ascii_case(&selected_value),
+                muted: false,
+                trailing_delete: None,
+            }));
+        }
+    }
+
+    PickerData {
+        body: PickerBody::Rows(rows),
+        selected: Selection {
+            badge: None,
+            label: if selected_value.is_empty() {
+                "Server default".to_string()
+            } else {
+                model_name(&selected_value).to_string()
+            },
+            value: selected_value,
+        },
+        footer: None,
+        fonts,
+        accent,
+        show_tooltips: false,
     }
 }

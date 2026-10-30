@@ -50,7 +50,7 @@ pub fn render_markdown(
         text,
     )
         .selectable(true)
-        .shared_code_block_highlighter(crate::ui::code_highlight::shared_highlighter(cx))
+        .shared_code_block_highlighter(warpui_kit_diff::shared_highlighter(cx))
         .code_block_actions(move |block, _, _| {
             let code = block.code();
             let n = block_index.fetch_add(1, std::sync::atomic::Ordering::Relaxed);

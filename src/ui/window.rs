@@ -5,7 +5,10 @@ use crate::store::{Store, WorkspaceItem};
 use crate::theme;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use crate::ui::controls::{self, menu_row, popover_card, BtnKind};
-use crate::ui::filtered_picker::FilteredPicker;
+use warpui_kit_picker::{
+    model_name, model_provider, FilteredPicker, OverlayAnchor, PanelChrome, PickerBody, PickerData,
+    PickerIcons, PickerItem, PickerRow, PickerSpec, PickerTarget, Selection, TriggerScale,
+};
 use crate::ui::settings::SettingsBuffers;
 use crate::ui::tile::TileView;
 use crate::ui::tooltip::{self, tip};
@@ -1097,7 +1100,7 @@ impl WarpWindow {
             if key == "model" {
                 let state = cx.new(|cx| InputState::new(window, cx).placeholder("").default_value(value));
                 let store = self.store.clone();
-                let picker = cx.new(|cx| FilteredPicker::new(state.clone(), store, window, cx));
+                let picker = settings_model_picker(state.clone(), store, window, cx);
                 fields.push((key, state));
                 model_picker = Some(picker);
             } else {
@@ -1686,6 +1689,154 @@ struct InputLeaf {
 impl Render for InputLeaf {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         Input::new(&self.state).disabled(self.disabled)
+    }
+}
+
+
+// ---- the settings model picker ---------------------------------------------
+
+/// The app's icon paths for the shared picker shell.
+const PICKER_ICONS: PickerIcons = PickerIcons {
+    check: "icons/check.svg",
+    chevron_down: "icons/chevron-down.svg",
+    trash: "icons/trash.svg",
+    refresh: "icons/refresh.svg",
+};
+
+/// The settings "model" slot: a shared FilteredPicker whose pick writes the
+/// model into `state`; the catalog comes from the store.
+fn settings_model_picker(
+    state: Entity<InputState>,
+    store: Entity<Store>,
+    window: &mut Window,
+    cx: &mut Context<WarpWindow>,
+) -> Entity<FilteredPicker> {
+    let spec = PickerSpec {
+        key: "default",
+        trigger_label: "Default model",
+        filter_placeholder: "Filter models",
+        icons: PICKER_ICONS,
+        trigger_icon: None,
+        provider_badge: true,
+        refresh: false,
+        refresh_label: "",
+        stop_trigger_mousedown: false,
+        visible_rows: 10,
+        selected_accent: false,
+        overlay: false,
+        anchor: OverlayAnchor::Rail,
+        trigger_scale: TriggerScale::Regular,
+        trigger_rounded_lg: true,
+        trigger_min_h: Some(26.),
+        panel_chrome: PanelChrome::Cards,
+        trigger_id: Some("model-dd-toggle"),
+        panel_id: None,
+        filter_selector: Some("model-dd-filter"),
+        list_id: Some("model-dd-list"),
+    };
+    cx.new(|cx| {
+        let data = {
+            let state = state.clone();
+            let store = store.clone();
+            Box::new(move |filter: &str, _window: &Window, cx: &App| {
+                model_data(&state, &store, filter, cx)
+            }) as Box<dyn Fn(&str, &Window, &App) -> PickerData>
+        };
+        let mut picker =
+            FilteredPicker::new(spec, PickerTarget::Field(state.clone()), data, window, cx);
+        picker.observe_entity(&store, cx);
+        picker.observe_entity(&state, cx);
+        picker
+    })
+}
+
+/// One render's worth of the model catalog: the server-default row, provider
+/// groups and the filtered, deduped models.
+fn model_data(
+    state: &Entity<InputState>,
+    store: &Entity<Store>,
+    filter: &str,
+    cx: &App,
+) -> PickerData {
+    let fonts = store.read(cx).fonts;
+    let accent = store.read(cx).accent.accent;
+    let selected = state.read(cx).value().trim().to_string();
+    let filter = filter.to_lowercase();
+    let mut models: Vec<String> = store
+        .read(cx)
+        .models
+        .iter()
+        .filter(|model| {
+            let model = model.trim();
+            !model.is_empty()
+                && !model.starts_with('(')
+                && (filter.is_empty() || model.to_lowercase().contains(&filter))
+        })
+        .cloned()
+        .collect();
+    models.sort_by(|a, b| {
+        model_provider(a)
+            .to_lowercase()
+            .cmp(&model_provider(b).to_lowercase())
+            .then_with(|| a.to_lowercase().cmp(&b.to_lowercase()))
+    });
+    models.dedup_by(|a, b| a.eq_ignore_ascii_case(b));
+
+    let mut rows = Vec::with_capacity(models.len() + 4);
+    rows.push(PickerRow::Item(PickerItem {
+        id: "model-default".into(),
+        selector: "model-default".into(),
+        value: String::new(),
+        label: "Server default".to_string(),
+        selected: selected.is_empty(),
+        muted: false,
+        trailing_delete: None,
+    }));
+    if models.is_empty() {
+        rows.push(PickerRow::Message {
+            id: "model-message".into(),
+            label: "No models yet. Start a workspace to load models.".to_string(),
+        });
+    } else {
+        let mut last_provider = String::new();
+        for model in models {
+            let provider = model_provider(&model).to_string();
+            if !provider.is_empty() && provider != last_provider {
+                rows.push(PickerRow::Group {
+                    id: format!("model-provider-{provider}"),
+                    label: provider.to_uppercase(),
+                    selector: None,
+                });
+                last_provider = provider;
+            }
+            rows.push(PickerRow::Item(PickerItem {
+                id: format!("model-{model}"),
+                selector: format!("model-{model}"),
+                value: model.clone(),
+                label: model_name(&model).to_string(),
+                selected: model.eq_ignore_ascii_case(&selected),
+                muted: false,
+                trailing_delete: None,
+            }));
+        }
+    }
+
+    PickerData {
+        body: PickerBody::Rows(rows),
+        selected: Selection {
+            badge: (!model_provider(&selected).is_empty())
+                .then(|| model_provider(&selected).to_string()),
+            label: if selected.is_empty() {
+                "Server default".to_string()
+            } else {
+                model_name(&selected).to_string()
+            },
+            value: selected,
+        },
+        footer: None,
+        fonts,
+        accent,
+        show_tooltips: false,
     }
 }
 

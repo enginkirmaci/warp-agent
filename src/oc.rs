@@ -1067,6 +1067,10 @@ pub enum UiEvent {
     },
     SessionsLoaded {
         ws_key: String,
+        /// True when the reply came from the shared dsh server (a dsh list
+        /// must never prune the same workspace's opencode chats, and vice
+        /// versa); carried on the event so replies can never be misattributed
+        dsh: bool,
         result: Result<Vec<SessionInfo>>,
     },
     MessagesLoaded {
@@ -1700,13 +1704,15 @@ async fn run_request(client: &ApiClient, ws_key: String, request: ApiRequest) ->
     match request {
         ApiRequest::ListSessions => UiEvent::SessionsLoaded {
             ws_key,
+            dsh: false,
             result: client.list_sessions().await,
         },
         // dsh-only requests never reach the opencode runner (net_main routes
-        // by workspace kind); answer defensively instead of dying on a bug
-        ApiRequest::ListDshSessions { folder } => UiEvent::SessionsLoaded {
-            ws_key: folder,
-            result: Ok(Vec::new()),
+        // by workspace kind); answering with a list would prune the workspace's
+        // real dsh chats, so log the misrouting instead
+        ApiRequest::ListDshSessions { folder } => UiEvent::Log {
+            ws_key,
+            line: format!("dsh session list for {folder} misrouted to an opencode runner"),
         },
         ApiRequest::CreateDshSession { folder, .. } => UiEvent::SessionCreated {
             ws_key: folder,

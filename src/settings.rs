@@ -90,6 +90,10 @@ pub struct AppSettings {
     pub auto_allow_away_min_seconds: i64,
     #[serde(rename = "AutoAllowAwayMaxSeconds", default = "d600")]
     pub auto_allow_away_max_seconds: i64,
+    /// Minutes an opencode workspace server stays up with no busy chat before
+    /// the idle sweep stops it (the port closes); 0 keeps servers running.
+    #[serde(rename = "ServerIdleStopMin", default = "idle10")]
+    pub server_idle_stop_min: i64,
     #[serde(rename = "LunchStartHour", default = "h12")]
     pub lunch_start_hour: i64,
     #[serde(rename = "LunchEndHour", default = "h14")]
@@ -128,6 +132,9 @@ fn d60() -> i64 {
 fn d600() -> i64 {
     600
 }
+fn idle10() -> i64 {
+    10
+}
 fn h12() -> i64 {
     12
 }
@@ -160,6 +167,7 @@ impl Default for AppSettings {
             auto_allow_default_max_seconds: 15,
             auto_allow_away_min_seconds: 60,
             auto_allow_away_max_seconds: 600,
+            server_idle_stop_min: 10,
             lunch_start_hour: 12,
             lunch_end_hour: 14,
             off_hours_start_hour: 18,

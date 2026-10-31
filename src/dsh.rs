@@ -15,7 +15,7 @@
 
 use anyhow::{Context as _, Result, anyhow};
 use serde_json::{Value, json};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
@@ -152,9 +152,14 @@ struct Inner {
     /// open question waterfalls by eventId, for reply mapping
     pub pending_questions: Mutex<HashMap<String, Vec<QuestionPromptInfo>>>,
     /// last session.error per session: one backend failure arrives twice (a
-    /// transient `$events` emit plus the durable `turn/end` reason) and the
+    /// transient `$events` emit plus the durable `turn/end`) and the
     /// second copy must not render a second error card
     recent_errors: Mutex<HashMap<String, (String, std::time::Instant)>>,
+    /// ids the registry reports as archived (the cumulative reply of every
+    /// `workspace/archiveSession`). Archived sessions keep coming back in
+    /// `session/list` — the projection only drops them on compaction — and
+    /// the list item carries no archive marker, so they are filtered here
+    archived: Mutex<HashSet<String>>,
     rpc_counter: std::sync::atomic::AtomicU64,
 }
 
@@ -174,6 +179,7 @@ impl DshHandle {
                 client_id: Mutex::new(None),
                 pending_questions: Mutex::new(HashMap::new()),
                 recent_errors: Mutex::new(HashMap::new()),
+                archived: Mutex::new(HashSet::new()),
                 rpc_counter: std::sync::atomic::AtomicU64::new(0),
             }),
         }
@@ -203,6 +209,22 @@ impl DshHandle {
 
     pub fn set_cookie(&self, cookie: String) {
         *self.inner.cookie.write().expect("dsh cookie") = cookie;
+    }
+
+    /// Remembers the registry's cumulative archived-session ids (the reply of
+    /// `workspace/archiveSession`; the delete call site falls back to the
+    /// deleted id itself when the reply carries no list).
+    fn note_archived(&self, ids: &[String]) {
+        let mut archived = self.inner.archived.lock().expect("dsh archived");
+        archived.extend(ids.iter().cloned());
+    }
+
+    fn is_archived(&self, session_id: &str) -> bool {
+        self.inner
+            .archived
+            .lock()
+            .expect("dsh archived")
+            .contains(session_id)
     }
 
     pub fn cookie(&self) -> String {
@@ -489,18 +511,20 @@ fn question_key(question: &QuestionPromptInfo) -> String {
 pub async fn run_request(handle: &DshHandle, ws_key: String, request: ApiRequest) -> UiEvent {
     match request {
         ApiRequest::ListSessions | ApiRequest::ListMcpNames => {
-            // dsh sessions are listed per workspace folder (ListDshSessions);
-            // a bare list has no folder to filter by and MCP has no dsh
-            // equivalent — both degrade to empty
-            UiEvent::SessionsLoaded {
+            // dsh sessions are listed per workspace folder (ListDshSessions)
+            // and MCP has no dsh equivalent; neither can be answered here —
+            // an empty list would read as "everything gone" and prune real
+            // chats, so log the misrouting instead
+            UiEvent::Log {
                 ws_key,
-                result: Ok(Vec::new()),
+                line: "request without a dsh equivalent hit the dsh runner".into(),
             }
         }
         ApiRequest::ListDshSessions { folder } => {
             let result = list_sessions_filtered(handle, &folder).await;
             UiEvent::SessionsLoaded {
                 ws_key: folder,
+                dsh: true,
                 result,
             }
         }
@@ -569,14 +593,29 @@ pub async fn run_request(handle: &DshHandle, ws_key: String, request: ApiRequest
             UiEvent::SessionRenamed { session_id, result }
         }
         ApiRequest::DeleteSession { session_id } => {
-            // dsh has no hard delete; archiving removes it from the list
+            // dsh has no hard delete; archiving removes it from the list. The
+            // reply carries the registry's cumulative archivedSessionIds —
+            // remembered so the sticky session/list projection (archived
+            // sessions stay listed until compaction, with no marker on the
+            // item) cannot pull the deleted chat back into the sidebar
             let result = handle
                 .rpc(
                     "workspace/archiveSession",
                     json!({ "request": { "sessionId": session_id } }),
                 )
                 .await
-                .map(|_| ());
+                .map(|reply| {
+                    let ids: Vec<String> = reply
+                        .get("archivedSessionIds")
+                        .and_then(Value::as_array)
+                        .map(|list| {
+                            list.iter()
+                                .filter_map(|id| id.as_str().map(String::from))
+                                .collect()
+                        })
+                        .unwrap_or_else(|| vec![session_id.clone()]);
+                    handle.note_archived(&ids);
+                });
             UiEvent::SessionDeleted { session_id, result }
         }
         ApiRequest::Abort { session_id } => {
@@ -699,12 +738,13 @@ async fn list_sessions_filtered(handle: &DshHandle, folder: &str) -> Result<Vec<
         if item.get("cwd").and_then(Value::as_str) != Some(folder) {
             continue;
         }
+        // archived chats keep riding the list (see Inner.archived)
+        let id = item.get("sessionId").and_then(Value::as_str).unwrap_or("");
+        if handle.is_archived(id) {
+            continue;
+        }
         sessions.push(SessionInfo {
-            id: item
-                .get("sessionId")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .to_string(),
+            id: id.to_string(),
             title: item
                 .pointer("/projections/values/title/title")
                 .and_then(Value::as_str)

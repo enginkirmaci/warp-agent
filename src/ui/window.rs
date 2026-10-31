@@ -22,9 +22,6 @@ use warpui_kit_picker::{
 #[derive(Clone)]
 pub enum SideMenuAction {
     OpenFolder(String),
-    OpenInOpenCode(String),
-    StartServer(String),
-    StopServer(String),
     RemoveWorkspace(String),
     PinChat(String),
     UnpinChat(String),
@@ -37,9 +34,6 @@ impl SideMenuAction {
     fn label(&self) -> &'static str {
         match self {
             SideMenuAction::OpenFolder(_) => "Open folder",
-            SideMenuAction::OpenInOpenCode(_) => "Open in opencode",
-            SideMenuAction::StartServer(_) => "Start server",
-            SideMenuAction::StopServer(_) => "Stop server",
             SideMenuAction::RemoveWorkspace(_) => "Remove workspace",
             SideMenuAction::PinChat(_) => "Pin",
             SideMenuAction::UnpinChat(_) => "Unpin",
@@ -59,24 +53,20 @@ pub struct MenuState {
     pub rows: Vec<SideMenuAction>,
 }
 
+/// Harness-independent workspace menu: servers are auto-managed (expanding a
+/// workspace connects them), so the only entries are the folder itself and
+/// removal. The built-in General workspace has neither — no menu at all.
 fn ws_menu_rows(store: &Store, path: &str) -> Vec<SideMenuAction> {
     let Some(ws) = store.workspaces.iter().find(|w| w.folder_path() == path) else {
         return Vec::new();
     };
-    let mut rows = Vec::new();
-    if !ws.is_general() {
-        rows.push(SideMenuAction::OpenFolder(path.to_string()));
-        rows.push(SideMenuAction::OpenInOpenCode(path.to_string()));
+    if ws.is_general() {
+        return Vec::new();
     }
-    if ws.is_running {
-        rows.push(SideMenuAction::StopServer(path.to_string()));
-    } else {
-        rows.push(SideMenuAction::StartServer(path.to_string()));
-    }
-    if !ws.is_general() {
-        rows.push(SideMenuAction::RemoveWorkspace(path.to_string()));
-    }
-    rows
+    vec![
+        SideMenuAction::OpenFolder(path.to_string()),
+        SideMenuAction::RemoveWorkspace(path.to_string()),
+    ]
 }
 
 fn chat_menu_rows(store: &Store, id: &str) -> Vec<SideMenuAction> {
@@ -171,14 +161,6 @@ fn execute_menu_action(store: &Entity<Store>, action: &SideMenuAction, cx: &mut 
                 tracing::warn!("open folder failed: {err}");
             }
         }
-        SideMenuAction::OpenInOpenCode(path) => {
-            let executable = s.settings.open_code_executable.clone();
-            if let Err(err) = crate::services::launch_in_terminal(path, &executable) {
-                s.announce(&format!("Could not open a terminal: {err}"), true, cx);
-            }
-        }
-        SideMenuAction::StartServer(path) => s.start_workspace(path, cx),
-        SideMenuAction::StopServer(path) => s.stop_workspace(path, cx),
         SideMenuAction::RemoveWorkspace(path) => s.remove_workspace(path, cx),
         SideMenuAction::PinChat(id) => s.toggle_pin(id, cx),
         SideMenuAction::UnpinChat(id) => s.toggle_pin(id, cx),
@@ -840,6 +822,9 @@ impl WarpWindow {
                         let s = menu_store.read(cx);
                         ws_menu_rows(s, &menu_path)
                     };
+                    if rows.is_empty() {
+                        return; // General: no workspace menu at all
+                    }
                     let _ = menu_tx.send_blocking(MenuState {
                         x: event.position.x.as_f32(),
                         y: event.position.y.as_f32(),
@@ -901,48 +886,54 @@ impl WarpWindow {
                     .gap_0p5()
                     .opacity(0.)
                     .group_hover("wsrow", |s| s.opacity(1.))
-                    .child(
-                        tip(
-                            div()
-                                .id(gpui::ElementId::NamedInteger(
-                                    "ws-kebab".into(),
-                                    TileView::hash(&path),
-                                ))
-                                .role(Role::Button)
-                                .aria_label(SharedString::from(format!(
-                                    "{} — workspace actions",
-                                    ws.name
-                                )))
-                                .cursor_pointer()
-                                .p_1()
-                                .rounded_sm()
-                                .hover(|s| s.bg(theme::HOVER))
-                                .on_click(move |event, _, cx| {
-                                    // menu only — the row must not toggle expansion
-                                    cx.stop_propagation();
-                                    let rows = {
-                                        let s = menu_store2.read(cx);
-                                        ws_menu_rows(s, &menu_path2)
-                                    };
-                                    let (x, y) = match event {
-                                        gpui::ClickEvent::Mouse(click) => (
-                                            click.up.position.x.as_f32(),
-                                            click.up.position.y.as_f32(),
-                                        ),
-                                        _ => (40.0, 60.0),
-                                    };
-                                    let _ = menu_tx2.send_blocking(MenuState { x, y, rows });
-                                    // menu paints on the next store-driven repaint — same nudge as right-click
-                                    menu_store2.update(cx, |_, _| {});
-                                }),
-                            "Workspace actions",
+                    // General has no workspace menu — no kebab either
+                    .when(!ws.is_general(), |d| {
+                        d.child(
+                            tip(
+                                div()
+                                    .id(gpui::ElementId::NamedInteger(
+                                        "ws-kebab".into(),
+                                        TileView::hash(&path),
+                                    ))
+                                    .role(Role::Button)
+                                    .aria_label(SharedString::from(format!(
+                                        "{} — workspace actions",
+                                        ws.name
+                                    )))
+                                    .cursor_pointer()
+                                    .p_1()
+                                    .rounded_sm()
+                                    .hover(|s| s.bg(theme::HOVER))
+                                    .on_click(move |event, _, cx| {
+                                        // menu only — the row must not toggle expansion
+                                        cx.stop_propagation();
+                                        let rows = {
+                                            let s = menu_store2.read(cx);
+                                            ws_menu_rows(s, &menu_path2)
+                                        };
+                                        if rows.is_empty() {
+                                            return;
+                                        }
+                                        let (x, y) = match event {
+                                            gpui::ClickEvent::Mouse(click) => (
+                                                click.up.position.x.as_f32(),
+                                                click.up.position.y.as_f32(),
+                                            ),
+                                            _ => (40.0, 60.0),
+                                        };
+                                        let _ = menu_tx2.send_blocking(MenuState { x, y, rows });
+                                        // menu paints on the next store-driven repaint — same nudge as right-click
+                                        menu_store2.update(cx, |_, _| {});
+                                    }),
+                                "Workspace actions",
+                            )
+                            .child(crate::ui::icon(
+                                "icons/kebab.svg",
+                                px(fonts.icon_medium),
+                                theme::TEXT_MUTED,
+                            )),
                         )
-                        .child(crate::ui::icon(
-                            "icons/kebab.svg",
-                            px(fonts.icon_medium),
-                            theme::TEXT_MUTED,
-                        )),
-                    )
+                    })
                     .child(
                         tip(
                             div()
@@ -1000,9 +991,13 @@ impl WarpWindow {
         chat: &crate::store::SessionItem,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
-        let (fonts, accent_dim) = {
+        let (fonts, accent_dim, harness_label) = {
             let store = self.store.read(cx);
-            (store.fonts, store.accent.dim)
+            (
+                store.fonts,
+                store.accent.dim,
+                store.session_harness(&chat.id).label(),
+            )
         };
         let id = chat.id.clone();
         let store_click = self.store.clone();
@@ -1088,20 +1083,20 @@ impl WarpWindow {
                         .truncate()
                         .child(SharedString::from(chat.title.clone())),
                 )
-                // time label pinned right; hovering the row fades it out and
-                // fades the delete button in at the same spot (overlapping
-                // absolute layers, so nothing shifts)
+                // right meta cluster in flow: which backend the chat runs on,
+                // then the time. Hovering the row fades the cluster out and
+                // fades the delete button in at the same spot (absolute layer,
+                // so nothing shifts)
                 .child(
                     div()
-                        .absolute()
-                        .right_1()
-                        .top_0()
-                        .bottom_0()
+                        .flex_shrink_0()
                         .flex()
                         .items_center()
+                        .gap_1()
                         .group_hover("chatrow", |s| s.opacity(0.))
                         .text_size(px(fonts.font_micro))
                         .text_color(theme::TEXT_FAINT)
+                        .child(SharedString::from(harness_label))
                         .child(self.cached_time_label(chat)),
                 )
                 .child(
@@ -1220,7 +1215,7 @@ impl WarpWindow {
             files: false,
             directories: true,
             multiple: false,
-            prompt: Some("Workspace folder for opencode".into()),
+            prompt: Some("Workspace folder".into()),
         });
         let tx = self.add_folder_sender.clone();
         cx.spawn(async move |_this, _cx| {
@@ -1247,8 +1242,9 @@ impl WarpWindow {
             ("agent", b.default_agent),
             ("min", b.auto_allow_default_min),
             ("max", b.auto_allow_default_max),
-            ("awaymin", b.auto_allow_away_min),
-            ("awaymax", b.auto_allow_away_max),
+                ("awaymin", b.auto_allow_away_min),
+                ("awaymax", b.auto_allow_away_max),
+                ("idlemin", b.server_idle_min),
             ("lunchstart", b.lunch_start),
             ("lunchend", b.lunch_end),
             ("offstart", b.off_hours_start),
@@ -1729,7 +1725,12 @@ impl WarpWindow {
                                         .child(settings_label("DSH executable", &fonts))
                                         .child(self.settings_field_wrap("dsh_executable", cx))
                                         .into_any_element(),
-                                    self.settings_hint("Running servers keep their current binary until stopped and started again.", &fonts),
+                                    div().flex().items_center().gap_2p5()
+                                        .child(settings_label("Idle stop", &fonts))
+                                        .child(self.settings_field_wrap("idlemin", cx))
+                                        .child(self.settings_hint("min", &fonts))
+                                        .into_any_element(),
+                                    self.settings_hint("A workspace server with no running chat closes after this many idle minutes; the next chat restarts it. 0 keeps servers running.", &fonts),
                                 ]))
                                 .child(self.settings_section("Harness", &fonts))
                                 .child(self.settings_card(vec![
@@ -1882,6 +1883,7 @@ impl WarpWindow {
                 "max" => buffers.auto_allow_default_max = text,
                 "awaymin" => buffers.auto_allow_away_min = text,
                 "awaymax" => buffers.auto_allow_away_max = text,
+                "idlemin" => buffers.server_idle_min = text,
                 "lunchstart" => buffers.lunch_start = text,
                 "lunchend" => buffers.lunch_end = text,
                 "offstart" => buffers.off_hours_start = text,

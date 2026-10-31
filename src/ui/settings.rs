@@ -22,6 +22,7 @@ pub struct SettingsBuffers {
     pub auto_allow_default_max: String,
     pub auto_allow_away_min: String,
     pub auto_allow_away_max: String,
+    pub server_idle_min: String,
     pub lunch_start: String,
     pub lunch_end: String,
     pub off_hours_start: String,
@@ -56,6 +57,7 @@ impl SettingsBuffers {
             auto_allow_default_max: s.auto_allow_default_max_seconds.to_string(),
             auto_allow_away_min: s.auto_allow_away_min_seconds.to_string(),
             auto_allow_away_max: s.auto_allow_away_max_seconds.to_string(),
+            server_idle_min: s.server_idle_stop_min.to_string(),
             lunch_start: s.lunch_start_hour.to_string(),
             lunch_end: s.lunch_end_hour.to_string(),
             off_hours_start: s.off_hours_start_hour.to_string(),
@@ -127,6 +129,8 @@ impl SettingsBuffers {
                 set.auto_allow_away_max_seconds,
                 600,
             );
+            set.server_idle_stop_min =
+                Self::parse_int(&self.server_idle_min, set.server_idle_stop_min, 10).clamp(0, 1440);
             set.lunch_start_hour = Self::parse_int(&self.lunch_start, set.lunch_start_hour, 12);
             set.lunch_end_hour = Self::parse_int(&self.lunch_end, set.lunch_end_hour, 14);
             set.off_hours_start_hour =

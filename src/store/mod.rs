@@ -1801,9 +1801,14 @@ pub struct Store {
     pending_restores: Vec<(String, Vec<String>)>,
     /// chats requested while their workspace server was still starting
     pending_opens: Vec<(String, String)>,
-    /// workspace folders with a dsh list request in flight; its reply must
-    /// not prune the same workspace's opencode chats (and vice versa)
-    dsh_lists_in_flight: HashSet<String>,
+    /// sends parked because the chat's server had idled out; they flow when
+    /// ServerStarted lands for their net key
+    pending_session_sends: Vec<(String, String, String, Vec<AttachmentItem>)>,
+    /// last user/turn activity per net key; the idle sweep stops opencode
+    /// servers that stay quiet past the configured minutes
+    server_activity: HashMap<String, Instant>,
+    /// last idle-server sweep, so the 1 Hz tick only runs it every 30 s
+    last_idle_sweep: Option<Instant>,
     /// tile whose flyout should spring open after a live todo batch
     pub todos_spring: Option<String>,
     /// when the last coalesced stream repaint ran; None = never
@@ -1957,7 +1962,9 @@ impl Store {
             pending_dsh_drafts: Vec::new(),
             pending_restores: Vec::new(),
             pending_opens: Vec::new(),
-            dsh_lists_in_flight: HashSet::new(),
+            pending_session_sends: Vec::new(),
+            server_activity: HashMap::new(),
+            last_idle_sweep: None,
             todos_spring: None,
             stream_repaint_last: None,
             stream_repaint_scheduled: false,
@@ -2460,6 +2467,7 @@ impl Store {
     /// Starts the shared dsh server unless it is already up. Replies arrive
     /// as ServerStarted(DSH_SERVER_KEY); parked work drains there.
     pub fn ensure_dsh(&mut self, cx: &mut Context<Self>) {
+        self.touch_server_activity(DSH_SERVER_KEY);
         if self.runtimes.contains_key(DSH_SERVER_KEY) {
             return;
         }
@@ -2497,7 +2505,6 @@ impl Store {
             .map(|ws| ws.folder_path().to_string())
             .collect();
         for folder in folders {
-            self.dsh_lists_in_flight.insert(folder.clone());
             self.net.send(NetCommand::Request {
                 ws_key: DSH_SERVER_KEY.into(),
                 request: ApiRequest::ListDshSessions { folder },
@@ -2515,9 +2522,108 @@ impl Store {
         }
     }
 
+    fn touch_server_activity(&mut self, key: &str) {
+        self.server_activity.insert(key.to_string(), Instant::now());
+    }
+
+    /// Stops opencode workspace servers whose last chat activity is older
+    /// than the configured idle minutes — each serve owns a port, and an
+    /// expanded workspace used to leave it running forever. The shared dsh
+    /// process is exempt (one singleton, started on demand).
+    fn sweep_idle_servers(&mut self, cx: &mut Context<Self>) {
+        let idle_min = self.settings.server_idle_stop_min;
+        if idle_min <= 0 {
+            return;
+        }
+        // in-flight creates park work outside the runtimes; wait for them
+        if !self.pending_sends.is_empty()
+            || !self.pending_create_harness.is_empty()
+            || !self.pending_dsh_drafts.is_empty()
+        {
+            return;
+        }
+        let now = Instant::now();
+        let keys: Vec<String> = self
+            .runtimes
+            .keys()
+            .filter(|key| key.as_str() != DSH_SERVER_KEY)
+            .cloned()
+            .collect();
+        for key in keys {
+            let busy = self
+                .workspaces
+                .iter()
+                .find(|ws| ws.folder_path() == key)
+                .map(|ws| {
+                    ws.state
+                        .sessions
+                        .iter()
+                        .any(|sid| self.running_by_session.contains(sid))
+                })
+                .unwrap_or(false)
+                || self
+                    .pending_opens
+                    .iter()
+                    .any(|(open_key, _)| open_key == &key)
+                || self
+                    .pending_restores
+                    .iter()
+                    .any(|(open_key, _)| open_key == &key);
+            if busy {
+                self.touch_server_activity(&key);
+                continue;
+            }
+            let Some(last) = self.server_activity.get(&key) else {
+                continue; // never touched: not eligible this sweep
+            };
+            if now.duration_since(*last).as_secs() >= idle_min as u64 * 60 {
+                self.idle_stop_workspace(&key, cx);
+            }
+        }
+    }
+
+    /// The idle counterpart of a manual stop: the runtime and its port go
+    /// away, but the sidebar chat list stays for the next expansion (nothing
+    /// is running, so no queue/pending teardown is needed).
+    fn idle_stop_workspace(&mut self, path: &str, cx: &mut Context<Self>) {
+        let name = self
+            .workspaces
+            .iter()
+            .find(|ws| ws.folder_path() == path)
+            .map(|ws| ws.name.clone())
+            .unwrap_or_else(|| path.to_string());
+        tracing::info!("stopping the {name} server ({} min idle)", self.settings.server_idle_stop_min);
+        self.net
+            .send(NetCommand::StopServer { ws_key: path.into() });
+        self.runtimes.remove(path);
+        self.crash_restarts.remove(path);
+        self.reconnect_notes.remove(path);
+        self.server_activity.remove(path);
+        if let Some(ws) = self.workspace_by_path_mut(path) {
+            ws.is_running = false;
+        }
+        if self.selected_workspace.as_deref() == Some(path) {
+            self.is_server_running = false;
+        }
+        self.ipc_push_status();
+        self.repaint(cx);
+    }
+
+    /// Flows the sends parked while a chat's server was restarting.
+    fn drain_pending_session_sends(&mut self, key: &str, cx: &mut Context<Self>) {
+        let due: Vec<(String, String, String, Vec<AttachmentItem>)> = self
+            .pending_session_sends
+            .extract_if(.., |(net_key, ..)| net_key == key)
+            .collect();
+        for (_, session_id, text, attachments) in due {
+            self.send_core(&session_id, text, attachments, cx);
+        }
+    }
+
     /// ServerStarted for the shared dsh server: pickers fill from it, parked
     /// dsh work starts flowing, every workspace's dsh chat list refreshes.
     fn on_dsh_started(&mut self, cx: &mut Context<Self>) {
+        self.touch_server_activity(DSH_SERVER_KEY);
         self.runtimes.insert(
             DSH_SERVER_KEY.into(),
             WorkspaceRuntime {
@@ -2549,6 +2655,8 @@ impl Store {
                 },
             });
         }
+        // sends parked while the shared server's port was closed
+        self.drain_pending_session_sends(DSH_SERVER_KEY, cx);
         let pending_restores: Vec<(String, Vec<String>)> = self
             .pending_restores
             .extract_if(.., |(path, _)| path == DSH_SERVER_KEY)
@@ -2706,6 +2814,7 @@ impl Store {
     }
 
     pub fn start_workspace(&mut self, path: &str, cx: &mut Context<Self>) {
+        self.touch_server_activity(path);
         if self.runtimes.contains_key(path) {
             return;
         }
@@ -2725,17 +2834,6 @@ impl Store {
             },
             folder: path.into(),
         });
-        let _ = cx;
-    }
-
-    pub fn stop_workspace(&mut self, path: &str, cx: &mut Context<Self>) {
-        if !self.runtimes.contains_key(path) {
-            return;
-        }
-        self.net.send(NetCommand::StopServer {
-            ws_key: path.into(),
-        });
-        self.teardown_runtime(path);
         let _ = cx;
     }
 
@@ -2792,6 +2890,17 @@ impl Store {
             .map(|w| self.runtimes.contains_key(w.folder_path()))
             .unwrap_or(false);
         self.is_server_running = running;
+        // the shared dsh server lists per folder independent of the
+        // workspace's opencode server; refresh this folder's dsh chats
+        // whenever it is up
+        if self.runtimes.contains_key(DSH_SERVER_KEY) {
+            self.net.send(NetCommand::Request {
+                ws_key: DSH_SERVER_KEY.into(),
+                request: ApiRequest::ListDshSessions {
+                    folder: path.to_string(),
+                },
+            });
+        }
         if !running {
             return;
         }
@@ -2816,7 +2925,10 @@ impl Store {
 
     /// Expanding a workspace's chat list shows intent to work in it: connect its
     /// server so the chat list fills; an already-running workspace is left alone.
+    /// dsh is one shared server: warm it when the workspace already holds dsh
+    /// chats, refresh the folder's dsh list whenever it is up.
     pub fn connect_expanded_workspace(&mut self, path: &str, cx: &mut Context<Self>) {
+        self.touch_server_activity(path);
         let running = self
             .workspaces
             .iter()
@@ -2825,6 +2937,27 @@ impl Store {
             .unwrap_or(false);
         if !running {
             self.start_workspace(path, cx);
+        }
+        if self.runtimes.contains_key(DSH_SERVER_KEY) {
+            self.net.send(NetCommand::Request {
+                ws_key: DSH_SERVER_KEY.into(),
+                request: ApiRequest::ListDshSessions {
+                    folder: path.to_string(),
+                },
+            });
+        } else if self
+            .workspaces
+            .iter()
+            .find(|w| w.folder_path() == path)
+            .is_some_and(|w| {
+                w.state
+                    .sessions
+                    .iter()
+                    .any(|sid| self.session_harness(sid) == HarnessKind::Dsh)
+            })
+        {
+            // the list (and every pending open) flows once ServerStarted lands
+            self.ensure_dsh(cx);
         }
     }
 
@@ -2916,6 +3049,8 @@ impl Store {
                     for tile_key in parked_runs {
                         self.send_from_tile(&tile_key, cx);
                     }
+                    // sends parked while this server's port was closed
+                    self.drain_pending_session_sends(&ws_key, cx);
                     self.ipc_push_status();
                     self.repaint(cx);
                 }
@@ -3073,14 +3208,15 @@ impl Store {
                     self.repaint(cx);
                 }
             }
-            UiEvent::SessionsLoaded { ws_key, result } => match result {
-                // a dsh list (ListDshSessions) carries the workspace folder and
-                // must never prune the same workspace's opencode chats — and
-                // vice versa
-                Ok(sessions) => {
-                    let source = self.dsh_lists_in_flight.remove(&ws_key);
-                    self.apply_session_list(&ws_key, sessions, Some(source), cx)
-                }
+            UiEvent::SessionsLoaded {
+                ws_key,
+                dsh,
+                result,
+            } => match result {
+                // the event names its own source: a dsh list (ListDshSessions)
+                // carries the workspace folder and must never prune the same
+                // workspace's opencode chats — and vice versa
+                Ok(sessions) => self.apply_session_list(&ws_key, sessions, dsh, cx),
                 Err(err) => tracing::debug!("session list refresh failed: {err:#}"),
             },
             UiEvent::MessagesLoaded {
@@ -3869,23 +4005,44 @@ impl Store {
         if text.is_empty() && attachment_count == 0 {
             return;
         }
+        if let Some(key) = self.tile_net_key_or(tile_key) {
+            self.touch_server_activity(&key);
+        }
         // a leading `/name` stays as typed; send_core routes it to the
         // server's /command endpoint, which does the template expansion
         // an existing chat talks to its own workspace's server; a draft to the selected one
         let Some(tile) = self.tile_by_key(tile_key) else {
             return;
         };
-        if let Some(session_id) = &tile.session_id {
+        let existing_session = tile.session_id.clone();
+        let is_dsh_draft = existing_session.is_none() && tile.harness == HarnessKind::Dsh;
+        if let Some(session_id) = &existing_session {
             if !self.has_runtime(session_id) {
-                self.tile_note(
-                    tile_key,
-                    "This chat's workspace server is stopped — start it to continue.",
-                    true,
-                    cx,
-                );
+                // the server idled out: restart it and flow the send when
+                // ServerStarted lands, instead of dead-ending the composer
+                let Some(net_key) = self.net_key_for_session(session_id) else {
+                    return;
+                };
+                let attachments = self
+                    .tile_by_key_mut(tile_key)
+                    .map(|tile| std::mem::take(&mut tile.attachments))
+                    .unwrap_or_default();
+                if let Some(tile) = self.tile_by_key_mut(tile_key) {
+                    tile.input.clear();
+                    tile.history_index = 0;
+                }
+                self.record_prompt(&text);
+                self.pending_session_sends.push((
+                    net_key.clone(),
+                    session_id.clone(),
+                    text,
+                    attachments,
+                ));
+                self.start_server_for_key(&net_key, cx);
+                self.repaint(cx);
                 return;
             }
-        } else if tile.harness == HarnessKind::Dsh {
+        } else if is_dsh_draft {
             // a dsh draft needs the shared dsh server, not the workspace's
             if !self.runtimes.contains_key(DSH_SERVER_KEY) {
                 let folder = self.selected_workspace.clone().unwrap_or_default();
@@ -4470,7 +4627,7 @@ impl Store {
         &mut self,
         ws_key: &str,
         sessions: Vec<SessionInfo>,
-        dsh_source: Option<bool>,
+        is_dsh_list: bool,
         cx: &mut Context<Self>,
     ) {
         // keep the subagent→parent map warm from the listing too
@@ -4479,7 +4636,6 @@ impl Store {
                 self.track_session_info(Some(&s.id), Some(parent_id), None);
             }
         }
-        let is_dsh_list = dsh_source == Some(true);
         // a dsh list's entries are dsh chats by definition: mark them and
         // track the ones this workspace doesn't know yet (revealed here by
         // cwd, e.g. created from another window)
@@ -4609,7 +4765,6 @@ impl Store {
         let alive: HashSet<String> = mine.iter().map(|s| s.id.clone()).collect();
         // drop chats that no longer exist on the server — only the ones this
         // list's server owns (a dsh list knows nothing about opencode sessions)
-        let is_dsh_list = dsh_source == Some(true);
         let gone: Vec<String> = state
             .sessions
             .iter()
@@ -4636,7 +4791,10 @@ impl Store {
         }
         // this server's list knows nothing about the other harness's chats the
         // sidebar already shows — keep those instead of flip-flopping the
-        // section between servers on every list refresh
+        // section between servers on every list refresh. The section (ws.chats)
+        // is the keep source, not the selected mirror: the mirror only fills
+        // from list replies, so a bare opencode list on a dsh-heavy workspace
+        // would otherwise wipe the section
         let mut items: Vec<SessionItem> = mine
             .iter()
             .map(|s| SessionItem {
@@ -4651,12 +4809,18 @@ impl Store {
                 draft_title: String::new(),
             })
             .collect();
-        let keep: Vec<SessionItem> = self
-            .sessions
-            .iter()
-            .filter(|item| (self.session_harness(&item.id) == HarnessKind::Dsh) != is_dsh_list)
-            .cloned()
-            .collect();
+        let keep: Vec<SessionItem> = {
+            let existing = self
+                .workspaces
+                .iter()
+                .find(|w| w.folder_path() == ws_key)
+                .map(|w| w.chats.clone())
+                .unwrap_or_default();
+            existing
+                .into_iter()
+                .filter(|item| (self.session_harness(&item.id) == HarnessKind::Dsh) != is_dsh_list)
+                .collect()
+        };
         for item in keep {
             if !items.iter().any(|c| c.id == item.id) {
                 items.push(item);
@@ -4836,19 +5000,27 @@ impl Store {
         self.turn_start_by_session.remove(id);
         self.user_stopped_by_session.remove(id);
         self.workspace_by_session.remove(id);
+        self.ui.harness_by_session.remove(id);
         for ws in &mut self.ui.workspaces {
             ws.sessions.retain(|s| s != id);
         }
-        self.title_by_session.remove(id);
-        self.sessions.retain(|s| s.id != id);
         for ws in &mut self.workspaces {
+            // the runtime list too, or the next save_state resurrects the id
+            ws.state.sessions.retain(|s| s != id);
             ws.chats.retain(|c| c.id != id);
         }
+        self.title_by_session.remove(id);
+        self.sessions.retain(|s| s.id != id);
         self.ui.pins.remove(id);
         self.drop_queue(&[id.to_string()]);
         self.drop_pending(&[id.to_string()]);
         self.drop_retries(&[id.to_string()]);
-        self.sync_workspace_chats(cx);
+        // no sync_workspace_chats here: it overwrites the selected workspace's
+        // section with the (often stale) self.sessions mirror, wiping every
+        // chat that never made it into the mirror — the retains above already
+        // updated the sections
+        self.update_sidebar_selection();
+        self.repaint(cx);
     }
 
     // ---- restore ----
@@ -5255,6 +5427,7 @@ impl Store {
         if let Some(ws) = self.workspace_by_path_mut(ws_path) {
             ws.set_expanded(true); // the opened chat's row belongs in a visible sidebar section
         }
+        self.touch_server_activity(ws_path);
         if self.session_harness(session_id) == HarnessKind::Dsh {
             if !self.runtimes.contains_key(DSH_SERVER_KEY) {
                 self.ensure_dsh(cx);
@@ -5377,8 +5550,10 @@ impl Store {
                     self.note_turn_duration(sid, cx);
                     // refresh the chat list of the workspace the chat belongs to
                     if self.session_harness(sid) == HarnessKind::Dsh {
+                        self.touch_server_activity(DSH_SERVER_KEY);
                         self.refresh_dsh_lists();
                     } else if let Some(idle_path) = self.workspace_by_session.get(sid).cloned() {
+                        self.touch_server_activity(&idle_path);
                         if self.selected_workspace.as_deref() == Some(idle_path.as_str()) {
                             self.net.send(NetCommand::Request {
                                 ws_key: idle_path.clone(),
@@ -5718,6 +5893,15 @@ impl Store {
 
     /// Called once per second by the countdown tick; answers "always" for due asks.
     pub fn tick_countdowns(&mut self, cx: &mut Context<Self>) {
+        // the idle-server sweep piggybacks on the 1 Hz tick at a slower cadence
+        if self
+            .last_idle_sweep
+            .map(|last| last.elapsed() >= std::time::Duration::from_secs(30))
+            .unwrap_or(true)
+        {
+            self.last_idle_sweep = Some(Instant::now());
+            self.sweep_idle_servers(cx);
+        }
         if self.countdowns.is_empty() {
             return;
         }

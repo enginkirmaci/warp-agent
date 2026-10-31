@@ -6,9 +6,10 @@ use gpui::Context;
 use serde_json::{Value, json};
 
 use super::{Store, normalize_dir};
-use crate::ipc::{IpcCommand, Reply};
-use crate::oc::{ApiRequest, NetCommand};
+use crate::ipc::{DoorModel, IpcCommand, Reply};
+use crate::oc::{ApiRequest, DSH_SERVER_KEY, NetCommand};
 use crate::paths::AppPaths;
+use crate::settings::HarnessKind;
 
 /// One door-run: a prompt DevTools wants executed and answered. Bound to a
 /// draft tile key until the session exists, then to the session id.
@@ -47,7 +48,7 @@ impl Store {
             IpcCommand::CancelRun { run, reply } => {
                 let _ = reply.send(self.ipc_cancel_run(run));
             }
-            IpcCommand::Models { reply } => self.ipc_models(reply, cx),
+            IpcCommand::Models { harness, reply } => self.ipc_models(harness, reply, cx),
             IpcCommand::Status { reply } => {
                 let _ = reply.send(Ok(json!({"workspaces": self.ipc_status_workspaces()})));
             }
@@ -96,7 +97,7 @@ impl Store {
         workspace: &str,
         prefill: String,
         auto_send: bool,
-        model: Option<String>,
+        model: DoorModel,
         cx: &mut Context<Self>,
     ) -> Result<Value, String> {
         let path = self.ipc_resolve_workspace(workspace)?;
@@ -105,6 +106,11 @@ impl Store {
         let Some(tile_key) = self.focused_tile.clone() else {
             return Err("no chat tile".into());
         };
+        // the picker's harness is applied before the model so switching
+        // backends cannot leave a model the new harness never listed
+        if let Some(harness) = model.harness {
+            self.set_tile_harness(&tile_key, harness, cx);
+        }
         self.ipc_seed_tile(&tile_key, prefill, model);
         if auto_send && self.runtimes.contains_key(&path) {
             // a draft send silently drops while the server is still starting;
@@ -114,23 +120,27 @@ impl Store {
         Ok(json!({"tile": tile_key}))
     }
 
-    fn ipc_seed_tile(&mut self, tile_key: &str, prefill: String, model: Option<String>) {
-        if model.is_none() {
+    fn ipc_seed_tile(&mut self, tile_key: &str, prefill: String, model: DoorModel) {
+        let Some(selected_model) = model.model.filter(|model| !model.trim().is_empty()) else {
             if let Some(tile) = self.tile_by_key_mut(tile_key)
                 && !prefill.is_empty()
             {
                 tile.input = prefill;
             }
             return;
-        }
+        };
         let variants = self.variants_by_model.clone();
         let prefer_highest = self.settings.default_variant_highest;
         if let Some(tile) = self.tile_by_key_mut(tile_key) {
             if !prefill.is_empty() {
                 tile.input = prefill;
             }
-            tile.selected_model = model;
+            tile.selected_model = Some(selected_model);
             tile.apply_variant_list(&variants, prefer_highest);
+            // an explicit pick wins over the "highest by default" setting
+            if let Some(variant) = model.variant.filter(|variant| !variant.trim().is_empty()) {
+                tile.selected_variant = Some(variant);
+            }
         }
     }
 
@@ -139,7 +149,7 @@ impl Store {
         run: u64,
         workspace: &str,
         prompt: String,
-        model: Option<String>,
+        model: DoorModel,
         reply: Reply,
         cx: &mut Context<Self>,
     ) {
@@ -188,28 +198,50 @@ impl Store {
         Ok(json!({"cancelled": true}))
     }
 
-    fn ipc_models(&mut self, reply: Reply, cx: &mut Context<Self>) {
-        if !self.models.is_empty() {
-            let _ = reply.send(Ok(json!({"models": self.models.clone()})));
-            return;
-        }
-        let Ok(path) = self.ipc_resolve_workspace("general") else {
-            let _ = reply.send(Err("general workspace unavailable".into()));
-            return;
+    fn ipc_models(&mut self, harness: Option<HarnessKind>, reply: Reply, cx: &mut Context<Self>) {
+        let known = match harness {
+            Some(harness) => self.models_live.contains(&harness),
+            None => !self.model_infos.is_empty(),
         };
-        if !self.workspaces.iter().any(|w| w.folder_path() == path) {
-            self.add_workspace(&path, cx);
+        if known {
+            let _ = reply.send(Ok(self.models_payload(harness)));
+            return;
         }
-        if self.runtimes.contains_key(&path) {
-            self.net.send(NetCommand::Request {
-                ws_key: path,
-                request: ApiRequest::ListModels,
-            });
+        if harness == Some(HarnessKind::Dsh) {
+            let running = self.runtimes.contains_key(DSH_SERVER_KEY);
+            self.ensure_dsh(cx);
+            if running {
+                self.net.send(NetCommand::Request {
+                    ws_key: DSH_SERVER_KEY.into(),
+                    request: ApiRequest::ListModels,
+                });
+            }
         } else {
-            // ServerStarted asks for the model list on its own
-            self.start_workspace(&path, cx);
+            let Ok(path) = self.ipc_resolve_workspace("general") else {
+                let _ = reply.send(Err("general workspace unavailable".into()));
+                return;
+            };
+            if !self.workspaces.iter().any(|w| w.folder_path() == path) {
+                self.add_workspace(&path, cx);
+            }
+            if self.runtimes.contains_key(&path) {
+                self.net.send(NetCommand::Request {
+                    ws_key: path,
+                    request: ApiRequest::ListModels,
+                });
+            } else {
+                // ServerStarted asks for the model list on its own
+                self.start_workspace(&path, cx);
+            }
         }
-        self.ipc_models_waiter = Some(reply);
+        self.ipc_models_waiter = Some((harness, reply));
+    }
+
+    /// One `models` answer: the legacy flat key list plus the harness and
+    /// variant metadata the settings pickers need. A requested harness only
+    /// sees its own catalog; without one every known model is included.
+    pub(super) fn models_payload(&self, harness: Option<HarnessKind>) -> Value {
+        models_payload(&self.model_infos, harness)
     }
 
     /// The last assistant message of a run, as the run's answer.
@@ -287,5 +319,76 @@ impl Store {
         self.net.send(NetCommand::IpcBroadcast {
             line: frame.to_string(),
         });
+    }
+}
+
+/// The wire shape of one `models` answer: the released flat `models` key list
+/// plus the harness-qualified `catalog` (variants included) and the harness
+/// options. Kept separate from [`Store`] so the contract is unit-testable.
+fn models_payload(infos: &[crate::oc::ModelInfo], harness: Option<HarnessKind>) -> Value {
+    let entries: Vec<&crate::oc::ModelInfo> = infos
+        .iter()
+        .filter(|model| harness.is_none_or(|harness| model.harness == harness))
+        .collect();
+    let models: Vec<&str> = entries.iter().map(|model| model.key.as_str()).collect();
+    let catalog: Vec<Value> = entries
+        .iter()
+        .map(|model| {
+            json!({
+                "key": model.key,
+                "harness": model.harness,
+                "variants": model.variants,
+                "context_limit": model.context_limit,
+            })
+        })
+        .collect();
+    let harnesses: Vec<Value> = HarnessKind::ALL
+        .iter()
+        .map(|harness| {
+            json!({
+                "id": harness.label(),
+                "label": harness.option_label(),
+            })
+        })
+        .collect();
+    json!({
+        "models": models,
+        "catalog": catalog,
+        "harnesses": harnesses,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::oc::ModelInfo;
+
+    #[test]
+    fn models_payload_scopes_the_catalog_and_keeps_harnesses() {
+        let infos = vec![
+            ModelInfo {
+                key: "a/x".into(),
+                harness: HarnessKind::OpenCode,
+                variants: vec!["low".into(), "high".into()],
+                context_limit: 100,
+            },
+            ModelInfo {
+                key: "b/y".into(),
+                harness: HarnessKind::Dsh,
+                variants: vec!["max".into()],
+                context_limit: 0,
+            },
+        ];
+        let dsh = models_payload(&infos, Some(HarnessKind::Dsh));
+        assert_eq!(dsh["models"], json!(["b/y"]));
+        assert_eq!(dsh["catalog"][0]["key"], "b/y");
+        assert_eq!(dsh["catalog"][0]["harness"], "dsh");
+        assert_eq!(dsh["catalog"][0]["variants"], json!(["max"]));
+        assert_eq!(dsh["harnesses"][0]["id"], "opencode");
+        assert_eq!(dsh["harnesses"][1]["label"], "DeepSeek (dsh)");
+
+        let all = models_payload(&infos, None);
+        assert_eq!(all["models"], json!(["a/x", "b/y"]));
+        assert_eq!(all["catalog"].as_array().unwrap().len(), 2);
     }
 }

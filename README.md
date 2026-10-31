@@ -25,7 +25,9 @@ At startup the app binds a token-authenticated NDJSON server on
 `127.0.0.1` (port + token under `~/.warp-agent/ipc.*`). DevTools drives it:
 `open-workspace` (folder args on the command line do the same, forwarded to
 a running instance — second launches exit), `new-chat`, `run-prompt`
-(one-shot wand runs as real chats, answered at idle), `models`, `status`
+(one-shot wand runs as real chats, answered at idle; both accept a
+`harness`, `model` and `variant`), `models` (the flat key list plus the
+harnesses and per-model variants the settings pickers need), `status`
 (+ status pushes). The app works fully standalone; the door is only an
 integration surface.
 

@@ -16,6 +16,7 @@ use tokio::sync::{broadcast, oneshot};
 
 use crate::oc::UiEvent;
 use crate::paths::AppPaths;
+use crate::settings::HarnessKind;
 
 pub const PROTOCOL: u32 = 1;
 /// Prompts ride whole on one line; repository trees inside them grow large.
@@ -62,6 +63,16 @@ pub fn read_endpoint() -> Option<(u16, String)> {
 /// "cancelled" on the client.
 pub type Reply = oneshot::Sender<Result<Value, String>>;
 
+/// The per-chat model knobs a door create/run carries. Grouped so the store
+/// side stays under the argument-count lint and the three fields move
+/// together through the seed path.
+#[derive(Clone, Debug, Default)]
+pub struct DoorModel {
+    pub model: Option<String>,
+    pub harness: Option<HarnessKind>,
+    pub variant: Option<String>,
+}
+
 /// A door command bound for the store. Ping never gets here — the
 /// connection answers it locally.
 pub enum IpcCommand {
@@ -73,7 +84,7 @@ pub enum IpcCommand {
         workspace: String,
         prefill: String,
         auto_send: bool,
-        model: Option<String>,
+        model: DoorModel,
         reply: Reply,
     },
     /// `run` is the wire request id. The reply fires only when the turn
@@ -82,7 +93,7 @@ pub enum IpcCommand {
         run: u64,
         workspace: String,
         prompt: String,
-        model: Option<String>,
+        model: DoorModel,
         reply: Reply,
     },
     CancelRun {
@@ -90,6 +101,9 @@ pub enum IpcCommand {
         reply: Reply,
     },
     Models {
+        /// None answers with every catalog the app knows; a harness starts
+        /// that backend when it has no models yet and answers when loaded.
+        harness: Option<HarnessKind>,
         reply: Reply,
     },
     Status {
@@ -314,6 +328,15 @@ async fn read_line(reader: &mut BufReader<OwnedReadHalf>) -> Option<String> {
     }
 }
 
+fn parse_harness(request: &Value) -> Result<Option<HarnessKind>, String> {
+    match request.get("harness").and_then(Value::as_str) {
+        None => Ok(None),
+        Some(id) => HarnessKind::from_wire(id)
+            .map(Some)
+            .ok_or_else(|| format!("unknown harness: {id}")),
+    }
+}
+
 async fn serve_request(
     request: Value,
     id: u64,
@@ -363,22 +386,46 @@ async fn serve_request(
                 .get("auto_send")
                 .and_then(Value::as_bool)
                 .unwrap_or(false);
+            let harness = match parse_harness(&request) {
+                Ok(harness) => harness,
+                Err(err) => {
+                    let _ = reply(&lines, id, Err(err)).await;
+                    return;
+                }
+            };
             Some(IpcCommand::NewChat {
                 workspace,
                 prefill: field("prefill").unwrap_or_default(),
                 auto_send,
-                model: field("model"),
+                model: DoorModel {
+                    model: field("model"),
+                    harness,
+                    variant: field("variant"),
+                },
                 reply: reply_tx,
             })
         }
         "run-prompt" => match required("prompt") {
-            Some(prompt) => Some(IpcCommand::RunPrompt {
-                run: id,
-                workspace: field("workspace").unwrap_or_else(|| "general".into()),
-                prompt,
-                model: field("model"),
-                reply: reply_tx,
-            }),
+            Some(prompt) => {
+                let harness = match parse_harness(&request) {
+                    Ok(harness) => harness,
+                    Err(err) => {
+                        let _ = reply(&lines, id, Err(err)).await;
+                        return;
+                    }
+                };
+                Some(IpcCommand::RunPrompt {
+                    run: id,
+                    workspace: field("workspace").unwrap_or_else(|| "general".into()),
+                    prompt,
+                    model: DoorModel {
+                        model: field("model"),
+                        harness,
+                        variant: field("variant"),
+                    },
+                    reply: reply_tx,
+                })
+            }
             None => {
                 let _ = reply(&lines, id, Err("prompt is required".into())).await;
                 return;
@@ -394,7 +441,19 @@ async fn serve_request(
                 return;
             }
         },
-        "models" => Some(IpcCommand::Models { reply: reply_tx }),
+        "models" => {
+            let harness = match parse_harness(&request) {
+                Ok(harness) => harness,
+                Err(err) => {
+                    let _ = reply(&lines, id, Err(err)).await;
+                    return;
+                }
+            };
+            Some(IpcCommand::Models {
+                harness,
+                reply: reply_tx,
+            })
+        }
         "status" => Some(IpcCommand::Status { reply: reply_tx }),
         other => {
             let _ = reply(&lines, id, Err(format!("unknown command: {other}"))).await;
@@ -541,6 +600,11 @@ mod tests {
                 IpcCommand::Status { reply } => {
                     let _ = reply.send(Ok(json!({"workspaces": []})));
                 }
+                IpcCommand::Models { harness, reply } => {
+                    let _ = reply.send(Ok(json!({
+                        "harness": harness.map(|harness| harness.label()),
+                    })));
+                }
                 _ => {}
             }
         }
@@ -608,6 +672,33 @@ mod tests {
         let status = hear(&mut good).await;
         assert_eq!(status["id"], 3);
         assert!(status["ok"].as_bool().unwrap());
+
+        // models carries the requested harness into the store, and an
+        // unknown id is refused instead of silently becoming opencode
+        say(
+            &mut good,
+            json!({"id": 4, "cmd": "models", "harness": "dsh"}),
+        )
+        .await;
+        let models = hear(&mut good).await;
+        assert_eq!(models["id"], 4);
+        assert!(models["ok"].as_bool().unwrap());
+        assert_eq!(models["harness"], "dsh");
+
+        say(
+            &mut good,
+            json!({"id": 5, "cmd": "models", "harness": "not-a-harness"}),
+        )
+        .await;
+        let refused = hear(&mut good).await;
+        assert_eq!(refused["id"], 5);
+        assert!(!refused["ok"].as_bool().unwrap());
+        assert!(
+            refused["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("unknown harness")
+        );
 
         // the store's status push fans out to the connected client
         broadcast_tx

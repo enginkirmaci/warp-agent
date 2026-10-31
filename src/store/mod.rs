@@ -3,7 +3,8 @@
 //! port of MainViewModel + ChatTileViewModel + the ChatItems model.
 
 use crate::oc::{
-    self, ApiRequest, CommandInfo, DSH_SERVER_KEY, NetCommand, SessionInfo, StoredMessage, UiEvent,
+    self, ApiRequest, CommandInfo, DSH_SERVER_KEY, ModelInfo, NetCommand, SessionInfo,
+    StoredMessage, UiEvent,
 };
 use crate::settings::{AppSettings, DEFAULT_EXECUTABLE, HarnessKind, UiState, WorkspaceState};
 pub mod ipc;
@@ -1772,6 +1773,13 @@ pub struct Store {
     pub queue: Vec<QueueEntry>,
     workspace_generation: u64,
     running_by_session: HashSet<String>,
+    /// Every catalog entry with its harness, including the two harnesses'
+    /// same-named models; `models` stays the de-duplicated picker list.
+    model_infos: Vec<ModelInfo>,
+    /// Harnesses whose catalog came from a live server this session. A
+    /// cache-loaded list still answers one door request with a refresh, so
+    /// clients see real variants instead of the cache's empty ones.
+    models_live: HashSet<HarnessKind>,
     variants_by_model: HashMap<String, Vec<String>>,
     context_limit_by_model: HashMap<String, i64>,
     subagent_by_session: HashMap<String, SubagentInfo>,
@@ -1807,8 +1815,9 @@ pub struct Store {
     stream_dirty: Vec<String>,
     /// one-shot prompts DevTools runs through the door, keyed by wire id
     ipc_runs: HashMap<u64, ipc::IpcRun>,
-    /// the door's models command parked while a server spins up
-    ipc_models_waiter: Option<crate::ipc::Reply>,
+    /// the door's models command parked while a server spins up, with the
+    /// harness it asked for (None = any)
+    ipc_models_waiter: Option<(Option<HarnessKind>, crate::ipc::Reply)>,
     /// reused checkout dummy for `with_tile` — hot stream events would
     /// otherwise build a throwaway ChatTile each
     tile_placeholder: Option<ChatTile>,
@@ -1862,10 +1871,22 @@ impl Store {
         }
 
         let mut startup_models = vec![DEFAULT_MODEL_ENTRY.to_string()];
+        let mut model_infos = Vec::new();
+        let mut variants_by_model = HashMap::new();
+        let mut context_limit_by_model = HashMap::new();
         for model in crate::settings::load_models_cache() {
-            if !model.trim().is_empty() && !startup_models.contains(&model) {
-                startup_models.push(model);
+            let key = model.key.trim().to_string();
+            if key.is_empty() || key.starts_with('(') {
+                continue;
             }
+            if !startup_models.contains(&key) {
+                startup_models.push(key.clone());
+            }
+            if !model.variants.is_empty() {
+                variants_by_model.insert(key.clone(), model.variants.clone());
+            }
+            context_limit_by_model.insert(key, model.context_limit);
+            model_infos.push(model);
         }
         if let Some(model) = settings
             .default_model
@@ -1923,8 +1944,10 @@ impl Store {
             queue: Vec::new(),
             workspace_generation: 0,
             running_by_session: HashSet::new(),
-            variants_by_model: HashMap::new(),
-            context_limit_by_model: HashMap::new(),
+            model_infos,
+            models_live: HashSet::new(),
+            variants_by_model,
+            context_limit_by_model,
             subagent_by_session: HashMap::new(),
             running_subagents: HashSet::new(),
             countdowns: HashMap::new(),
@@ -2904,6 +2927,24 @@ impl Store {
                         .map(|w| w.name.clone())
                         .unwrap_or_else(|| ws_key.clone());
                     tracing::error!("server start failed for {name}: {err:#}");
+                    // a models request parked on this start must not sit until
+                    // the door's own timeout
+                    let harness = if ws_key == DSH_SERVER_KEY {
+                        HarnessKind::Dsh
+                    } else {
+                        HarnessKind::OpenCode
+                    };
+                    let waiting = self
+                        .ipc_models_waiter
+                        .as_ref()
+                        .is_some_and(|(requested, _)| requested.is_none_or(|h| h == harness));
+                    if waiting {
+                        let (_, reply) = self
+                            .ipc_models_waiter
+                            .take()
+                            .expect("a matching models waiter was checked just above");
+                        let _ = reply.send(Err(format!("server failed to start: {err:#}")));
+                    }
                     self.announce(&format!("Failed to start: {err:#}"), true, cx);
                     self.ipc_fail_parked_runs(&ws_key, &format!("server failed to start: {err:#}"));
                     self.ipc_push_status();
@@ -3426,73 +3467,104 @@ impl Store {
                 self.resolve_question(&request_id, &resolution);
                 self.repaint(cx);
             }
-            UiEvent::ModelsLoaded { result, .. } => {
-                if let Ok(models) = result {
-                    // merge: every running server contributes; existing entries stay for its own tiles
-                    let restore: Vec<(String, Option<String>, Option<String>)> = self
-                        .open_tiles
-                        .iter()
-                        .map(|t| {
-                            (
-                                t.key.clone(),
-                                t.selected_model.clone(),
-                                t.selected_variant.clone(),
-                            )
-                        })
-                        .collect();
-                    // merge-dedup through a set: the model list runs to
-                    // hundreds of entries and a Vec scan per model is O(n²)
-                    let mut known: HashSet<String> = self.models.iter().cloned().collect();
-                    for m in models {
-                        self.variants_by_model.insert(m.key.clone(), m.variants);
-                        self.context_limit_by_model
-                            .insert(m.key.clone(), m.context_limit);
-                        if known.insert(m.key.clone()) {
-                            self.models.push(m.key);
+            UiEvent::ModelsLoaded { harness, result } => {
+                match result {
+                    Ok(models) => {
+                        self.models_live.insert(harness);
+                        // merge: every running server contributes; existing entries stay for its own tiles
+                        let restore: Vec<(String, Option<String>, Option<String>)> = self
+                            .open_tiles
+                            .iter()
+                            .map(|t| {
+                                (
+                                    t.key.clone(),
+                                    t.selected_model.clone(),
+                                    t.selected_variant.clone(),
+                                )
+                            })
+                            .collect();
+                        // merge-dedup through a set: the model list runs to
+                        // hundreds of entries and a Vec scan per model is O(n²)
+                        let mut known: HashSet<String> = self.models.iter().cloned().collect();
+                        self.model_infos.retain(|model| model.harness != harness);
+                        for model in models {
+                            self.variants_by_model
+                                .insert(model.key.clone(), model.variants.clone());
+                            self.context_limit_by_model
+                                .insert(model.key.clone(), model.context_limit);
+                            if known.insert(model.key.clone()) {
+                                self.models.push(model.key.clone());
+                            }
+                            self.model_infos.push(model);
                         }
-                    }
-                    crate::settings::save_models_cache(&self.models);
-                    // tiles restored before this list arrived computed their
-                    // context fraction against an empty map — re-resolve the
-                    // limit and the % readout for every open tile now
-                    let limits = self.context_limit_by_model.clone();
-                    for tile in &mut self.open_tiles {
-                        tile.context_limit = tile
-                            .last_used_model
-                            .as_ref()
-                            .and_then(|key| lookup_context_limit(&limits, key))
-                            .unwrap_or(0);
-                        tile.update_context_text();
-                    }
-                    let known_models = self.models.clone();
-                    let variants_by_model = self.variants_by_model.clone();
-                    let prefer_highest = self.settings.default_variant_highest;
-                    for (key, model, variant) in restore {
-                        if let Some(tile) = self.tile_by_key_mut(&key) {
-                            tile.selected_model = match model {
-                                Some(saved) if known_models.contains(&saved) => Some(saved),
-                                _ => Some(DEFAULT_MODEL_ENTRY.into()),
-                            };
-                            // the model list just landed: rebuild this tile's
-                            // variant options around its model, keep a
-                            // still-valid pick, else fall back to "(default)"
-                            // (upgraded to highest when the setting asks)
-                            tile.apply_variant_list(&variants_by_model, prefer_highest);
-                            if let Some(saved_variant) = variant {
-                                // a saved "(default)" counts as unset: the
-                                // highest-default above already handled it
-                                if saved_variant != DEFAULT_VARIANT_ENTRY
-                                    && tile.variants.contains(&saved_variant)
-                                {
-                                    tile.selected_variant = Some(saved_variant);
+                        crate::settings::save_models_cache(&self.model_infos);
+                        // tiles restored before this list arrived computed their
+                        // context fraction against an empty map — re-resolve the
+                        // limit and the % readout for every open tile now
+                        let limits = self.context_limit_by_model.clone();
+                        for tile in &mut self.open_tiles {
+                            tile.context_limit = tile
+                                .last_used_model
+                                .as_ref()
+                                .and_then(|key| lookup_context_limit(&limits, key))
+                                .unwrap_or(0);
+                            tile.update_context_text();
+                        }
+                        let known_models = self.models.clone();
+                        let variants_by_model = self.variants_by_model.clone();
+                        let prefer_highest = self.settings.default_variant_highest;
+                        for (key, model, variant) in restore {
+                            if let Some(tile) = self.tile_by_key_mut(&key) {
+                                tile.selected_model = match model {
+                                    Some(saved) if known_models.contains(&saved) => Some(saved),
+                                    _ => Some(DEFAULT_MODEL_ENTRY.into()),
+                                };
+                                // the model list just landed: rebuild this tile's
+                                // variant options around its model, keep a
+                                // still-valid pick, else fall back to "(default)"
+                                // (upgraded to highest when the setting asks)
+                                tile.apply_variant_list(&variants_by_model, prefer_highest);
+                                if let Some(saved_variant) = variant {
+                                    // a saved "(default)" counts as unset: the
+                                    // highest-default above already handled it
+                                    if saved_variant != DEFAULT_VARIANT_ENTRY
+                                        && tile.variants.contains(&saved_variant)
+                                    {
+                                        tile.selected_variant = Some(saved_variant);
+                                    }
                                 }
                             }
                         }
+                        // the door's models command parked while a server spun
+                        // up: the requested harness's catalog answers it (an
+                        // un-harnessed request takes whichever list lands first)
+                        let waiting = self
+                            .ipc_models_waiter
+                            .as_ref()
+                            .is_some_and(|(requested, _)| requested.is_none_or(|h| h == harness));
+                        if waiting {
+                            let (requested, reply) = self
+                                .ipc_models_waiter
+                                .take()
+                                .expect("a matching models waiter was checked just above");
+                            let _ = reply.send(Ok(self.models_payload(requested)));
+                        }
                     }
-                    // the door's models command parked while a server spun
-                    // up: any list answers it
-                    if let Some(reply) = self.ipc_models_waiter.take() {
-                        let _ = reply.send(Ok(serde_json::json!({"models": self.models.clone()})));
+                    Err(err) => {
+                        let waiting = self
+                            .ipc_models_waiter
+                            .as_ref()
+                            .is_some_and(|(requested, _)| requested.is_none_or(|h| h == harness));
+                        if waiting {
+                            let (_, reply) = self
+                                .ipc_models_waiter
+                                .take()
+                                .expect("a matching models waiter was checked just above");
+                            let _ = reply.send(Err(format!(
+                                "could not load {} models: {err:#}",
+                                harness.label()
+                            )));
+                        }
                     }
                 }
                 self.repaint(cx);

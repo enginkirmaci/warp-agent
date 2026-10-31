@@ -23,6 +23,7 @@ use crate::oc::{
     AgentInfo, ApiRequest, CommandInfo, ModelInfo, QuestionOptionInfo, QuestionPromptInfo,
     SessionInfo, StoredMessage, StreamStatus, UiEvent,
 };
+use crate::settings::HarnessKind;
 
 /// How long a single follow snapshot may take to arrive before GetMessages
 /// gives up (the pump may still be reconnecting).
@@ -504,6 +505,7 @@ pub async fn run_request(handle: &DshHandle, ws_key: String, request: ApiRequest
             }
         }
         ApiRequest::ListModels => UiEvent::ModelsLoaded {
+            harness: HarnessKind::Dsh,
             result: model_catalog(handle).await,
         },
         ApiRequest::ListAgents => UiEvent::AgentsLoaded {
@@ -754,6 +756,7 @@ async fn model_catalog(handle: &DshHandle) -> Result<Vec<ModelInfo>> {
             variants.sort_by_key(|v| (crate::store::variant_rank(v), v.to_lowercase()));
             models.push(ModelInfo {
                 key: format!("{provider}/{name}"),
+                harness: HarnessKind::Dsh,
                 variants,
                 context_limit: 0,
             });
@@ -988,7 +991,10 @@ pub fn fold_event(state: &mut DshSessionState, session_id: &str, event: &Value) 
         "todo/write" => {
             outcome.extra.push(json!({
                 "type": "todo.updated",
-                "properties": { "todos": data.get("todos").cloned().unwrap_or(Value::Null) },
+                "properties": {
+                    "sessionID": session_id,
+                    "todos": data.get("todos").cloned().unwrap_or(Value::Null),
+                },
             }));
         }
         "session/title" => {
@@ -1853,16 +1859,25 @@ fn dispatch_frame(
                 let state = sessions.entry(session_id.to_string()).or_default();
                 fold_event(state, session_id, &event)
             };
+            // the part events carry the session id: the store routes by it,
+            // and its focused-tile fallback cannot — the shared dsh server's
+            // stream key ("dsh") never equals the session's workspace folder
+            // the message info goes first (like opencode's live order): a
+            // text part arriving before its role is known would render a user
+            // echo as assistant text
+            if let Some(event) = outcome.message_updated {
+                let _ = event_tx.send_blocking(UiEvent::Event {
+                    ws_key: ws_key.to_string(),
+                    event,
+                });
+            }
             for part in outcome.part_updated {
                 let _ = event_tx.send_blocking(UiEvent::Event {
                     ws_key: ws_key.to_string(),
-                    event: json!({ "type": "message.part.updated", "properties": { "part": part } }),
-                });
-            }
-            if let Some(info) = outcome.message_updated {
-                let _ = event_tx.send_blocking(UiEvent::Event {
-                    ws_key: ws_key.to_string(),
-                    event: json!({ "type": "message.updated", "properties": info }),
+                    event: json!({
+                        "type": "message.part.updated",
+                        "properties": { "part": part, "sessionID": session_id },
+                    }),
                 });
             }
             for extra in outcome.extra {

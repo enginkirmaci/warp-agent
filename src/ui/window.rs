@@ -1736,7 +1736,8 @@ impl WarpWindow {
                                     div().flex().items_center().gap_2p5()
                                         .child(settings_label("Default for new chats", &fonts))
                                         .child(self.radio_row(
-                                            &[("opencode", "opencode"), ("dsh", "DeepSeek (dsh)")],
+                                            &crate::settings::HarnessKind::ALL
+                                                .map(|h| (h.label(), h.option_label())),
                                             if buffers.default_harness_dsh { "dsh" } else { "opencode" },
                                             &fonts,
                                             |b, key| b.default_harness_dsh = key == "dsh",

@@ -13,7 +13,7 @@ pub const DEFAULT_DSH_EXECUTABLE: &str = "dsh";
 /// Which backend a chat runs on. Sessions carry their own harness so a
 /// workspace can mix opencode and dsh tiles; dsh chats all live on one
 /// shared `dsh web` process (dsh sessions carry their own cwd).
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum HarnessKind {
     #[default]
@@ -22,6 +22,11 @@ pub enum HarnessKind {
 }
 
 impl HarnessKind {
+    /// Every harness the app can run. The door reports this list, so clients
+    /// (DevTools settings) never hardcode what warp-agent supports.
+    pub const ALL: [HarnessKind; 2] = [HarnessKind::OpenCode, HarnessKind::Dsh];
+
+    /// The wire id: the settings key and the door's `harness` value.
     pub fn label(self) -> &'static str {
         match self {
             HarnessKind::OpenCode => "opencode",
@@ -29,10 +34,29 @@ impl HarnessKind {
         }
     }
 
+    /// What a picker calls the harness; the wire id stays stable even when
+    /// the display name is friendlier.
+    pub fn option_label(self) -> &'static str {
+        match self {
+            HarnessKind::OpenCode => "opencode",
+            HarnessKind::Dsh => "DeepSeek (dsh)",
+        }
+    }
+
     pub fn from_label(label: &str) -> Self {
         match label {
             "dsh" => HarnessKind::Dsh,
             _ => HarnessKind::OpenCode,
+        }
+    }
+
+    /// Strict wire parse for the door: an unknown id is a client bug, not
+    /// something to silently route to opencode.
+    pub fn from_wire(label: &str) -> Option<Self> {
+        match label {
+            "opencode" => Some(HarnessKind::OpenCode),
+            "dsh" => Some(HarnessKind::Dsh),
+            _ => None,
         }
     }
 }
@@ -159,18 +183,60 @@ impl AppSettings {
     }
 }
 
-pub fn load_models_cache() -> Vec<String> {
-    read_json(AppPaths::models_cache_file()).unwrap_or_default()
+/// The last model catalog this app saw, carrying each model's harness and
+/// variants so pickers (and the door's client) keep working before a server
+/// starts. The released cache was a flat `["provider/model"]` list; that
+/// shape still loads as opencode entries with no known variants.
+pub fn load_models_cache() -> Vec<crate::oc::ModelInfo> {
+    let path = AppPaths::models_cache_file();
+    let Ok(text) = fs::read_to_string(&path) else {
+        return Vec::new();
+    };
+    if let Ok(models) = serde_json::from_str::<Vec<crate::oc::ModelInfo>>(&text) {
+        return models;
+    }
+    match serde_json::from_str::<Vec<String>>(&text) {
+        Ok(keys) => keys
+            .into_iter()
+            .filter_map(|key| {
+                let key = key.trim().to_string();
+                (!key.is_empty() && !key.starts_with('(')).then_some(crate::oc::ModelInfo {
+                    key,
+                    harness: HarnessKind::OpenCode,
+                    variants: Vec::new(),
+                    context_limit: 0,
+                })
+            })
+            .collect(),
+        Err(err) => {
+            tracing::warn!(
+                "{} is neither a catalog nor a model list ({err}); ignoring it",
+                path.display()
+            );
+            Vec::new()
+        }
+    }
 }
 
-pub fn save_models_cache(models: &[String]) {
-    let keys: Vec<String> = models
-        .iter()
-        .filter(|model| !model.trim().is_empty() && !model.starts_with('('))
-        .cloned()
-        .collect();
-    if !keys.is_empty() {
-        write_json_pretty(AppPaths::models_cache_file(), &keys);
+pub fn save_models_cache(models: &[crate::oc::ModelInfo]) {
+    let mut entries: Vec<crate::oc::ModelInfo> = Vec::with_capacity(models.len());
+    for model in models {
+        let key = model.key.trim();
+        if key.is_empty() || key.starts_with('(') {
+            continue;
+        }
+        if entries
+            .iter()
+            .any(|known| known.harness == model.harness && known.key == key)
+        {
+            continue;
+        }
+        let mut entry = model.clone();
+        entry.key = key.to_string();
+        entries.push(entry);
+    }
+    if !entries.is_empty() {
+        write_json_pretty(AppPaths::models_cache_file(), &entries);
     }
 }
 

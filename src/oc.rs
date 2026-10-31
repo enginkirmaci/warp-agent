@@ -11,6 +11,7 @@
 //! workspace key [`DSH_SERVER_KEY`].
 
 use anyhow::{Context as _, Result, anyhow};
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -61,10 +62,15 @@ pub struct StoredMessage {
     pub parts: Vec<Value>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ModelInfo {
     pub key: String,
+    /// Which backend serves the model; the two catalogs overlap on some
+    /// names, so a key alone is not enough to resolve it.
+    pub harness: HarnessKind,
+    #[serde(default)]
     pub variants: Vec<String>,
+    #[serde(default)]
     pub context_limit: i64,
 }
 
@@ -732,6 +738,7 @@ impl ApiClient {
                         .unwrap_or(0);
                     models.push(ModelInfo {
                         key: format!("{pid}/{name}"),
+                        harness: HarnessKind::OpenCode,
                         variants,
                         context_limit,
                     });
@@ -1104,6 +1111,7 @@ pub enum UiEvent {
         result: Result<()>,
     },
     ModelsLoaded {
+        harness: HarnessKind,
         result: Result<Vec<ModelInfo>>,
     },
     AgentsLoaded {
@@ -1710,6 +1718,7 @@ async fn run_request(client: &ApiClient, ws_key: String, request: ApiRequest) ->
             result: Err(anyhow!("dsh request routed to an opencode server")),
         },
         ApiRequest::ListModels => UiEvent::ModelsLoaded {
+            harness: HarnessKind::OpenCode,
             result: client.get_models().await,
         },
         ApiRequest::ListAgents => UiEvent::AgentsLoaded {

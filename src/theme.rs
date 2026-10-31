@@ -5,8 +5,8 @@
 //! text-size variant rescales the whole UI.
 
 pub use warpui_kit_core::fonts::{
-    code_font, font_tokens, normalize_font_scale, ui_font, FontTokens, FONT_COMPACT, FONT_LARGE,
-    FONT_NORMAL,
+    FONT_COMPACT, FONT_LARGE, FONT_NORMAL, FontTokens, code_font, font_tokens,
+    normalize_font_scale, ui_font,
 };
 // every shared color const stays reachable as `theme::X`
 pub use warpui_kit_core::palette::*;

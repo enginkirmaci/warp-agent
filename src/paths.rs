@@ -2,8 +2,8 @@
 //! ui.json and the rolling logs. On first run the legacy ~/.config/opencode-agent
 //! files migrate over, so workspaces, pins and settings survive the move.
 
-use std::path::PathBuf;
 use std::fs;
+use std::path::PathBuf;
 
 pub struct AppPaths;
 
@@ -41,14 +41,21 @@ impl AppPaths {
             .join("share")
             .join("opencode-agent")
             .join(file_name);
-        let Ok(metadata) = fs::metadata(&legacy) else { return };
+        let Ok(metadata) = fs::metadata(&legacy) else {
+            return;
+        };
         if !metadata.is_file() {
             return;
         }
-        if let Err(err) = fs::create_dir_all(Self::config_dir()).and_then(|_| fs::copy(&legacy, &target)) {
+        if let Err(err) =
+            fs::create_dir_all(Self::config_dir()).and_then(|_| fs::copy(&legacy, &target))
+        {
             tracing::warn!("could not migrate legacy {file_name}: {err}");
         } else {
-            tracing::info!("migrated {file_name} from the legacy directory to {}", Self::config_dir().display());
+            tracing::info!(
+                "migrated {file_name} from the legacy directory to {}",
+                Self::config_dir().display()
+            );
         }
     }
 }

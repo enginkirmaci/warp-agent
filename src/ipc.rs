@@ -5,7 +5,7 @@
 //! the UiEvent pump and answers ride a oneshot back to the wire.
 
 use rand::RngCore;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -42,8 +42,15 @@ fn token_file_in(dir: &Path) -> PathBuf {
 
 /// The door endpoint as currently published; None until an instance binds.
 pub fn read_endpoint() -> Option<(u16, String)> {
-    let port = std::fs::read_to_string(port_file()).ok()?.trim().parse().ok()?;
-    let token = std::fs::read_to_string(token_file()).ok()?.trim().to_string();
+    let port = std::fs::read_to_string(port_file())
+        .ok()?
+        .trim()
+        .parse()
+        .ok()?;
+    let token = std::fs::read_to_string(token_file())
+        .ok()?
+        .trim()
+        .to_string();
     if token.is_empty() {
         return None;
     }
@@ -58,7 +65,10 @@ pub type Reply = oneshot::Sender<Result<Value, String>>;
 /// A door command bound for the store. Ping never gets here — the
 /// connection answers it locally.
 pub enum IpcCommand {
-    OpenWorkspace { path: String, reply: Reply },
+    OpenWorkspace {
+        path: String,
+        reply: Reply,
+    },
     NewChat {
         workspace: String,
         prefill: String,
@@ -68,10 +78,23 @@ pub enum IpcCommand {
     },
     /// `run` is the wire request id. The reply fires only when the turn
     /// idles (or dies), not when the prompt is accepted.
-    RunPrompt { run: u64, workspace: String, prompt: String, model: Option<String>, reply: Reply },
-    CancelRun { run: u64, reply: Reply },
-    Models { reply: Reply },
-    Status { reply: Reply },
+    RunPrompt {
+        run: u64,
+        workspace: String,
+        prompt: String,
+        model: Option<String>,
+        reply: Reply,
+    },
+    CancelRun {
+        run: u64,
+        reply: Reply,
+    },
+    Models {
+        reply: Reply,
+    },
+    Status {
+        reply: Reply,
+    },
 }
 
 /// The bound door; held by the net thread so `unpublish` can tell our files
@@ -104,11 +127,14 @@ pub async fn start_in(
     rand::rng().fill_bytes(&mut bytes);
     let token = bytes.iter().map(|b| format!("{b:02x}")).collect::<String>();
     std::fs::create_dir_all(&dir)?;
-    // token first: a reader that sees a port is entitled to its token
+    // token first: a reader that sees a port is entitled to its token. Both
+    // files are created 0o600 — restricting after a default-mode write leaves
+    // a window where the token is world-readable (restrict_perms stays as
+    // belt-and-braces and now reports if it cannot confirm).
     let token_path = token_file_in(&dir);
-    std::fs::write(&token_path, &token)?;
+    write_private(&token_path, &token)?;
     restrict_perms(&token_path);
-    std::fs::write(port_file_in(&dir), format!("{port}\n"))?;
+    write_private(&port_file_in(&dir), &format!("{port}\n"))?;
     restrict_perms(&port_file_in(&dir));
     tokio::spawn(accept_loop(listener, event_tx, events, token.clone()));
     Ok(Door { port, token, dir })
@@ -127,10 +153,32 @@ pub fn unpublish(door: &Door) {
     }
 }
 
+/// Creates `path` with 0o600 already in place on Unix — the mode is set on
+/// the open, so no world-readable window exists before a later chmod.
+#[cfg(unix)]
+fn write_private(path: &Path, data: &str) -> std::io::Result<()> {
+    use std::io::Write as _;
+    use std::os::unix::fs::OpenOptionsExt as _;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)?;
+    file.write_all(data.as_bytes())
+}
+
+#[cfg(not(unix))]
+fn write_private(path: &Path, data: &str) -> std::io::Result<()> {
+    std::fs::write(path, data)
+}
+
 #[cfg(unix)]
 fn restrict_perms(path: &Path) {
     use std::os::unix::fs::PermissionsExt;
-    let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+    if let Err(err) = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)) {
+        tracing::warn!("could not restrict {}: {err}", path.display());
+    }
 }
 
 #[cfg(not(unix))]
@@ -143,9 +191,27 @@ async fn accept_loop(
     token: String,
 ) {
     loop {
-        let Ok((stream, _)) = listener.accept().await else { break };
-        tokio::spawn(handle_conn(stream, event_tx.clone(), events.subscribe(), token.clone()));
+        let Ok((stream, _)) = listener.accept().await else {
+            break;
+        };
+        tokio::spawn(handle_conn(
+            stream,
+            event_tx.clone(),
+            events.subscribe(),
+            token.clone(),
+        ));
     }
+}
+
+/// Length-checked, byte-folded compare: no early exit on content, so the
+/// auth response's timing carries no prefix information about the token.
+fn token_matches(provided: &str, token: &str) -> bool {
+    provided.len() == token.len()
+        && provided
+            .bytes()
+            .zip(token.bytes())
+            .fold(0u8, |acc, (x, y)| acc | (x ^ y))
+            == 0
 }
 
 async fn handle_conn(
@@ -161,13 +227,20 @@ async fn handle_conn(
     let mut reader = BufReader::new(read);
 
     // auth handshake: one line, then the door stays NDJSON forever
-    let Some(line) = read_line(&mut reader).await else { return };
-    let authed = serde_json::from_str::<Value>(&line)
-        .ok()
-        .and_then(|v| v.get("auth").and_then(Value::as_str).map(str::to_string))
-        .is_some_and(|auth| auth == token);
+    let Some(line) = read_line(&mut reader).await else {
+        return;
+    };
+    let authed = match serde_json::from_str::<Value>(&line) {
+        Ok(value) => value
+            .get("auth")
+            .and_then(Value::as_str)
+            .is_some_and(|auth| token_matches(auth, &token)),
+        Err(_) => false,
+    };
     if !authed {
-        let _ = lines_tx.send(json!({"ok": false, "error": "auth"}).to_string()).await;
+        let _ = lines_tx
+            .send(json!({"ok": false, "error": "auth"}).to_string())
+            .await;
         return;
     }
     let _ = lines_tx.send(json!({"ok": true}).to_string()).await;
@@ -208,7 +281,12 @@ async fn handle_conn(
         };
         // run-prompt's reply can take minutes: every request runs as its own
         // task so the connection keeps reading (cancel is a new frame)
-        tokio::spawn(serve_request(request, id, event_tx.clone(), lines_tx.clone()));
+        tokio::spawn(serve_request(
+            request,
+            id,
+            event_tx.clone(),
+            lines_tx.clone(),
+        ));
     }
 }
 
@@ -242,8 +320,17 @@ async fn serve_request(
     event_tx: async_channel::Sender<UiEvent>,
     lines: tokio::sync::mpsc::Sender<String>,
 ) {
-    let cmd = request.get("cmd").and_then(Value::as_str).unwrap_or("").to_string();
-    let field = |name: &str| request.get(name).and_then(Value::as_str).map(str::to_string);
+    let cmd = request
+        .get("cmd")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let field = |name: &str| {
+        request
+            .get(name)
+            .and_then(Value::as_str)
+            .map(str::to_string)
+    };
     let required = |name: &str| -> Option<String> {
         let value = field(name)?;
         (!value.trim().is_empty()).then_some(value)
@@ -252,11 +339,19 @@ async fn serve_request(
 
     let command = match cmd.as_str() {
         "ping" => {
-            let _ = reply(&lines, id, Ok(json!({"version": PROTOCOL, "app": "warp-agent"}))).await;
+            let _ = reply(
+                &lines,
+                id,
+                Ok(json!({"version": PROTOCOL, "app": "warp-agent"})),
+            )
+            .await;
             return;
         }
         "open-workspace" => match required("path") {
-            Some(path) => Some(IpcCommand::OpenWorkspace { path, reply: reply_tx }),
+            Some(path) => Some(IpcCommand::OpenWorkspace {
+                path,
+                reply: reply_tx,
+            }),
             None => {
                 let _ = reply(&lines, id, Err("path is required".into())).await;
                 return;
@@ -264,7 +359,10 @@ async fn serve_request(
         },
         "new-chat" => {
             let workspace = field("workspace").unwrap_or_else(|| "general".into());
-            let auto_send = request.get("auto_send").and_then(Value::as_bool).unwrap_or(false);
+            let auto_send = request
+                .get("auto_send")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
             Some(IpcCommand::NewChat {
                 workspace,
                 prefill: field("prefill").unwrap_or_default(),
@@ -287,7 +385,10 @@ async fn serve_request(
             }
         },
         "cancel" => match request.get("run").and_then(Value::as_u64) {
-            Some(run) => Some(IpcCommand::CancelRun { run, reply: reply_tx }),
+            Some(run) => Some(IpcCommand::CancelRun {
+                run,
+                reply: reply_tx,
+            }),
             None => {
                 let _ = reply(&lines, id, Err("run is required".into())).await;
                 return;
@@ -332,7 +433,11 @@ async fn reply(
             let mut frame = json!({"id": id, "ok": true});
             if let (Some(target), Some(extra)) = (frame.as_object_mut(), payload.as_object()) {
                 for (key, value) in extra {
-                    target.insert(key.clone(), value.clone());
+                    // id/ok are the reserved framing fields — a payload that
+                    // ever grew one would corrupt the answer for every client
+                    if key != "id" && key != "ok" {
+                        target.insert(key.clone(), value.clone());
+                    }
                 }
             }
             frame
@@ -348,8 +453,12 @@ async fn reply(
 /// liveness probe when there are none) and report true so the caller can
 /// exit. Stale files simply fail to connect.
 pub fn try_forward(folders: &[String]) -> bool {
-    let Some((port, token)) = read_endpoint() else { return false };
-    let Ok(mut stream) = std::net::TcpStream::connect(("127.0.0.1", port)) else { return false };
+    let Some((port, token)) = read_endpoint() else {
+        return false;
+    };
+    let Ok(mut stream) = std::net::TcpStream::connect(("127.0.0.1", port)) else {
+        return false;
+    };
     let _ = stream.set_nodelay(true);
     let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
     let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
@@ -378,7 +487,10 @@ pub fn try_forward(folders: &[String]) -> bool {
     if !say(&mut stream, &json!({"auth": token})) {
         return false;
     }
-    let Some(Some(welcome)) = hear(&mut stream).map(|v| v.get("ok").and_then(Value::as_bool)) else { return false };
+    let Some(Some(welcome)) = hear(&mut stream).map(|v| v.get("ok").and_then(Value::as_bool))
+    else {
+        return false;
+    };
     if !welcome {
         return false;
     }
@@ -386,13 +498,21 @@ pub fn try_forward(folders: &[String]) -> bool {
     if !say(&mut stream, &json!({"id": 1, "cmd": "ping"})) {
         return false;
     }
-    let Some(Some(true)) = hear(&mut stream).map(|v| v.get("ok").and_then(Value::as_bool)) else { return false };
+    let Some(Some(true)) = hear(&mut stream).map(|v| v.get("ok").and_then(Value::as_bool)) else {
+        return false;
+    };
     for (index, folder) in folders.iter().enumerate() {
         let id = index as u64 + 2;
-        if !say(&mut stream, &json!({"id": id, "cmd": "open-workspace", "path": folder})) {
+        if !say(
+            &mut stream,
+            &json!({"id": id, "cmd": "open-workspace", "path": folder}),
+        ) {
             return false;
         }
-        let Some(Some(true)) = hear(&mut stream).map(|v| v.get("ok").and_then(Value::as_bool)) else { return false };
+        let Some(Some(true)) = hear(&mut stream).map(|v| v.get("ok").and_then(Value::as_bool))
+        else {
+            return false;
+        };
     }
     true
 }
@@ -403,10 +523,8 @@ mod tests {
 
     /// A disposable publish dir under the system temp dir.
     fn scratch_dir(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "warp-agent-ipc-test-{}-{tag}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("warp-agent-ipc-test-{}-{tag}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
@@ -435,7 +553,9 @@ mod tests {
     async fn say(stream: &mut BufReader<TcpStream>, value: Value) {
         use tokio::io::AsyncWriteExt;
         let raw = stream.get_mut();
-        raw.write_all(format!("{value}\n").as_bytes()).await.unwrap();
+        raw.write_all(format!("{value}\n").as_bytes())
+            .await
+            .unwrap();
         raw.flush().await.unwrap();
     }
 
@@ -450,7 +570,9 @@ mod tests {
         let dir = scratch_dir("roundtrip");
         let (event_tx, event_rx) = async_channel::unbounded::<UiEvent>();
         let (broadcast_tx, _) = broadcast::channel::<String>(16);
-        let door = start_in(dir.clone(), event_tx, broadcast_tx.clone()).await.unwrap();
+        let door = start_in(dir.clone(), event_tx, broadcast_tx.clone())
+            .await
+            .unwrap();
         tokio::spawn(fake_store(event_rx));
 
         // wrong token: refused and closed
@@ -472,7 +594,11 @@ mod tests {
         assert!(ping["ok"].as_bool().unwrap());
         assert_eq!(ping["version"], PROTOCOL);
 
-        say(&mut good, json!({"id": 2, "cmd": "open-workspace", "path": "/tmp"})).await;
+        say(
+            &mut good,
+            json!({"id": 2, "cmd": "open-workspace", "path": "/tmp"}),
+        )
+        .await;
         let opened = hear(&mut good).await;
         assert_eq!(opened["id"], 2);
         assert!(opened["ok"].as_bool().unwrap());
@@ -508,8 +634,14 @@ mod tests {
         std::fs::write(port_file_in(&dir), "59999\n").unwrap();
         std::fs::write(token_file_in(&dir), "newer-token\n").unwrap();
         unpublish(&old);
-        assert_eq!(std::fs::read_to_string(port_file_in(&dir)).unwrap().trim(), "59999");
-        assert_eq!(std::fs::read_to_string(token_file_in(&dir)).unwrap().trim(), "newer-token");
+        assert_eq!(
+            std::fs::read_to_string(port_file_in(&dir)).unwrap().trim(),
+            "59999"
+        );
+        assert_eq!(
+            std::fs::read_to_string(token_file_in(&dir)).unwrap().trim(),
+            "newer-token"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

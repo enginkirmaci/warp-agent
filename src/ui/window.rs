@@ -3,18 +3,21 @@
 
 use crate::store::{Store, WorkspaceItem};
 use crate::theme;
-use gpui_kit::component::input::{Input, InputEvent, InputState};
-use crate::ui::controls::{self, menu_row, popover_card, BtnKind};
-use warpui_kit_picker::{
-    model_name, model_provider, FilteredPicker, OverlayAnchor, PanelChrome, PickerBody, PickerData,
-    PickerIcons, PickerItem, PickerRow, PickerSpec, PickerTarget, Selection, TriggerScale,
-};
+use crate::ui::controls::{self, BtnKind, menu_row, popover_card};
 use crate::ui::settings::SettingsBuffers;
 use crate::ui::tile::TileView;
 use crate::ui::tooltip::{self, tip};
 use gpui::prelude::*;
-use gpui::{canvas, div, px, App, Context, Entity, Focusable, MouseButton, Render, Role, SharedString, StyleRefinement, Toggled, Window, WindowControlArea};
+use gpui::{
+    App, Context, Entity, Focusable, MouseButton, Render, Role, SharedString, StyleRefinement,
+    Toggled, Window, WindowControlArea, canvas, div, px,
+};
+use gpui_kit::component::input::{Input, InputEvent, InputState};
 use std::collections::HashMap;
+use warpui_kit_picker::{
+    FilteredPicker, OverlayAnchor, PanelChrome, PickerBody, PickerData, PickerIcons, PickerItem,
+    PickerRow, PickerSpec, PickerTarget, Selection, TriggerScale, model_name, model_provider,
+};
 
 #[derive(Clone)]
 pub enum SideMenuAction {
@@ -79,7 +82,11 @@ fn ws_menu_rows(store: &Store, path: &str) -> Vec<SideMenuAction> {
 fn chat_menu_rows(store: &Store, id: &str) -> Vec<SideMenuAction> {
     let pinned = store.ui.pins.contains_key(id);
     vec![
-        if pinned { SideMenuAction::UnpinChat(id.into()) } else { SideMenuAction::PinChat(id.into()) },
+        if pinned {
+            SideMenuAction::UnpinChat(id.into())
+        } else {
+            SideMenuAction::PinChat(id.into())
+        },
         SideMenuAction::RenameChat(id.into()),
         SideMenuAction::UnlinkChat(id.into()),
         SideMenuAction::DeleteChat(id.into()),
@@ -246,7 +253,10 @@ impl Render for WarpWindow {
             let mut rows = div().flex().flex_col();
             for (i, row) in menu.rows.iter().enumerate() {
                 let action = row.clone();
-                let destructive = matches!(action, SideMenuAction::DeleteChat(_) | SideMenuAction::RemoveWorkspace(_));
+                let destructive = matches!(
+                    action,
+                    SideMenuAction::DeleteChat(_) | SideMenuAction::RemoveWorkspace(_)
+                );
                 rows = rows.child(menu_row(
                     gpui::ElementId::NamedInteger("menu".into(), i as u64),
                     action.label(),
@@ -260,20 +270,20 @@ impl Render for WarpWindow {
                     },
                 ));
             }
-        root = root.child(
-            div()
-                .id("menu-catcher")
-                .absolute()
-                .inset_0()
-                // hitbox hover is geometric in gpui: without occlusion the
-                // sidebar row under a menu item receives the same click
-                .occlude()
-                // dismiss on full click, not mouse-down: a down-handler here
-                // unmounts the menu rows before their on_click (mouse-up) runs
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.menu = None;
-                    cx.notify();
-                }))
+            root = root.child(
+                div()
+                    .id("menu-catcher")
+                    .absolute()
+                    .inset_0()
+                    // hitbox hover is geometric in gpui: without occlusion the
+                    // sidebar row under a menu item receives the same click
+                    .occlude()
+                    // dismiss on full click, not mouse-down: a down-handler here
+                    // unmounts the menu rows before their on_click (mouse-up) runs
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.menu = None;
+                        cx.notify();
+                    }))
                     .child(
                         div()
                             .absolute()
@@ -336,8 +346,22 @@ fn zoom_icon(maximized: bool, color: gpui::Rgba) -> gpui::AnyElement {
     div().size(px(14.)).child(gauge).into_any_element()
 }
 
+/// The settings-page composer state: labeled buffers, labeled leaves and the
+/// optional model picker.
+type SettingsFields = (
+    Vec<(&'static str, Entity<InputState>)>,
+    Vec<(&'static str, Entity<InputLeaf>)>,
+    Option<Entity<FilteredPicker>>,
+);
+
 impl WarpWindow {
-    fn sync_rename_field(&mut self, editing: Option<String>, draft: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
+    fn sync_rename_field(
+        &mut self,
+        editing: Option<String>,
+        draft: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         match (editing, &self.rename) {
             (Some(id), None) => {
                 let entity = cx.new(|cx| {
@@ -360,7 +384,10 @@ impl WarpWindow {
                 .detach();
                 // per-keystroke renderer as its own leaf: typing in the
                 // rename field must not re-render the window
-                let leaf = cx.new(|_| InputLeaf { state: entity.clone(), disabled: false });
+                let leaf = cx.new(|_| InputLeaf {
+                    state: entity.clone(),
+                    disabled: false,
+                });
                 self.rename = Some((id, entity, leaf));
             }
             (None, Some(_)) => {
@@ -404,14 +431,22 @@ impl WarpWindow {
                     .items_center()
                     .justify_center()
                     .size(px(30.))
-                    .child(crate::ui::icon("icons/spark.svg", px(fonts.icon_large), theme::TEXT)),
+                    .child(crate::ui::icon(
+                        "icons/spark.svg",
+                        px(fonts.icon_large),
+                        theme::TEXT,
+                    )),
             )
             .child(
                 tip(
                     div()
                         .id("toggle-sidebar")
                         .role(Role::Button)
-                        .aria_label(if visible { "Hide sidebar" } else { "Show sidebar" })
+                        .aria_label(if visible {
+                            "Hide sidebar"
+                        } else {
+                            "Show sidebar"
+                        })
                         .cursor_pointer()
                         .size(px(26.))
                         .rounded_md()
@@ -420,14 +455,27 @@ impl WarpWindow {
                         .justify_center()
                         .hover(|s| s.bg(theme::HOVER))
                         .on_click(move |_, _, cx| {
-                            store_handle.update(cx, |s, cx| s.set_sidebar_visible(!s.sidebar_visible, cx));
+                            store_handle
+                                .update(cx, |s, cx| s.set_sidebar_visible(!s.sidebar_visible, cx));
                         }),
-                    if visible { "Hide sidebar" } else { "Show sidebar" },
+                    if visible {
+                        "Hide sidebar"
+                    } else {
+                        "Show sidebar"
+                    },
                 )
                 .child(if visible {
-                    crate::ui::icon("icons/panel-left.svg", px(fonts.icon_medium), theme::TEXT_MUTED)
+                    crate::ui::icon(
+                        "icons/panel-left.svg",
+                        px(fonts.icon_medium),
+                        theme::TEXT_MUTED,
+                    )
                 } else {
-                    crate::ui::icon("icons/panel-left-open.svg", px(fonts.icon_medium), theme::TEXT_MUTED)
+                    crate::ui::icon(
+                        "icons/panel-left-open.svg",
+                        px(fonts.icon_medium),
+                        theme::TEXT_MUTED,
+                    )
                 }),
             )
             .child(
@@ -459,7 +507,11 @@ impl WarpWindow {
                         .on_click(|_, window, _| window.minimize_window()),
                     "Minimize",
                 )
-                .child(crate::ui::icon("icons/dash.svg", px(fonts.icon_medium), theme::TEXT_MUTED)),
+                .child(crate::ui::icon(
+                    "icons/dash.svg",
+                    px(fonts.icon_medium),
+                    theme::TEXT_MUTED,
+                )),
             )
             .child(
                 tip(
@@ -500,7 +552,11 @@ impl WarpWindow {
                         .on_click(|_, window, _| window.remove_window()),
                     "Close",
                 )
-                .child(crate::ui::icon("icons/close.svg", px(fonts.icon_medium), theme::TEXT_MUTED)),
+                .child(crate::ui::icon(
+                    "icons/close.svg",
+                    px(fonts.icon_medium),
+                    theme::TEXT_MUTED,
+                )),
             )
             .into_any_element()
     }
@@ -508,7 +564,6 @@ impl WarpWindow {
     // ---- sidebar ---------------------------------------------------------------
 
     fn render_sidebar(&mut self, window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
-
         let (fonts, width) = {
             let store = self.store.read(cx);
             (store.fonts, store.sidebar_shown_width)
@@ -526,7 +581,10 @@ impl WarpWindow {
                 }
             })
             .detach();
-            self.sidebar_filter_leaf = Some(cx.new(|_| InputLeaf { state, disabled: false }));
+            self.sidebar_filter_leaf = Some(cx.new(|_| InputLeaf {
+                state,
+                disabled: false,
+            }));
         }
         let filter = self.sidebar_filter.to_lowercase();
         let filter_leaf = self.sidebar_filter_leaf.clone().unwrap();
@@ -620,7 +678,11 @@ impl WarpWindow {
                                 })),
                             "Add a workspace folder",
                         )
-                        .child(crate::ui::icon("icons/plus.svg", px(fonts.icon_medium), theme::TEXT_MUTED)),
+                        .child(crate::ui::icon(
+                            "icons/plus.svg",
+                            px(fonts.icon_medium),
+                            theme::TEXT_MUTED,
+                        )),
                     ),
             )
             .child(
@@ -667,8 +729,10 @@ impl WarpWindow {
                             this.store.update(cx, |s, _| {
                                 s.is_settings_open = true;
                             });
-                            this.settings_buffers = SettingsBuffers::from_settings(&this.store.read(cx).settings);
-                            let (fields, leafs, model_picker) = this.make_settings_fields(window, cx);
+                            this.settings_buffers =
+                                SettingsBuffers::from_settings(&this.store.read(cx).settings);
+                            let (fields, leafs, model_picker) =
+                                this.make_settings_fields(window, cx);
                             this.settings_fields = fields;
                             this.settings_leafs = leafs;
                             this.settings_model_picker = model_picker;
@@ -676,7 +740,11 @@ impl WarpWindow {
                         })),
                     "Settings",
                 )
-                .child(crate::ui::icon("icons/cog.svg", px(fonts.icon_medium), theme::TEXT_MUTED))
+                .child(crate::ui::icon(
+                    "icons/cog.svg",
+                    px(fonts.icon_medium),
+                    theme::TEXT_MUTED,
+                ))
                 .child(
                     div()
                         .text_size(px(fonts.font_small))
@@ -687,15 +755,34 @@ impl WarpWindow {
             .into_any_element()
     }
 
-    fn render_workspace_row(&mut self, ws: &WorkspaceItem, cx: &mut Context<Self>) -> gpui::AnyElement {
+    fn render_workspace_row(
+        &mut self,
+        ws: &WorkspaceItem,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
         let fonts = self.store.read(cx).fonts;
         let path = ws.folder_path().to_string();
         let glyph: gpui::AnyElement = if ws.is_general() {
-            crate::ui::icon("icons/chat-outline.svg", px(fonts.icon_body), theme::TEXT_MUTED).into_any_element()
+            crate::ui::icon(
+                "icons/chat-outline.svg",
+                px(fonts.icon_body),
+                theme::TEXT_MUTED,
+            )
+            .into_any_element()
         } else if ws.is_expanded() {
-            crate::ui::icon("icons/folder-open-outline.svg", px(fonts.icon_body), theme::TEXT_MUTED).into_any_element()
+            crate::ui::icon(
+                "icons/folder-open-outline.svg",
+                px(fonts.icon_body),
+                theme::TEXT_MUTED,
+            )
+            .into_any_element()
         } else {
-            crate::ui::icon("icons/folder-outline.svg", px(fonts.icon_body), theme::TEXT_MUTED).into_any_element()
+            crate::ui::icon(
+                "icons/folder-outline.svg",
+                px(fonts.icon_body),
+                theme::TEXT_MUTED,
+            )
+            .into_any_element()
         };
 
         let ws_store = self.store.clone();
@@ -710,7 +797,10 @@ impl WarpWindow {
         let path_new = path.clone();
 
         div()
-            .id(gpui::ElementId::NamedInteger("ws".into(), TileView::hash(&path)))
+            .id(gpui::ElementId::NamedInteger(
+                "ws".into(),
+                TileView::hash(&path),
+            ))
             .role(Role::Button)
             .aria_label(SharedString::from(ws.name.clone()))
             .aria_expanded(ws.is_expanded())
@@ -728,7 +818,11 @@ impl WarpWindow {
                 let expand_path = path_click.clone();
                 ws_store.update(cx, |s, cx| {
                     s.select_workspace(&expand_path, cx);
-                    if let Some(ws) = s.workspaces.iter_mut().find(|w| w.folder_path() == expand_path) {
+                    if let Some(ws) = s
+                        .workspaces
+                        .iter_mut()
+                        .find(|w| w.folder_path() == expand_path)
+                    {
                         let expanding = !ws.is_expanded();
                         ws.set_expanded(expanding);
                         if expanding {
@@ -739,15 +833,22 @@ impl WarpWindow {
                     cx.notify();
                 });
             })
-            .on_mouse_down(MouseButton::Right, move |event: &gpui::MouseDownEvent, _, cx| {
-                let rows = {
-                    let s = menu_store.read(cx);
-                    ws_menu_rows(s, &menu_path)
-                };
-                let _ = menu_tx.send_blocking(MenuState { x: event.position.x.as_f32(), y: event.position.y.as_f32(), rows });
-                // right-click alone doesn't repaint — nudge the store so the menu shows now
-                menu_store.update(cx, |_, _| {});
-            })
+            .on_mouse_down(
+                MouseButton::Right,
+                move |event: &gpui::MouseDownEvent, _, cx| {
+                    let rows = {
+                        let s = menu_store.read(cx);
+                        ws_menu_rows(s, &menu_path)
+                    };
+                    let _ = menu_tx.send_blocking(MenuState {
+                        x: event.position.x.as_f32(),
+                        y: event.position.y.as_f32(),
+                        rows,
+                    });
+                    // right-click alone doesn't repaint — nudge the store so the menu shows now
+                    menu_store.update(cx, |_, _| {});
+                },
+            )
             .child(glyph)
             // no flex_1: the row packs left so the count hugs the name; a long
             // name shrinks (min_w_0) and truncates instead of pushing the
@@ -800,56 +901,78 @@ impl WarpWindow {
                     .gap_0p5()
                     .opacity(0.)
                     .group_hover("wsrow", |s| s.opacity(1.))
-                            .child(
-                                tip(
-                                    div()
-                                        .id(gpui::ElementId::NamedInteger("ws-kebab".into(), TileView::hash(&path)))
-                                        .role(Role::Button)
-                                        .aria_label(SharedString::from(format!("{} — workspace actions", ws.name)))
-                                        .cursor_pointer()
-                                        .p_1()
-                                        .rounded_sm()
-                                        .hover(|s| s.bg(theme::HOVER))
-                                        .on_click(move |event, _, cx| {
-                                            // menu only — the row must not toggle expansion
-                                            cx.stop_propagation();
-                                            let rows = {
-                                                let s = menu_store2.read(cx);
-                                                ws_menu_rows(s, &menu_path2)
-                                            };
-                                            let (x, y) = match event {
-                                                gpui::ClickEvent::Mouse(click) => (click.up.position.x.as_f32(), click.up.position.y.as_f32()),
-                                                _ => (40.0, 60.0),
-                                            };
-                                            let _ = menu_tx2.send_blocking(MenuState { x, y, rows });
-                                            // menu paints on the next store-driven repaint — same nudge as right-click
-                                            menu_store2.update(cx, |_, _| {});
-                                        }),
-                                    "Workspace actions",
-                                )
-                                .child(crate::ui::icon("icons/kebab.svg", px(fonts.icon_medium), theme::TEXT_MUTED)),
-                            )
-                            .child(
-                                tip(
-                                    div()
-                                        .id(gpui::ElementId::NamedInteger("ws-new".into(), TileView::hash(&path)))
-                                        .role(Role::Button)
-                                        .aria_label(SharedString::from(format!("New chat in {}", ws.name)))
-                                        .cursor_pointer()
-                                        .p_1()
-                                        .rounded_sm()
-                                        .hover(|s| s.bg(theme::HOVER))
-                                        .on_click(move |_, _, cx| {
-                                            // row under this button must not see the
-                                            // click — it toggles workspace expansion
-                                            cx.stop_propagation();
-                                            ws_store_new.update(cx, |s, cx| s.new_chat_for_workspace(&path_new, cx));
-                                        }),
-                                    "New chat",
-                                )
-                                .child(crate::ui::icon("icons/chat-outline.svg", px(fonts.icon_medium), theme::TEXT_MUTED)),
-                            ),
+                    .child(
+                        tip(
+                            div()
+                                .id(gpui::ElementId::NamedInteger(
+                                    "ws-kebab".into(),
+                                    TileView::hash(&path),
+                                ))
+                                .role(Role::Button)
+                                .aria_label(SharedString::from(format!(
+                                    "{} — workspace actions",
+                                    ws.name
+                                )))
+                                .cursor_pointer()
+                                .p_1()
+                                .rounded_sm()
+                                .hover(|s| s.bg(theme::HOVER))
+                                .on_click(move |event, _, cx| {
+                                    // menu only — the row must not toggle expansion
+                                    cx.stop_propagation();
+                                    let rows = {
+                                        let s = menu_store2.read(cx);
+                                        ws_menu_rows(s, &menu_path2)
+                                    };
+                                    let (x, y) = match event {
+                                        gpui::ClickEvent::Mouse(click) => (
+                                            click.up.position.x.as_f32(),
+                                            click.up.position.y.as_f32(),
+                                        ),
+                                        _ => (40.0, 60.0),
+                                    };
+                                    let _ = menu_tx2.send_blocking(MenuState { x, y, rows });
+                                    // menu paints on the next store-driven repaint — same nudge as right-click
+                                    menu_store2.update(cx, |_, _| {});
+                                }),
+                            "Workspace actions",
+                        )
+                        .child(crate::ui::icon(
+                            "icons/kebab.svg",
+                            px(fonts.icon_medium),
+                            theme::TEXT_MUTED,
+                        )),
                     )
+                    .child(
+                        tip(
+                            div()
+                                .id(gpui::ElementId::NamedInteger(
+                                    "ws-new".into(),
+                                    TileView::hash(&path),
+                                ))
+                                .role(Role::Button)
+                                .aria_label(SharedString::from(format!("New chat in {}", ws.name)))
+                                .cursor_pointer()
+                                .p_1()
+                                .rounded_sm()
+                                .hover(|s| s.bg(theme::HOVER))
+                                .on_click(move |_, _, cx| {
+                                    // row under this button must not see the
+                                    // click — it toggles workspace expansion
+                                    cx.stop_propagation();
+                                    ws_store_new.update(cx, |s, cx| {
+                                        s.new_chat_for_workspace(&path_new, cx)
+                                    });
+                                }),
+                            "New chat",
+                        )
+                        .child(crate::ui::icon(
+                            "icons/chat-outline.svg",
+                            px(fonts.icon_medium),
+                            theme::TEXT_MUTED,
+                        )),
+                    ),
+            )
             .into_any_element()
     }
 
@@ -865,13 +988,18 @@ impl WarpWindow {
             Some((ms, label)) if *ms == chat.updated_ms => label.clone(),
             _ => {
                 let label: SharedString = chat.updated_label().into();
-                self.sidebar_labels.insert(chat.id.clone(), (chat.updated_ms, label.clone()));
+                self.sidebar_labels
+                    .insert(chat.id.clone(), (chat.updated_ms, label.clone()));
                 label
             }
         }
     }
 
-    fn render_session_row(&mut self, chat: &crate::store::SessionItem, cx: &mut Context<Self>) -> gpui::AnyElement {
+    fn render_session_row(
+        &mut self,
+        chat: &crate::store::SessionItem,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
         let (fonts, accent_dim) = {
             let store = self.store.read(cx);
             (store.fonts, store.accent.dim)
@@ -885,15 +1013,20 @@ impl WarpWindow {
         let store_del = self.store.clone();
         let id_del = id.clone();
         let gutter: gpui::AnyElement = if chat.is_running {
-            crate::ui::icon("icons/spinner.svg", px(fonts.icon_small), theme::RUNNING).into_any_element()
+            crate::ui::icon("icons/spinner.svg", px(fonts.icon_small), theme::RUNNING)
+                .into_any_element()
         } else if chat.pin_visible() {
-            crate::ui::icon("icons/pin.svg", px(fonts.icon_xsmall), theme::TEXT_MUTED).into_any_element()
+            crate::ui::icon("icons/pin.svg", px(fonts.icon_xsmall), theme::TEXT_MUTED)
+                .into_any_element()
         } else {
             div().into_any_element()
         };
 
         let mut row = div()
-            .id(gpui::ElementId::NamedInteger("chat".into(), TileView::hash(&id)))
+            .id(gpui::ElementId::NamedInteger(
+                "chat".into(),
+                TileView::hash(&id),
+            ))
             .role(Role::Button)
             .aria_label(SharedString::from(chat.title.clone()))
             .aria_selected(chat.is_selected)
@@ -915,16 +1048,30 @@ impl WarpWindow {
                 tracing::info!("chat-row clicked {}", id_click);
                 store_click.update(cx, |s, cx| s.select_session(&id_click, cx));
             })
-            .on_mouse_down(MouseButton::Right, move |event: &gpui::MouseDownEvent, _, cx| {
-                let rows = {
-                    let s = menu_store.read(cx);
-                    chat_menu_rows(s, &id_menu)
-                };
-                let _ = menu_tx.send_blocking(MenuState { x: event.position.x.as_f32(), y: event.position.y.as_f32(), rows });
-                // right-click alone doesn't repaint — nudge the store so the menu shows now
-                menu_store.update(cx, |_, _| {});
-            })
-            .child(div().w(px(13.)).flex().items_center().justify_center().child(gutter));
+            .on_mouse_down(
+                MouseButton::Right,
+                move |event: &gpui::MouseDownEvent, _, cx| {
+                    let rows = {
+                        let s = menu_store.read(cx);
+                        chat_menu_rows(s, &id_menu)
+                    };
+                    let _ = menu_tx.send_blocking(MenuState {
+                        x: event.position.x.as_f32(),
+                        y: event.position.y.as_f32(),
+                        rows,
+                    });
+                    // right-click alone doesn't repaint — nudge the store so the menu shows now
+                    menu_store.update(cx, |_, _| {});
+                },
+            )
+            .child(
+                div()
+                    .w(px(13.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(gutter),
+            );
 
         if chat.is_editing {
             if let Some((_, _, leaf)) = &self.rename {
@@ -970,9 +1117,15 @@ impl WarpWindow {
                         .child(
                             tip(
                                 div()
-                                    .id(gpui::ElementId::NamedInteger("chat-del".into(), TileView::hash(&id)))
+                                    .id(gpui::ElementId::NamedInteger(
+                                        "chat-del".into(),
+                                        TileView::hash(&id),
+                                    ))
                                     .role(Role::Button)
-                                    .aria_label(SharedString::from(format!("Delete {}", chat.title)))
+                                    .aria_label(SharedString::from(format!(
+                                        "Delete {}",
+                                        chat.title
+                                    )))
                                     .cursor_pointer()
                                     .p_1()
                                     .rounded_sm()
@@ -984,7 +1137,11 @@ impl WarpWindow {
                                     }),
                                 "Delete chat",
                             )
-                            .child(crate::ui::icon("icons/trash.svg", px(fonts.icon_medium), theme::TEXT_MUTED)),
+                            .child(crate::ui::icon(
+                                "icons/trash.svg",
+                                px(fonts.icon_medium),
+                                theme::TEXT_MUTED,
+                            )),
                         ),
                 );
         }
@@ -1003,11 +1160,14 @@ impl WarpWindow {
             .h_full()
             .cursor_col_resize()
             .hover(|s| s.bg(theme::HOVER))
-            .on_mouse_down(MouseButton::Left, move |event: &gpui::MouseDownEvent, _, cx| {
-                let start_width = store_handle.read(cx).sidebar_shown_width;
-                drag_state.set(Some((event.position.x, start_width)));
-                cx.stop_propagation();
-            })
+            .on_mouse_down(
+                MouseButton::Left,
+                move |event: &gpui::MouseDownEvent, _, cx| {
+                    let start_width = store_handle.read(cx).sidebar_shown_width;
+                    drag_state.set(Some((event.position.x, start_width)));
+                    cx.stop_propagation();
+                },
+            )
             .child(
                 canvas(
                     // this gpui rev: canvas(prepaint, paint) — on_mouse_event must
@@ -1023,13 +1183,18 @@ impl WarpWindow {
                                     if phase != gpui::DispatchPhase::Bubble {
                                         return;
                                     }
-                                    let Some((start_x, start_width)) = drag.get() else { return };
+                                    let Some((start_x, start_width)) = drag.get() else {
+                                        return;
+                                    };
                                     match event.pressed_button {
                                         Some(MouseButton::Left) => {
                                             let delta = (event.position.x - start_x).as_f32();
                                             store.update(cx, |s, cx| {
                                                 s.sidebar_shown_width = (start_width + delta)
-                                                    .clamp(theme::SIDEBAR_MIN_WIDTH, theme::SIDEBAR_MAX_WIDTH);
+                                                    .clamp(
+                                                        theme::SIDEBAR_MIN_WIDTH,
+                                                        theme::SIDEBAR_MAX_WIDTH,
+                                                    );
                                                 cx.notify();
                                             });
                                         }
@@ -1059,10 +1224,10 @@ impl WarpWindow {
         });
         let tx = self.add_folder_sender.clone();
         cx.spawn(async move |_this, _cx| {
-            if let Ok(Ok(Some(paths))) = task.await {
-                if let Some(path) = paths.first() {
-                    let _ = tx.send_blocking(path.display().to_string());
-                }
+            if let Ok(Ok(Some(paths))) = task.await
+                && let Some(path) = paths.first()
+            {
+                let _ = tx.send_blocking(path.display().to_string());
             }
         })
         .detach();
@@ -1072,11 +1237,7 @@ impl WarpWindow {
         &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> (
-        Vec<(&'static str, Entity<InputState>)>,
-        Vec<(&'static str, Entity<InputLeaf>)>,
-        Option<Entity<FilteredPicker>>,
-    ) {
+    ) -> SettingsFields {
         let b = self.settings_buffers.clone();
         let rows: Vec<(&'static str, String)> = vec![
             ("executable", b.open_code_executable),
@@ -1098,14 +1259,25 @@ impl WarpWindow {
         let mut model_picker = None;
         for (key, value) in rows {
             if key == "model" {
-                let state = cx.new(|cx| InputState::new(window, cx).placeholder("").default_value(value));
+                let state = cx.new(|cx| {
+                    InputState::new(window, cx)
+                        .placeholder("")
+                        .default_value(value)
+                });
                 let store = self.store.clone();
                 let picker = settings_model_picker(state.clone(), store, window, cx);
                 fields.push((key, state));
                 model_picker = Some(picker);
             } else {
-                let entity = cx.new(|cx| InputState::new(window, cx).placeholder("").default_value(value));
-                let leaf = cx.new(|_| InputLeaf { state: entity.clone(), disabled: false });
+                let entity = cx.new(|cx| {
+                    InputState::new(window, cx)
+                        .placeholder("")
+                        .default_value(value)
+                });
+                let leaf = cx.new(|_| InputLeaf {
+                    state: entity.clone(),
+                    disabled: false,
+                });
                 fields.push((key, entity));
                 leafs.push((key, leaf));
             }
@@ -1133,7 +1305,9 @@ impl WarpWindow {
                 let state = leaf.read(cx).state.clone();
                 let value = state.read(cx).value().to_string();
                 div()
-                    .id(gpui::ElementId::Name(SharedString::from(format!("field-{key}"))))
+                    .id(gpui::ElementId::Name(SharedString::from(format!(
+                        "field-{key}"
+                    ))))
                     .role(Role::TextInput)
                     .track_focus(&state.read(cx).focus_handle(cx))
                     .aria_label(SharedString::from(format!("{key} field")))
@@ -1196,16 +1370,32 @@ impl WarpWindow {
                 .flex()
                 .items_center()
                 .justify_center()
-                .child(crate::ui::icon("icons/check.svg", px(fonts.icon_nano), theme::SURFACE))
+                .child(crate::ui::icon(
+                    "icons/check.svg",
+                    px(fonts.icon_nano),
+                    theme::SURFACE,
+                ))
                 .into_any_element()
         } else {
-            div().size(px(14.)).rounded_sm().border_1().border_color(theme::TEXT_MUTED).into_any_element()
+            div()
+                .size(px(14.))
+                .rounded_sm()
+                .border_1()
+                .border_color(theme::TEXT_MUTED)
+                .into_any_element()
         };
         div()
-            .id(gpui::ElementId::NamedInteger("chk".into(), TileView::hash(text)))
+            .id(gpui::ElementId::NamedInteger(
+                "chk".into(),
+                TileView::hash(text),
+            ))
             .role(Role::CheckBox)
             .aria_label(text)
-            .aria_toggled(if checked { Toggled::True } else { Toggled::False })
+            .aria_toggled(if checked {
+                Toggled::True
+            } else {
+                Toggled::False
+            })
             .flex()
             .items_center()
             .gap_2()
@@ -1239,7 +1429,10 @@ impl WarpWindow {
             let is_on = key == selected;
             row = row.child(
                 div()
-                    .id(gpui::ElementId::NamedInteger("radio".into(), TileView::hash(key)))
+                    .id(gpui::ElementId::NamedInteger(
+                        "radio".into(),
+                        TileView::hash(key),
+                    ))
                     .role(Role::RadioButton)
                     .aria_label(*label_text)
                     .aria_selected(is_on)
@@ -1252,9 +1445,18 @@ impl WarpWindow {
                         cx.notify();
                     }))
                     .child(if is_on {
-                        div().size(px(11.)).rounded_full().bg(accent).into_any_element()
+                        div()
+                            .size(px(11.))
+                            .rounded_full()
+                            .bg(accent)
+                            .into_any_element()
                     } else {
-                        div().size(px(11.)).rounded_full().border_1().border_color(theme::TEXT_MUTED).into_any_element()
+                        div()
+                            .size(px(11.))
+                            .rounded_full()
+                            .border_1()
+                            .border_color(theme::TEXT_MUTED)
+                            .into_any_element()
                     })
                     .child(
                         div()
@@ -1273,7 +1475,13 @@ impl WarpWindow {
         let fonts = self.store.read(cx).fonts;
 
         // keep TileView entities in sync with the store's tile list
-        let keys: Vec<String> = self.store.read(cx).open_tiles.iter().map(|t| t.key.clone()).collect();
+        let keys: Vec<String> = self
+            .store
+            .read(cx)
+            .open_tiles
+            .iter()
+            .map(|t| t.key.clone())
+            .collect();
         for key in &keys {
             if !self.tile_views.contains_key(key) {
                 let store_handle = self.store.clone();
@@ -1335,7 +1543,12 @@ impl WarpWindow {
 
         let (has_tiles, has_no_ws, has_idle_ws, has_running_ws) = {
             let store = self.store.read(cx);
-            (store.has_tiles(), store.has_no_workspace(), store.has_idle_workspace(), store.has_running_workspace())
+            (
+                store.has_tiles(),
+                store.has_no_workspace(),
+                store.has_idle_workspace(),
+                store.has_running_workspace(),
+            )
         };
         if !has_tiles {
             let hint = if has_no_ws {
@@ -1343,7 +1556,9 @@ impl WarpWindow {
             } else if has_idle_ws {
                 Some("Start the server to load your chats.")
             } else if has_running_ws {
-                Some("Open a chat from the sidebar, or start a new one with the + next to a workspace.")
+                Some(
+                    "Open a chat from the sidebar, or start a new one with the + next to a workspace.",
+                )
             } else {
                 None
             };
@@ -1356,14 +1571,18 @@ impl WarpWindow {
                         .flex_col()
                         .items_center()
                         .justify_center()
-                            .child(div().mb_4().child(crate::ui::icon("icons/spark.svg", px(64.), theme::TEXT)))
-                            .child(
-                                div()
-                                    .text_size(px(fonts.font_small))
-                                    .italic()
-                                    .text_color(theme::TEXT_FAINT)
-                                    .child(hint),
-                            ),
+                        .child(div().mb_4().child(crate::ui::icon(
+                            "icons/spark.svg",
+                            px(64.),
+                            theme::TEXT,
+                        )))
+                        .child(
+                            div()
+                                .text_size(px(fonts.font_small))
+                                .italic()
+                                .text_color(theme::TEXT_FAINT)
+                                .child(hint),
+                        ),
                 );
             }
         }
@@ -1390,7 +1609,11 @@ impl WarpWindow {
                     .px_3p5()
                     .py_1p5()
                     .shadow_lg()
-                    .child(crate::ui::icon("icons/clock.svg", px(fonts.icon_body), theme::TEXT_MUTED))
+                    .child(crate::ui::icon(
+                        "icons/clock.svg",
+                        px(fonts.icon_body),
+                        theme::TEXT_MUTED,
+                    ))
                     .child(
                         div()
                             .text_size(px(fonts.font_body))
@@ -1438,7 +1661,11 @@ impl WarpWindow {
 
     // ---- settings page ----
 
-    fn render_settings(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
+    fn render_settings(
+        &mut self,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
         let fonts = self.store.read(cx).fonts;
         let buffers = self.settings_buffers.clone();
 
@@ -1692,7 +1919,6 @@ impl Render for InputLeaf {
     }
 }
 
-
 // ---- the settings model picker ---------------------------------------------
 
 /// The app's icon paths for the shared picker shell.
@@ -1839,4 +2065,3 @@ fn model_data(
         show_tooltips: false,
     }
 }
-

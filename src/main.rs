@@ -1,6 +1,9 @@
 //! WarpAgent — a tile-grid chat client for opencode serve, on GPUI.
 // no console window behind the packaged Windows exe; debug builds keep it for logs
-#![cfg_attr(all(target_os = "windows", not(debug_assertions)), windows_subsystem = "windows")]
+#![cfg_attr(
+    all(target_os = "windows", not(debug_assertions)),
+    windows_subsystem = "windows"
+)]
 
 mod assets;
 mod dsh;
@@ -15,7 +18,7 @@ mod theme;
 mod ui;
 
 use gpui::prelude::*;
-use gpui::{px, size, App, Bounds, WindowBounds, WindowOptions};
+use gpui::{App, Bounds, WindowBounds, WindowOptions, px, size};
 use gpui_platform::application;
 use store::Store;
 use ui::window::WarpWindow;
@@ -58,9 +61,21 @@ fn main() {
                 // registration, while every other input keeps the stock
                 // editor up/down/enter/escape behavior
                 gpui::KeyBinding::new("up", ui::tile::ComposerSlashUp, Some("Composer > Input")),
-                gpui::KeyBinding::new("down", ui::tile::ComposerSlashDown, Some("Composer > Input")),
-                gpui::KeyBinding::new("enter", ui::tile::ComposerSlashEnter, Some("Composer > Input")),
-                gpui::KeyBinding::new("escape", ui::tile::ComposerSlashEscape, Some("Composer > Input")),
+                gpui::KeyBinding::new(
+                    "down",
+                    ui::tile::ComposerSlashDown,
+                    Some("Composer > Input"),
+                ),
+                gpui::KeyBinding::new(
+                    "enter",
+                    ui::tile::ComposerSlashEnter,
+                    Some("Composer > Input"),
+                ),
+                gpui::KeyBinding::new(
+                    "escape",
+                    ui::tile::ComposerSlashEscape,
+                    Some("Composer > Input"),
+                ),
             ]);
 
             let (_net_handle, net_sender, event_rx) = oc::spawn_net_thread();
@@ -71,7 +86,9 @@ fn main() {
                 let folders = folders.clone();
                 let launch_store = store.downgrade();
                 cx.spawn(async move |cx| {
-                    let Some(store) = launch_store.upgrade() else { return };
+                    let Some(store) = launch_store.upgrade() else {
+                        return;
+                    };
                     store.update(cx, |store, cx| {
                         for folder in &folders {
                             let _ = store.open_workspace_at(folder, cx);
@@ -105,7 +122,9 @@ fn main() {
                     match futures_util::future::select(recv.as_mut(), timeout).await {
                         futures_util::future::Either::Left((received, _)) => {
                             let Ok(first) = received else { break };
-                            let Some(store) = event_store.upgrade() else { break };
+                            let Some(store) = event_store.upgrade() else {
+                                break;
+                            };
                             let mut batch = 1;
                             store.update(cx, |s, cx| s.on_net_event(first, cx));
                             while batch < 64 {
@@ -126,14 +145,16 @@ fn main() {
 
             // count down auto-allow timers once per second
             let countdown_store = store.downgrade();
-            cx.spawn(async move |cx| loop {
-                cx.background_executor()
-                    .timer(std::time::Duration::from_secs(1))
-                    .await;
-                if let Some(store) = countdown_store.upgrade() {
-                    store.update(cx, |s, cx| s.tick_countdowns(cx));
-                } else {
-                    break;
+            cx.spawn(async move |cx| {
+                loop {
+                    cx.background_executor()
+                        .timer(std::time::Duration::from_secs(1))
+                        .await;
+                    if let Some(store) = countdown_store.upgrade() {
+                        store.update(cx, |s, cx| s.tick_countdowns(cx));
+                    } else {
+                        break;
+                    }
                 }
             })
             .detach();
@@ -169,6 +190,9 @@ fn main() {
                 if let Some(store) = shutdown_store.upgrade() {
                     store.update(cx, |s, _| s.shutdown());
                 }
+                // the services own OS children (the gsettings monitor) the
+                // store doesn't know about
+                services::shutdown();
                 cx.quit();
             })
             .detach();

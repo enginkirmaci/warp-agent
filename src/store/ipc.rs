@@ -3,9 +3,9 @@
 //! can watch — with a watcher that answers the door when the turn idles.
 
 use gpui::Context;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
-use super::{normalize_dir, Store};
+use super::{Store, normalize_dir};
 use crate::ipc::{IpcCommand, Reply};
 use crate::oc::{ApiRequest, NetCommand};
 use crate::paths::AppPaths;
@@ -26,10 +26,22 @@ impl Store {
             IpcCommand::OpenWorkspace { path, reply } => {
                 let _ = reply.send(self.open_workspace_at(&path, cx));
             }
-            IpcCommand::NewChat { workspace, prefill, auto_send, model, reply } => {
+            IpcCommand::NewChat {
+                workspace,
+                prefill,
+                auto_send,
+                model,
+                reply,
+            } => {
                 let _ = reply.send(self.ipc_new_chat(&workspace, prefill, auto_send, model, cx));
             }
-            IpcCommand::RunPrompt { run, workspace, prompt, model, reply } => {
+            IpcCommand::RunPrompt {
+                run,
+                workspace,
+                prompt,
+                model,
+                reply,
+            } => {
                 self.ipc_run_prompt(run, &workspace, prompt, model, reply, cx);
             }
             IpcCommand::CancelRun { run, reply } => {
@@ -44,7 +56,11 @@ impl Store {
 
     /// Opens a workspace from the door or a launch arg: adds it when
     /// missing ("workspace yoksa bağlanır"), connects its server, selects it.
-    pub fn open_workspace_at(&mut self, folder: &str, cx: &mut Context<Self>) -> Result<Value, String> {
+    pub fn open_workspace_at(
+        &mut self,
+        folder: &str,
+        cx: &mut Context<Self>,
+    ) -> Result<Value, String> {
         let path = self.ipc_resolve_workspace(folder)?;
         if !self.workspaces.iter().any(|w| w.folder_path() == path) {
             self.add_workspace(&path, cx);
@@ -64,7 +80,9 @@ impl Store {
     /// path that must exist on disk.
     fn ipc_resolve_workspace(&self, workspace: &str) -> Result<String, String> {
         if workspace.is_empty() || workspace == "general" {
-            return Ok(AppPaths::general_workspace_path().to_string_lossy().into_owned());
+            return Ok(AppPaths::general_workspace_path()
+                .to_string_lossy()
+                .into_owned());
         }
         let normalized = normalize_dir(workspace);
         if !std::path::Path::new(&normalized).exists() {
@@ -139,7 +157,15 @@ impl Store {
             return;
         }
         let tile_key = self.focused_tile.clone().unwrap_or_default();
-        self.ipc_runs.insert(run, IpcRun { workspace: path, tile_key, session_id: None, reply });
+        self.ipc_runs.insert(
+            run,
+            IpcRun {
+                workspace: path,
+                tile_key,
+                session_id: None,
+                reply,
+            },
+        );
         self.ipc_run_log(run, "prompt queued");
     }
 
@@ -175,7 +201,10 @@ impl Store {
             self.add_workspace(&path, cx);
         }
         if self.runtimes.contains_key(&path) {
-            self.net.send(NetCommand::Request { ws_key: path, request: ApiRequest::ListModels });
+            self.net.send(NetCommand::Request {
+                ws_key: path,
+                request: ApiRequest::ListModels,
+            });
         } else {
             // ServerStarted asks for the model list on its own
             self.start_workspace(&path, cx);
@@ -187,10 +216,13 @@ impl Store {
     pub fn ipc_last_assistant_text(&self, tile_key: &str) -> String {
         self.tile_by_key(tile_key)
             .and_then(|tile| {
-                tile.items.iter().rev().find_map(|item| match item.as_ref() {
-                    super::ChatItem::AssistantText { text, .. } => Some(text.clone()),
-                    _ => None,
-                })
+                tile.items
+                    .iter()
+                    .rev()
+                    .find_map(|item| match item.as_ref() {
+                        super::ChatItem::AssistantText { text, .. } => Some(text.clone()),
+                        _ => None,
+                    })
             })
             .unwrap_or_default()
     }
@@ -243,12 +275,17 @@ impl Store {
 
     /// Fans the current status snapshot out to every connected door client.
     pub fn ipc_push_status(&mut self) {
-        let frame = json!({"event": "status", "data": {"workspaces": self.ipc_status_workspaces()}});
-        self.net.send(NetCommand::IpcBroadcast { line: frame.to_string() });
+        let frame =
+            json!({"event": "status", "data": {"workspaces": self.ipc_status_workspaces()}});
+        self.net.send(NetCommand::IpcBroadcast {
+            line: frame.to_string(),
+        });
     }
 
     pub fn ipc_run_log(&self, run: u64, line: &str) {
         let frame = json!({"event": "run-log", "run": run, "line": line});
-        self.net.send(NetCommand::IpcBroadcast { line: frame.to_string() });
+        self.net.send(NetCommand::IpcBroadcast {
+            line: frame.to_string(),
+        });
     }
 }

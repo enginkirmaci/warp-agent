@@ -92,15 +92,33 @@ fn default_executable() -> String {
 fn default_dsh_executable() -> String {
     DEFAULT_DSH_EXECUTABLE.into()
 }
-fn d1() -> i64 { 1 }
-fn d15() -> i64 { 15 }
-fn d60() -> i64 { 60 }
-fn d600() -> i64 { 600 }
-fn h12() -> i64 { 12 }
-fn h14() -> i64 { 14 }
-fn h18() -> i64 { 18 }
-fn h8() -> i64 { 8 }
-fn tru() -> bool { true }
+fn d1() -> i64 {
+    1
+}
+fn d15() -> i64 {
+    15
+}
+fn d60() -> i64 {
+    60
+}
+fn d600() -> i64 {
+    600
+}
+fn h12() -> i64 {
+    12
+}
+fn h14() -> i64 {
+    14
+}
+fn h18() -> i64 {
+    18
+}
+fn h8() -> i64 {
+    8
+}
+fn tru() -> bool {
+    true
+}
 
 impl Default for AppSettings {
     fn default() -> Self {
@@ -225,7 +243,15 @@ fn read_json<T: serde::de::DeserializeOwned>(path: std::path::PathBuf) -> Option
     match serde_json::from_str(&text) {
         Ok(value) => Some(value),
         Err(err) => {
-            tracing::warn!("{} unreadable ({}); falling back to defaults", path.display(), err);
+            // move the corrupt file aside: falling back to defaults and then
+            // overwriting it would destroy whatever is left of the user's
+            // pins/workspaces/drafts with no trace
+            tracing::warn!(
+                "{} unreadable ({}); moving it aside, using defaults",
+                path.display(),
+                err
+            );
+            let _ = fs::rename(&path, path.with_extension("json.bad"));
             None
         }
     }
@@ -235,16 +261,14 @@ fn write_json_pretty<T: Serialize>(path: std::path::PathBuf, value: &T) {
     if let Some(parent) = path.parent() {
         let _ = fs::create_dir_all(parent);
     }
-    match serde_json::to_string_pretty(value) {
-        Ok(text) => {
-            let tmp = path.with_extension("json.tmp");
-            if fs::File::create(&tmp)
-                .and_then(|mut f| f.write_all(text.as_bytes()))
-                .is_ok()
-            {
-                let _ = fs::rename(&tmp, &path);
-            }
+    if let Ok(text) = serde_json::to_string_pretty(value) {
+        let tmp = path.with_extension("json.tmp");
+        match fs::File::create(&tmp)
+            .and_then(|mut f| f.write_all(text.as_bytes()))
+            .and_then(|()| fs::rename(&tmp, &path))
+        {
+            Ok(()) => {}
+            Err(err) => tracing::warn!("could not write {}: {err}", path.display()),
         }
-        Err(_) => {}
     }
 }

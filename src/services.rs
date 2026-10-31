@@ -2,8 +2,8 @@
 //! system text-scale follower.
 
 use crate::store::Store;
-use gpui::{App, Entity};
 use async_channel::bounded;
+use gpui::{App, Entity};
 
 /// Rust's fs::canonicalize hands back verbatim `\\?\`-prefixed paths on
 /// Windows; GUI consumers (explorer, `wt -d`, cmd's working directory) reject
@@ -47,7 +47,9 @@ pub fn launch_in_terminal(folder: &str, executable: &str) -> Result<(), String> 
                 tracing::info!("launched Windows Terminal running {executable} in {folder}");
                 return Ok(());
             }
-            Err(err) => tracing::warn!("Windows Terminal spawn failed ({err}); falling back to cmd"),
+            Err(err) => {
+                tracing::warn!("Windows Terminal spawn failed ({err}); falling back to cmd")
+            }
         }
     }
     // Plain console rooted in the folder; /K keeps it open if the exe exits
@@ -67,13 +69,46 @@ pub fn launch_in_terminal(folder: &str, executable: &str) -> Result<(), String> 
 pub fn launch_in_terminal(folder: &str, executable: &str) -> Result<(), String> {
     type ArgsFn = fn(&str, &str) -> Vec<String>;
     let terminals: &[(&str, ArgsFn)] = &[
-        ("alacritty", |dir, exe| vec!["--working-directory".into(), dir.into(), "-e".into(), exe.into()]),
-        ("ghostty", |dir, exe| vec![format!("--working-directory={dir}"), "-e".into(), exe.into()]),
-        ("foot", |dir, exe| vec![format!("--working-directory={dir}"), exe.into()]),
-        ("kitty", |dir, exe| vec!["--directory".into(), dir.into(), exe.into()]),
-        ("wezterm", |dir, exe| vec!["start".into(), "--cwd".into(), dir.into(), "--".into(), exe.into()]),
-        ("gnome-terminal", |dir, exe| vec![format!("--working-directory={dir}"), "--".into(), exe.into()]),
-        ("konsole", |dir, exe| vec!["--workdir".into(), dir.into(), "-e".into(), exe.into()]),
+        ("alacritty", |dir, exe| {
+            vec![
+                "--working-directory".into(),
+                dir.into(),
+                "-e".into(),
+                exe.into(),
+            ]
+        }),
+        ("ghostty", |dir, exe| {
+            vec![
+                format!("--working-directory={dir}"),
+                "-e".into(),
+                exe.into(),
+            ]
+        }),
+        ("foot", |dir, exe| {
+            vec![format!("--working-directory={dir}"), exe.into()]
+        }),
+        ("kitty", |dir, exe| {
+            vec!["--directory".into(), dir.into(), exe.into()]
+        }),
+        ("wezterm", |dir, exe| {
+            vec![
+                "start".into(),
+                "--cwd".into(),
+                dir.into(),
+                "--".into(),
+                exe.into(),
+            ]
+        }),
+        ("gnome-terminal", |dir, exe| {
+            vec![
+                format!("--working-directory={dir}"),
+                "--".into(),
+                exe.into(),
+            ]
+        }),
+        ("konsole", |dir, exe| {
+            vec!["--workdir".into(), dir.into(), "-e".into(), exe.into()]
+        }),
         ("xterm", |_dir, exe| vec!["-e".into(), exe.into()]),
     ];
     for (name, args) in terminals {
@@ -101,10 +136,11 @@ fn resolve_on_path(name: &str) -> Option<std::path::PathBuf> {
     use std::os::unix::fs::PermissionsExt;
     for dir in std::env::split_paths(&path_env) {
         let full = dir.join(name);
-        if let Ok(metadata) = std::fs::metadata(&full) {
-            if metadata.is_file() && metadata.permissions().mode() & 0o111 != 0 {
-                return Some(full);
-            }
+        if let Ok(metadata) = std::fs::metadata(&full)
+            && metadata.is_file()
+            && metadata.permissions().mode() & 0o111 != 0
+        {
+            return Some(full);
         }
     }
     None
@@ -128,6 +164,25 @@ fn resolve_on_path(name: &str) -> Option<std::path::PathBuf> {
 }
 
 static FACTOR_TX: std::sync::OnceLock<async_channel::Sender<f32>> = std::sync::OnceLock::new();
+
+/// The spawned `gsettings monitor`: kept reachable so [`shutdown`] can kill
+/// and reap it — a child owned only by the reader thread would outlive every
+/// run as an orphan (the spawn itself fails on Windows, so nothing is stored
+/// there).
+#[cfg(unix)]
+static GSETTINGS_CHILD: std::sync::Mutex<Option<std::process::Child>> = std::sync::Mutex::new(None);
+
+/// Best-effort teardown of the platform services: kills the gsettings
+/// monitor (an already-dead child kill+waits fine, a live one dies now).
+pub fn shutdown() {
+    #[cfg(unix)]
+    if let Ok(mut slot) = GSETTINGS_CHILD.lock()
+        && let Some(mut child) = slot.take()
+    {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+}
 
 fn apply_factor(store: &Entity<Store>, factor: f32, cx: &mut App) {
     store.update(cx, |s, cx| {
@@ -163,27 +218,40 @@ pub fn init_font_scale(store: &Entity<Store>, cx: &mut App) {
         .spawn()
     {
         Ok(mut child) => {
-            std::thread::Builder::new()
-                .name("gsettings".into())
-                .spawn(move || {
-                    use std::io::BufRead;
-                    let Some(stdout) = child.stdout.take() else { return };
-                    let reader = std::io::BufReader::new(stdout);
-                    for line in reader.lines().map_while(Result::ok) {
-                        if let Some(factor) = parse_factor(&line) {
-                            if let Some(tx) = FACTOR_TX.get() {
+            // stdout is all the reader needs; the handle itself stays in
+            // GSETTINGS_CHILD for shutdown() to kill and reap
+            let stdout = child.stdout.take();
+            #[cfg(unix)]
+            if let Ok(mut slot) = GSETTINGS_CHILD.lock() {
+                *slot = Some(child);
+            }
+            #[cfg(not(unix))]
+            drop(child);
+            if let Some(stdout) = stdout {
+                std::thread::Builder::new()
+                    .name("gsettings".into())
+                    .spawn(move || {
+                        use std::io::BufRead;
+                        let reader = std::io::BufReader::new(stdout);
+                        for line in reader.lines().map_while(Result::ok) {
+                            if let Some(factor) = parse_factor(&line)
+                                && let Some(tx) = FACTOR_TX.get()
+                            {
                                 // sync thread: send_blocking; plain send() would
                                 // just create and drop a future
                                 let _ = tx.send_blocking(factor);
                             }
                         }
-                    }
-                    let _ = child.wait();
-                })
-                .ok();
+                        // a dead-but-unreaped monitor stays a zombie until
+                        // shutdown()'s wait() — nothing to do here
+                    })
+                    .ok();
+            }
         }
         Err(_) => {
-            tracing::debug!("gsettings monitor unavailable; system text scale frozen at startup value");
+            tracing::debug!(
+                "gsettings monitor unavailable; system text scale frozen at startup value"
+            );
         }
     }
     let weak = store.downgrade();
@@ -193,7 +261,8 @@ pub fn init_font_scale(store: &Entity<Store>, cx: &mut App) {
                 store.update(cx, |s, cx| {
                     if (s.system_font_factor - factor).abs() > 0.001 {
                         s.system_font_factor = factor;
-                        s.fonts = crate::theme::font_tokens(s.settings.font_scale.as_deref(), factor);
+                        s.fonts =
+                            crate::theme::font_tokens(s.settings.font_scale.as_deref(), factor);
                         crate::theme::apply_kit_theme(s.accent, &s.fonts, cx);
                         cx.notify();
                     }
@@ -240,16 +309,25 @@ mod plain_path_tests {
 
     #[test]
     fn unwraps_verbatim_drive_paths() {
-        assert_eq!(plain_path(std::path::Path::new(r"\\?\C:\Users\dev\proj")).to_string_lossy(), r"C:\Users\dev\proj");
+        assert_eq!(
+            plain_path(std::path::Path::new(r"\\?\C:\Users\dev\proj")).to_string_lossy(),
+            r"C:\Users\dev\proj"
+        );
     }
 
     #[test]
     fn unwraps_verbatim_unc_paths() {
-        assert_eq!(plain_path(std::path::Path::new(r"\\?\UNC\box\share\dir")).to_string_lossy(), r"\\box\share\dir");
+        assert_eq!(
+            plain_path(std::path::Path::new(r"\\?\UNC\box\share\dir")).to_string_lossy(),
+            r"\\box\share\dir"
+        );
     }
 
     #[test]
     fn leaves_plain_paths_alone() {
-        assert_eq!(plain_path(std::path::Path::new("/home/dev/proj")).to_string_lossy(), "/home/dev/proj");
+        assert_eq!(
+            plain_path(std::path::Path::new("/home/dev/proj")).to_string_lossy(),
+            "/home/dev/proj"
+        );
     }
 }

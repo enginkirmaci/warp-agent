@@ -3,25 +3,24 @@
 
 use crate::oc::CommandInfo;
 use crate::settings::HarnessKind;
-use crate::store::{at_token_start, ChatItem, QuestionEntry, Store, ToolItem, DEFAULT_MODEL_ENTRY};
+use crate::store::{ChatItem, DEFAULT_MODEL_ENTRY, QuestionEntry, Store, ToolItem, at_token_start};
 use crate::theme;
-use crate::ui::controls::{fold_body, menu_row, popover_card, BtnKind};
+use crate::ui::controls::{BtnKind, fold_body, menu_row, popover_card};
 use warpui_kit_picker::{
-    model_name, model_provider, DismissFn, FilteredPicker, OverlayAnchor, PanelChrome, PickerBody,
-    PickerData, PickerIcons, PickerItem, PickerRow, PickerSpec, PickerTarget, Selection,
-    TriggerScale,
+    DismissFn, FilteredPicker, OverlayAnchor, PanelChrome, PickerBody, PickerData, PickerIcons,
+    PickerItem, PickerRow, PickerSpec, PickerTarget, Selection, TriggerScale, model_name,
+    model_provider,
 };
 
 /// A model pick from the composer pill: applies through the store/tile.
 type ModelPick = Box<dyn Fn(&str, &mut App)>;
 use crate::ui::controls;
-use warpui_kit_diff::{render_diff, render_code, sniff_lang};
 use crate::ui::markdown::render_markdown;
 use crate::ui::tooltip::tip;
 use gpui::prelude::*;
 use gpui::{
-    canvas, div, img, px, relative, actions, AccessibleAction, App, Context, Entity, Focusable,
-    ImageFormat, MouseButton, Pixels, Render, Role, ScrollHandle, SharedString, Toggled, Window,
+    AccessibleAction, App, Context, Entity, Focusable, ImageFormat, MouseButton, Pixels, Render,
+    Role, ScrollHandle, SharedString, Toggled, Window, actions, canvas, div, img, px, relative,
 };
 use gpui_kit::component::input::{
     Enter, Escape, Input, InputEvent, InputState, MoveDown, MoveUp, Position, Textarea,
@@ -29,6 +28,7 @@ use gpui_kit::component::input::{
 };
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use warpui_kit_diff::{render_code, render_diff, sniff_lang};
 
 // composer-only key overrides, bound in the "Input" context after
 // gpui_kit::init so the later binding wins over the editor's own up/down
@@ -40,7 +40,12 @@ actions!(warp_agent, [ComposerUp, ComposerDown, ComposerCycleAgent]);
 // stock editor bindings
 actions!(
     warp_agent,
-    [ComposerSlashUp, ComposerSlashDown, ComposerSlashEnter, ComposerSlashEscape]
+    [
+        ComposerSlashUp,
+        ComposerSlashDown,
+        ComposerSlashEnter,
+        ComposerSlashEscape
+    ]
 );
 
 /// How many suggestion rows either menu shows at once; the rest collapse
@@ -58,7 +63,9 @@ enum SuggestMode {
 pub fn decode_png_render(png: &[u8]) -> Option<Arc<gpui::RenderImage>> {
     let decoded = image::load_from_memory(png).ok()?;
     let rgba = decoded.to_rgba8();
-    Some(Arc::new(gpui::RenderImage::new(smallvec::smallvec![image::Frame::new(rgba)])))
+    Some(Arc::new(gpui::RenderImage::new(smallvec::smallvec![
+        image::Frame::new(rgba)
+    ])))
 }
 
 enum PickerKind {
@@ -160,10 +167,10 @@ impl TileView {
     /// an unchanged document. Replaced whenever the store's copy has moved on
     /// (the streaming tail).
     fn md_text(&mut self, item_id: &str, text: &str) -> SharedString {
-        if let Some(cached) = self.md_cache.get(item_id) {
-            if cached.as_ref() == text {
-                return cached.clone();
-            }
+        if let Some(cached) = self.md_cache.get(item_id)
+            && cached.as_ref() == text
+        {
+            return cached.clone();
         }
         let fresh = SharedString::from(text.to_string());
         self.md_cache.insert(item_id.to_string(), fresh.clone());
@@ -196,12 +203,18 @@ impl TileView {
             return Some(cached.clone());
         }
         let decoded = decode_png_render(png)?;
-        self.img_cache.insert(cache_key.to_string(), decoded.clone());
+        self.img_cache
+            .insert(cache_key.to_string(), decoded.clone());
         Some(decoded)
     }
 
     /// Drops cache entries whose transcript item or attachment is gone.
-    fn prune_caches(&mut self, live: &HashSet<String>, window: &mut Window, cx: &mut Context<Self>) {
+    fn prune_caches(
+        &mut self,
+        live: &HashSet<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.md_cache.retain(|k, _| live.contains(k));
         // evicted decoded images must also leave the window's sprite atlas —
         // atlas tiles persist until drop_image, so without this every image
@@ -257,7 +270,11 @@ fn context_ring(frac: f32) -> gpui::AnyElement {
         let phase = i as f32 / segments as f32;
         let theta = phase * std::f32::consts::TAU - std::f32::consts::FRAC_PI_2;
         let (sin, cos) = theta.sin_cos();
-        let color = if phase < frac { filled_color } else { track_color };
+        let color = if phase < frac {
+            filled_color
+        } else {
+            track_color
+        };
         ring = ring.child(
             div()
                 .absolute()
@@ -272,7 +289,12 @@ fn context_ring(frac: f32) -> gpui::AnyElement {
 }
 
 impl TileView {
-    pub fn new(store: Entity<Store>, key: String, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        store: Entity<Store>,
+        key: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         // the store bumps this tile's revision entity when its content
         // changed: as a cached view (see render_main) this tile re-renders
         // on that bump and on nothing else — other tiles' streams, sidebar
@@ -317,11 +339,11 @@ impl TileView {
                 this.last_field_text = text.clone();
                 let key = key_for_change.clone();
                 store_handle.update(cx, move |s, _| {
-                    if let Some(tile) = s.tile_by_key_mut(&key) {
-                        if tile.input != text {
-                            tile.input = text;
-                            tile.reset_history();
-                        }
+                    if let Some(tile) = s.tile_by_key_mut(&key)
+                        && tile.input != text
+                    {
+                        tile.input = text;
+                        tile.reset_history();
                     }
                 });
             }
@@ -381,27 +403,30 @@ impl TileView {
                 pending_search: None,
                 search_task: None,
             };
-            cx.subscribe(&composer, move |this: &mut SuggestMenu, field, event: &InputEvent, cx| match event {
-                InputEvent::Change => {
-                    let text = field.read(cx).value().to_string();
-                    this.recompute(&text, true, cx);
-                }
-                InputEvent::Focus => {
-                    this.focused = true;
-                    let text = field.read(cx).value().to_string();
-                    this.recompute(&text, false, cx);
-                }
-                InputEvent::Blur => {
-                    // the menu lives only while the composer holds focus:
-                    // clicking elsewhere closes it like Escape would, and a
-                    // later refocus may open it again
-                    this.focused = false;
-                    this.open = false;
-                    this.dismissed = false;
-                    cx.notify();
-                }
-                _ => {}
-            })
+            cx.subscribe(
+                &composer,
+                move |this: &mut SuggestMenu, field, event: &InputEvent, cx| match event {
+                    InputEvent::Change => {
+                        let text = field.read(cx).value().to_string();
+                        this.recompute(&text, true, cx);
+                    }
+                    InputEvent::Focus => {
+                        this.focused = true;
+                        let text = field.read(cx).value().to_string();
+                        this.recompute(&text, false, cx);
+                    }
+                    InputEvent::Blur => {
+                        // the menu lives only while the composer holds focus:
+                        // clicking elsewhere closes it like Escape would, and a
+                        // later refocus may open it again
+                        this.focused = false;
+                        this.open = false;
+                        this.dismissed = false;
+                        cx.notify();
+                    }
+                    _ => {}
+                },
+            )
             .detach();
             menu
         });
@@ -454,10 +479,14 @@ impl TileView {
         cx.spawn(async move |_this, cx| {
             if let Ok(Ok(Some(paths))) = task.await {
                 for path in paths {
-                    let Ok(meta) = std::fs::metadata(&path) else { continue };
+                    let Ok(meta) = std::fs::metadata(&path) else {
+                        continue;
+                    };
                     if meta.len() > 512 * 1024 {
                         let name = path.display().to_string();
-                        store.update(cx, |s, cx| s.announce(&format!("{name} is over 512 KB — skipped."), true, cx));
+                        store.update(cx, |s, cx| {
+                            s.announce(&format!("{name} is over 512 KB — skipped."), true, cx)
+                        });
                         continue;
                     }
                     if let Ok(data) = std::fs::read(&path) {
@@ -508,12 +537,14 @@ impl TileView {
         // menu stays closed: acceptance dismisses it and `allow_reopen` is
         // false (only a real keystroke may reopen a dismissed menu).
         let text = self.last_field_text.clone();
-        self.suggest.update(cx, |menu, cx| menu.recompute(&text, false, cx));
+        self.suggest
+            .update(cx, |menu, cx| menu.recompute(&text, false, cx));
     }
     /// Instant scroll to `y`, counting distance scrolled down — the handle
     /// stores the offset negative-down (0 at top, -max at bottom).
     fn scroll_to(&mut self, y: Pixels, cx: &mut Context<Self>) {
-        self.scroll.set_offset(gpui::point(self.scroll.offset().x, -y));
+        self.scroll
+            .set_offset(gpui::point(self.scroll.offset().x, -y));
         cx.notify();
     }
 
@@ -527,7 +558,12 @@ impl TileView {
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         match item {
-            ChatItem::UserMessage { key: msg_key, text, created_ms, .. } => {
+            ChatItem::UserMessage {
+                key: msg_key,
+                text,
+                created_ms,
+                ..
+            } => {
                 // cached, pointer-stable: keeps the kit from re-parsing the
                 // bubble's TextView on every render (same contract as md_text)
                 let text = self.md_text(item_id, text);
@@ -616,10 +652,18 @@ impl TileView {
                                             .group_hover("umsg", |s| s.opacity(1.))
                                             .hover(|s| s.bg(theme::HOVER))
                                             .on_click(cx.listener(move |this, _, _, cx| {
-                                                cx.write_to_clipboard(gpui::ClipboardItem::new_string(copy_text.to_string()));
+                                                cx.write_to_clipboard(
+                                                    gpui::ClipboardItem::new_string(
+                                                        copy_text.to_string(),
+                                                    ),
+                                                );
                                                 this.flash_copied(flash_key.clone(), cx);
                                             }))
-                                            .child(crate::ui::icon(copy_icon_path, px(fonts.icon_medium), copy_icon_color)),
+                                            .child(crate::ui::icon(
+                                                copy_icon_path,
+                                                px(fonts.icon_medium),
+                                                copy_icon_color,
+                                            )),
                                     )
                                     .child(div().flex_1())
                                     .child(
@@ -632,7 +676,12 @@ impl TileView {
                     )
                     .into_any_element()
             }
-            ChatItem::AssistantText { text, meta_label, created_ms, .. } => {
+            ChatItem::AssistantText {
+                text,
+                meta_label,
+                created_ms,
+                ..
+            } => {
                 let time = crate::store::message_time_label(*created_ms);
                 let meta = meta_label.clone();
                 // cached, pointer-stable: the kit skips re-parsing unchanged text,
@@ -698,13 +747,26 @@ impl TileView {
                                             .group_hover("amsg", |s| s.opacity(1.))
                                             .hover(|s| s.bg(theme::HOVER))
                                             .on_click(cx.listener(move |this, _, _, cx| {
-                                                cx.write_to_clipboard(gpui::ClipboardItem::new_string(copy_text.to_string()));
+                                                cx.write_to_clipboard(
+                                                    gpui::ClipboardItem::new_string(
+                                                        copy_text.to_string(),
+                                                    ),
+                                                );
                                                 this.flash_copied(flash_key.clone(), cx);
                                             }))
-                                            .child(crate::ui::icon(copy_icon_path, px(fonts.icon_medium), copy_icon_color)),
+                                            .child(crate::ui::icon(
+                                                copy_icon_path,
+                                                px(fonts.icon_medium),
+                                                copy_icon_color,
+                                            )),
                                     )
                                     .child(div().flex_1())
-                                    .child(div().text_size(px(fonts.font_micro)).text_color(theme::TEXT_FAINT).child(meta))
+                                    .child(
+                                        div()
+                                            .text_size(px(fonts.font_micro))
+                                            .text_color(theme::TEXT_FAINT)
+                                            .child(meta),
+                                    )
                                     .child(
                                         div()
                                             .text_size(px(fonts.font_micro))
@@ -746,7 +808,12 @@ impl TileView {
                     .into_any_element()
             }
             ChatItem::Tool(tool) => self.render_tool(item_id, tool, fonts, window, cx),
-            ChatItem::Image { file_name, png, created_ms, .. } => {
+            ChatItem::Image {
+                file_name,
+                png,
+                created_ms,
+                ..
+            } => {
                 let time = crate::store::message_time_label(*created_ms);
                 // decoded once per item; PNG decode on every repaint dominated
                 // long transcripts with screenshots
@@ -778,7 +845,9 @@ impl TileView {
                                 cx.listener(move |this, event: &gpui::MouseDownEvent, _, cx| {
                                     let (x, y) = this.menu_anchor(event);
                                     this.menu = Some(TileMenu {
-                                        items: vec![ContextMenu::CopyImage { png: menu_png.clone() }],
+                                        items: vec![ContextMenu::CopyImage {
+                                            png: menu_png.clone(),
+                                        }],
                                         x,
                                         y,
                                     });
@@ -791,24 +860,28 @@ impl TileView {
                                     .flex()
                                     .items_center()
                                     .gap_2()
-                            .child(
-                                div()
-                                    .text_size(px(fonts.font_xsmall))
-                                    .text_color(theme::TEXT_DIM)
-                                    .child(SharedString::from(file_name.clone())),
-                            )
-                            .child(
-                                div()
-                                    .text_size(px(fonts.font_micro))
-                                    .text_color(theme::TEXT_FAINT)
-                                    .child(time),
-                            ),
+                                    .child(
+                                        div()
+                                            .text_size(px(fonts.font_xsmall))
+                                            .text_color(theme::TEXT_DIM)
+                                            .child(SharedString::from(file_name.clone())),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_size(px(fonts.font_micro))
+                                            .text_color(theme::TEXT_FAINT)
+                                            .child(time),
+                                    ),
                             ),
                     )
                     .into_any_element()
             }
-            ChatItem::Permission(perm) => self.render_permission(item_id, perm, fonts, accent, window, cx),
-            ChatItem::Question(question) => self.render_question(item_id, question, fonts, accent, window, cx),
+            ChatItem::Permission(perm) => {
+                self.render_permission(item_id, perm, fonts, accent, window, cx)
+            }
+            ChatItem::Question(question) => {
+                self.render_question(item_id, question, fonts, accent, window, cx)
+            }
             ChatItem::SystemNote { text, is_error, .. } => {
                 if *is_error {
                     div()
@@ -821,14 +894,7 @@ impl TileView {
                                 .bg(theme::tint(theme::DANGER))
                                 .flex()
                                 .overflow_hidden()
-                                .child(
-                                    div()
-                                        .w(px(3.))
-                                        .my_2()
-                                        .mx_2()
-                                        .rounded_sm()
-                                        .bg(theme::DANGER),
-                                )
+                                .child(div().w(px(3.)).my_2().mx_2().rounded_sm().bg(theme::DANGER))
                                 .child(
                                     div()
                                         .flex()
@@ -836,12 +902,7 @@ impl TileView {
                                         .gap_2()
                                         .py_2()
                                         .pr_3()
-                                        .child(
-                                            div()
-                                                .size(px(7.))
-                                                .rounded_full()
-                                                .bg(theme::DANGER),
-                                        )
+                                        .child(div().size(px(7.)).rounded_full().bg(theme::DANGER))
                                         .child(
                                             div()
                                                 .text_size(px(fonts.font_small))
@@ -910,8 +971,12 @@ impl TileView {
                             .text_color(theme::TEXT_DIM)
                             .truncate()
                             .child(
-                                self.selectable_text(&format!("{item_id}:title"), &tool.title, "tooltitle")
-                                    .max_lines(1),
+                                self.selectable_text(
+                                    &format!("{item_id}:title"),
+                                    &tool.title,
+                                    "tooltitle",
+                                )
+                                .max_lines(1),
                             ),
                     )
                     .child(
@@ -935,45 +1000,86 @@ impl TileView {
                 d.child(self.fold_header(
                     &format!("{item_id}:diff"),
                     "Changes",
-                    Some((tool.numstat.as_ref().map(|n| n.additions).unwrap_or(0), tool.numstat.as_ref().map(|n| n.deletions).unwrap_or(0))),
+                    Some((
+                        tool.numstat.as_ref().map(|n| n.additions).unwrap_or(0),
+                        tool.numstat.as_ref().map(|n| n.deletions).unwrap_or(0),
+                    )),
                     open_diff,
                     fonts,
                     cx,
                 ))
                 .when(open_diff, |d| {
                     d.child(
-                        fold_body(gpui::ElementId::NamedInteger("fold-diff".into(), Self::hash(item_id)))
-                            .child(render_diff(
-                                tool.diff.as_deref().unwrap_or(""),
-                                Some(&tool.file_path),
-                                fonts.font_detail,
-                                window,
-                                cx,
-                            )),
+                        fold_body(gpui::ElementId::NamedInteger(
+                            "fold-diff".into(),
+                            Self::hash(item_id),
+                        ))
+                        .child(render_diff(
+                            tool.diff.as_deref().unwrap_or(""),
+                            Some(&tool.file_path),
+                            fonts.font_detail,
+                            window,
+                            cx,
+                        )),
                     )
                 })
             })
             .when(has_details, |d| {
-                d.child(self.fold_header(&format!("{item_id}:details"), "details", None, open_details, fonts, cx)).when(
+                d.child(self.fold_header(
+                    &format!("{item_id}:details"),
+                    "details",
+                    None,
                     open_details,
-                |d| {
-                    let body = fold_body(gpui::ElementId::NamedInteger("fold-details".into(), Self::hash(item_id)))
-                        .flex()
-                        .flex_col()
-                        .gap_2p5();
+                    fonts,
+                    cx,
+                ))
+                .when(open_details, |d| {
+                    let body = fold_body(gpui::ElementId::NamedInteger(
+                        "fold-details".into(),
+                        Self::hash(item_id),
+                    ))
+                    .flex()
+                    .flex_col()
+                    .gap_2p5();
                     let body = body
                         .when(!tool.details.input.is_empty(), |d| {
-                            d.child(self.detail_section(&format!("{item_id}:input"), "input", &tool.details.input, theme::TEXT_DIM, sniff_lang(&tool.details.input), fonts, window, cx))
+                            d.child(self.detail_section(
+                                &format!("{item_id}:input"),
+                                "input",
+                                &tool.details.input,
+                                theme::TEXT_DIM,
+                                sniff_lang(&tool.details.input),
+                                fonts,
+                                window,
+                                cx,
+                            ))
                         })
                         .when(!tool.details.output.is_empty(), |d| {
-                            d.child(self.detail_section(&format!("{item_id}:output"), "output", &tool.details.output, theme::TEXT_DIM, sniff_lang(&tool.details.output), fonts, window, cx))
+                            d.child(self.detail_section(
+                                &format!("{item_id}:output"),
+                                "output",
+                                &tool.details.output,
+                                theme::TEXT_DIM,
+                                sniff_lang(&tool.details.output),
+                                fonts,
+                                window,
+                                cx,
+                            ))
                         })
                         .when(!tool.details.error.is_empty(), |d| {
-                            d.child(self.detail_section(&format!("{item_id}:error"), "error", &tool.details.error, theme::DANGER, None, fonts, window, cx))
+                            d.child(self.detail_section(
+                                &format!("{item_id}:error"),
+                                "error",
+                                &tool.details.error,
+                                theme::DANGER,
+                                None,
+                                fonts,
+                                window,
+                                cx,
+                            ))
                         });
                     d.child(body)
-                },
-                )
+                })
             })
             .into_any_element()
     }
@@ -981,6 +1087,10 @@ impl TileView {
     /// One labeled block inside the details fold: small faint label over the
     /// body. Structured payloads (sniffed JSON) and arbitrary text render as
     /// line-numbered code; error payloads keep the plain red block.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "GPUI render helper: self + cx are structural, the rest are one render's inputs"
+    )]
     fn detail_section(
         &mut self,
         cache_key: &str,
@@ -1003,11 +1113,14 @@ impl TileView {
                     .child(SharedString::from(label.to_string())),
             )
             .child(match lang {
-                Some(lang) => div()
-                    .rounded_md()
-                    .bg(theme::CHIP)
-                    .p_2()
-                    .child(render_code(text, Some(lang), color, fonts.font_detail, window, cx)),
+                Some(lang) => div().rounded_md().bg(theme::CHIP).p_2().child(render_code(
+                    text,
+                    Some(lang),
+                    color,
+                    fonts.font_detail,
+                    window,
+                    cx,
+                )),
                 None => div()
                     .rounded_md()
                     .bg(theme::CHIP)
@@ -1022,6 +1135,10 @@ impl TileView {
 
     /// A run of ≥2 consecutive tool calls collapses into one disclosure row so
     /// a queued turn reads as one line instead of a wall of pending chips.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "GPUI render helper: self + cx are structural, the rest are one render's inputs"
+    )]
     fn render_tool_group(
         &mut self,
         run: &[(String, Arc<ChatItem>)],
@@ -1038,7 +1155,9 @@ impl TileView {
         let mut pending = 0usize;
         let mut failed = 0usize;
         for (_, item) in run {
-            let ChatItem::Tool(tool) = item.as_ref() else { continue };
+            let ChatItem::Tool(tool) = item.as_ref() else {
+                continue;
+            };
             if tool.is_running() {
                 running += 1;
             } else if tool.status == "pending" {
@@ -1070,13 +1189,22 @@ impl TileView {
             .gap_1()
             .child(self.fold_header(group_key, &label, numstat, open, fonts, cx));
         if open {
-            let mut body =
-                fold_body(gpui::ElementId::NamedInteger("fold-tools".into(), Self::hash(group_key)))
-                    .flex()
-                    .flex_col()
-                    .gap_1();
+            let mut body = fold_body(gpui::ElementId::NamedInteger(
+                "fold-tools".into(),
+                Self::hash(group_key),
+            ))
+            .flex()
+            .flex_col()
+            .gap_1();
             for (member_id, member) in run {
-                body = body.child(self.render_item(member_id, member.as_ref(), fonts, accent, window, cx));
+                body = body.child(self.render_item(
+                    member_id,
+                    member.as_ref(),
+                    fonts,
+                    accent,
+                    window,
+                    cx,
+                ));
             }
             group = group.child(body);
         }
@@ -1096,7 +1224,10 @@ impl TileView {
         let key = key.to_string();
         let label = label.to_string();
         div()
-            .id(gpui::ElementId::NamedInteger("fold".into(), Self::hash(key.as_str())))
+            .id(gpui::ElementId::NamedInteger(
+                "fold".into(),
+                Self::hash(key.as_str()),
+            ))
             .role(Role::Button)
             .aria_label(SharedString::from(label.clone()))
             .aria_expanded(open)
@@ -1119,13 +1250,15 @@ impl TileView {
                 }
                 cx.notify();
             }))
-            .child(
-                crate::ui::icon(
-                    if open { "icons/chevron-down.svg" } else { "icons/chevron-right.svg" },
-                    px(fonts.icon_xsmall),
-                    theme::TEXT_MUTED,
-                ),
-            )
+            .child(crate::ui::icon(
+                if open {
+                    "icons/chevron-down.svg"
+                } else {
+                    "icons/chevron-right.svg"
+                },
+                px(fonts.icon_xsmall),
+                theme::TEXT_MUTED,
+            ))
             .child(
                 div()
                     .text_size(px(fonts.font_xsmall))
@@ -1134,10 +1267,20 @@ impl TileView {
             )
             .when_some(numstat, |d, (adds, dels)| {
                 d.when(adds > 0 || dels > 0, |d| {
-                    d.child(div().flex().gap_1().child(
-                        div().text_size(px(fonts.font_xsmall)).text_color(theme::ADD).child(format!("{adds}")),
-                    ))
-                    .child(div().text_size(px(fonts.font_xsmall)).text_color(theme::DEL).child(format!("{dels}")))
+                    d.child(
+                        div().flex().gap_1().child(
+                            div()
+                                .text_size(px(fonts.font_xsmall))
+                                .text_color(theme::ADD)
+                                .child(format!("{adds}")),
+                        ),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(fonts.font_xsmall))
+                            .text_color(theme::DEL)
+                            .child(format!("{dels}")),
+                    )
                 })
             })
             .into_any_element()
@@ -1180,9 +1323,11 @@ impl TileView {
                                     .flex()
                                     .items_center()
                                     .gap_2()
-                                    .child(
-                                        crate::ui::icon("icons/shield.svg", px(fonts.icon_body), theme::WARN),
-                                    )
+                                    .child(crate::ui::icon(
+                                        "icons/shield.svg",
+                                        px(fonts.icon_body),
+                                        theme::WARN,
+                                    ))
                                     .child(
                                         div()
                                             .text_size(px(fonts.font_body))
@@ -1201,17 +1346,21 @@ impl TileView {
                             .when(perm.is_pending(), |d| {
                                 let id = perm.id.clone();
                                 let store = self.store.clone();
-                                let auto_text = perm
-                                    .has_auto_countdown()
-                                    .then(|| perm.auto_countdown_text())
-                                    .unwrap_or_default();
+                                let auto_text = if perm.has_auto_countdown() {
+                                    perm.auto_countdown_text()
+                                } else {
+                                    Default::default()
+                                };
                                 d.child(
                                     div()
                                         .flex()
                                         .items_center()
                                         .gap_2()
                                         .child(controls::button(
-                                            gpui::ElementId::NamedInteger("pill".into(), Self::hash("Allow")),
+                                            gpui::ElementId::NamedInteger(
+                                                "pill".into(),
+                                                Self::hash("Allow"),
+                                            ),
                                             "Allow",
                                             BtnKind::Primary(on_accent),
                                             accent,
@@ -1221,12 +1370,17 @@ impl TileView {
                                                 let store = store.clone();
                                                 let id = id.clone();
                                                 move |_, _, cx| {
-                                                    store.update(cx, |s, cx| s.respond_permission(&id, "once", false, cx));
+                                                    store.update(cx, |s, cx| {
+                                                        s.respond_permission(&id, "once", false, cx)
+                                                    });
                                                 }
                                             },
                                         ))
                                         .child(controls::button(
-                                            gpui::ElementId::NamedInteger("pill".into(), Self::hash("Always")),
+                                            gpui::ElementId::NamedInteger(
+                                                "pill".into(),
+                                                Self::hash("Always"),
+                                            ),
                                             "Always",
                                             BtnKind::Chip,
                                             accent,
@@ -1236,12 +1390,19 @@ impl TileView {
                                                 let store = store.clone();
                                                 let id = id.clone();
                                                 move |_, _, cx| {
-                                                    store.update(cx, |s, cx| s.respond_permission(&id, "always", false, cx));
+                                                    store.update(cx, |s, cx| {
+                                                        s.respond_permission(
+                                                            &id, "always", false, cx,
+                                                        )
+                                                    });
                                                 }
                                             },
                                         ))
                                         .child(controls::button(
-                                            gpui::ElementId::NamedInteger("pill".into(), Self::hash("Deny")),
+                                            gpui::ElementId::NamedInteger(
+                                                "pill".into(),
+                                                Self::hash("Deny"),
+                                            ),
                                             "Deny",
                                             BtnKind::Chip,
                                             accent,
@@ -1251,7 +1412,11 @@ impl TileView {
                                                 let store = store.clone();
                                                 let id = id.clone();
                                                 move |_, _, cx| {
-                                                    store.update(cx, |s, cx| s.respond_permission(&id, "reject", false, cx));
+                                                    store.update(cx, |s, cx| {
+                                                        s.respond_permission(
+                                                            &id, "reject", false, cx,
+                                                        )
+                                                    });
                                                 }
                                             },
                                         ))
@@ -1272,17 +1437,37 @@ impl TileView {
                                         .italic()
                                         .text_size(px(fonts.font_detail))
                                         .text_color(theme::TEXT_DIM)
-                                        .child(SharedString::from(perm.answer.clone().unwrap_or_default())),
+                                        .child(SharedString::from(
+                                            perm.answer.clone().unwrap_or_default(),
+                                        )),
                                 )
                             })
                             .when(perm.has_diff(), |d| {
-                                d.child(self.fold_header(&format!("{item_id}:diff"), "View diff", None, open_diff, fonts, cx))
-                                    .when(open_diff, |d| {
-                                        d.child(
-                                            fold_body(gpui::ElementId::NamedInteger("perm-diff".into(), Self::hash(item_id)))
-                                                .child(render_diff(perm.diff.as_deref().unwrap_or(""), None, fonts.font_detail, window, cx)),
-                                        )
-                                    })
+                                d.child(self.fold_header(
+                                    &format!("{item_id}:diff"),
+                                    "View diff",
+                                    None,
+                                    open_diff,
+                                    fonts,
+                                    cx,
+                                ))
+                                .when(open_diff, |d| {
+                                    d.child(
+                                        fold_body(gpui::ElementId::NamedInteger(
+                                            "perm-diff".into(),
+                                            Self::hash(item_id),
+                                        ))
+                                        .child(
+                                            render_diff(
+                                                perm.diff.as_deref().unwrap_or(""),
+                                                None,
+                                                fonts.font_detail,
+                                                window,
+                                                cx,
+                                            ),
+                                        ),
+                                    )
+                                })
                             }),
                     ),
             )
@@ -1324,7 +1509,17 @@ impl TileView {
             );
         }
         for (qi, entry) in question.questions.iter().enumerate() {
-            card = card.child(self.render_question_entry(self.key.clone(), item_id, question, qi, entry, fonts, accent, window, cx));
+            card = card.child(self.render_question_entry(
+                self.key.clone(),
+                item_id,
+                question,
+                qi,
+                entry,
+                fonts,
+                accent,
+                window,
+                cx,
+            ));
         }
         if pending {
             let id = question.id.clone();
@@ -1336,28 +1531,29 @@ impl TileView {
                     .items_center()
                     .gap_2()
                     .pt_1()
-                    .child(
-                        controls::button(
-                            gpui::ElementId::NamedInteger("answer".into(), Self::hash(&id)),
-                            "Answer",
-                            BtnKind::Primary(on_accent),
-                            accent,
-                            fonts.font_body,
-                            can_submit,
-                            {
-                                let store = store.clone();
-                                let id = id.clone();
-                                move |_, _, cx| {
-                                    if can_submit {
-                                        store.update(cx, |s, cx| s.submit_question(&id, cx));
-                                    }
+                    .child(controls::button(
+                        gpui::ElementId::NamedInteger("answer".into(), Self::hash(&id)),
+                        "Answer",
+                        BtnKind::Primary(on_accent),
+                        accent,
+                        fonts.font_body,
+                        can_submit,
+                        {
+                            let store = store.clone();
+                            let id = id.clone();
+                            move |_, _, cx| {
+                                if can_submit {
+                                    store.update(cx, |s, cx| s.submit_question(&id, cx));
                                 }
-                            },
-                        ),
-                    )
+                            }
+                        },
+                    ))
                     .child(
                         div()
-                            .id(gpui::ElementId::NamedInteger("dismiss".into(), Self::hash(&id)))
+                            .id(gpui::ElementId::NamedInteger(
+                                "dismiss".into(),
+                                Self::hash(&id),
+                            ))
                             .role(Role::Button)
                             .aria_label("Dismiss question")
                             .cursor_pointer()
@@ -1422,35 +1618,50 @@ impl TileView {
         self.question_keys_seen.insert(input_key.clone());
         // custom-answer field, created lazily as its own leaf view: typing
         // must not re-render the transcript (see QuestionField below)
-        if let std::collections::hash_map::Entry::Vacant(slot) = self.question_inputs.entry(input_key.clone()) {
+        if let std::collections::hash_map::Entry::Vacant(slot) =
+            self.question_inputs.entry(input_key.clone())
+        {
             let store = self.store.clone();
             let qid = question.id.clone();
             let this_key = self.key.clone();
             let tile = cx.entity();
             let field = cx.new(|cx| {
                 let state = cx.new(|cx| InputState::new(window, cx).placeholder("custom answer…"));
-                cx.subscribe(&state, move |this: &mut QuestionField, field, event: &InputEvent, cx| {
-                    if !matches!(event, InputEvent::Change) {
-                        return;
-                    }
-                    let text = field.read(cx).value().to_string();
-                    let filled = !text.trim().is_empty();
-                    let flip = filled != this.filled;
-                    this.filled = filled;
-                    let store = this.store.clone();
-                    let tile_key = this.tile_key.clone();
-                    let question_id = this.question_id.clone();
-                    let qi = this.qi;
-                    store.update(cx, move |s, _| s.set_question_custom(&tile_key, &question_id, qi, text));
-                    if flip {
-                        // the Answer button's can_submit only moves when some
-                        // entry's filled state flips; every other keystroke
-                        // stays inside this leaf
-                        this.tile.update(cx, |_, cx| cx.notify());
-                    }
-                })
+                cx.subscribe(
+                    &state,
+                    move |this: &mut QuestionField, field, event: &InputEvent, cx| {
+                        if !matches!(event, InputEvent::Change) {
+                            return;
+                        }
+                        let text = field.read(cx).value().to_string();
+                        let filled = !text.trim().is_empty();
+                        let flip = filled != this.filled;
+                        this.filled = filled;
+                        let store = this.store.clone();
+                        let tile_key = this.tile_key.clone();
+                        let question_id = this.question_id.clone();
+                        let qi = this.qi;
+                        store.update(cx, move |s, _| {
+                            s.set_question_custom(&tile_key, &question_id, qi, text)
+                        });
+                        if flip {
+                            // the Answer button's can_submit only moves when some
+                            // entry's filled state flips; every other keystroke
+                            // stays inside this leaf
+                            this.tile.update(cx, |_, cx| cx.notify());
+                        }
+                    },
+                )
                 .detach();
-                QuestionField { state, store, tile, tile_key: this_key, question_id: qid, qi, filled: false }
+                QuestionField {
+                    state,
+                    store,
+                    tile,
+                    tile_key: this_key,
+                    question_id: qid,
+                    qi,
+                    filled: false,
+                }
             });
             slot.insert(field);
         }
@@ -1471,9 +1682,11 @@ impl TileView {
                 div()
                     .text_size(px(fonts.font_body))
                     .text_color(theme::TEXT)
-                    .child(
-                        self.selectable_text(&format!("{item_id}#{qi}"), &entry.question, "qtext"),
-                    ),
+                    .child(self.selectable_text(
+                        &format!("{item_id}#{qi}"),
+                        &entry.question,
+                        "qtext",
+                    )),
             );
         for (oi, option) in entry.options.iter().enumerate() {
             let store = self.store.clone();
@@ -1485,14 +1698,32 @@ impl TileView {
             let description = option.description.clone();
             column = column.child(
                 div()
-                    .id(gpui::ElementId::NamedInteger("qopt".into(), Self::hash(&format!("{item_id}:{qi}:{oi}"))))
-                    .role(if is_multi { Role::CheckBox } else { Role::RadioButton })
+                    .id(gpui::ElementId::NamedInteger(
+                        "qopt".into(),
+                        Self::hash(&format!("{item_id}:{qi}:{oi}")),
+                    ))
+                    .role(if is_multi {
+                        Role::CheckBox
+                    } else {
+                        Role::RadioButton
+                    })
                     .aria_label(SharedString::from(format!(
                         "{} — {}",
-                        entry.question.lines().next().unwrap_or("").chars().take(60).collect::<String>(),
+                        entry
+                            .question
+                            .lines()
+                            .next()
+                            .unwrap_or("")
+                            .chars()
+                            .take(60)
+                            .collect::<String>(),
                         option.label
                     )))
-                    .aria_toggled(if selected { Toggled::True } else { Toggled::False })
+                    .aria_toggled(if selected {
+                        Toggled::True
+                    } else {
+                        Toggled::False
+                    })
                     .w_full()
                     .flex()
                     .items_start()
@@ -1511,7 +1742,9 @@ impl TileView {
                             let qid = qid.clone();
                             move |_, _, cx| {
                                 store.update(cx, |s, cx| {
-                                    s.toggle_question_option(&this_key2, &qid, qi, oi, is_multi, cx);
+                                    s.toggle_question_option(
+                                        &this_key2, &qid, qi, oi, is_multi, cx,
+                                    );
                                 });
                             }
                         })
@@ -1528,7 +1761,11 @@ impl TileView {
                                     .flex()
                                     .items_center()
                                     .justify_center()
-                                    .child(crate::ui::icon("icons/check.svg", px(fonts.icon_nano), theme::SURFACE))
+                                    .child(crate::ui::icon(
+                                        "icons/check.svg",
+                                        px(fonts.icon_nano),
+                                        theme::SURFACE,
+                                    ))
                                     .into_any_element()
                             } else {
                                 div()
@@ -1540,7 +1777,8 @@ impl TileView {
                                     .into_any_element()
                             }
                         } else if selected {
-                            crate::ui::icon("icons/check.svg", px(fonts.icon_small), accent).into_any_element()
+                            crate::ui::icon("icons/check.svg", px(fonts.icon_small), accent)
+                                .into_any_element()
                         } else {
                             div()
                                 .size(px(12.))
@@ -1589,7 +1827,6 @@ impl TileView {
         hash
     }
 }
-
 
 /// Everything one render pass needs from the store, snapshotted up front so
 /// the store borrow is released before the element tree is built.
@@ -1662,7 +1899,13 @@ impl TileView {
                         .bg(theme::tint(theme::WARN)),
                     "Connection lost — retrying…",
                 )
-                .child(div().size(px(5.)).rounded_full().bg(theme::WARN).flex_shrink_0())
+                .child(
+                    div()
+                        .size(px(5.))
+                        .rounded_full()
+                        .bg(theme::WARN)
+                        .flex_shrink_0(),
+                )
                 .child(
                     div()
                         .text_size(px(fonts.font_small))
@@ -1718,9 +1961,17 @@ impl TileView {
                     "Tasks & agents",
                 )
                 .when(snap.has_attention, |d| {
-                    d.child(crate::ui::icon("icons/warn.svg", px(fonts.icon_medium), theme::WARN))
+                    d.child(crate::ui::icon(
+                        "icons/warn.svg",
+                        px(fonts.icon_medium),
+                        theme::WARN,
+                    ))
                 })
-                .child(crate::ui::icon("icons/expand.svg", px(fonts.icon_medium), theme::TEXT)),
+                .child(crate::ui::icon(
+                    "icons/expand.svg",
+                    px(fonts.icon_medium),
+                    theme::TEXT,
+                )),
             );
         }
 
@@ -1745,10 +1996,21 @@ impl TileView {
                         }),
                     "Close",
                 )
-                .child(crate::ui::icon("icons/close.svg", px(fonts.icon_xsmall), theme::TEXT_MUTED)),
+                .child(crate::ui::icon(
+                    "icons/close.svg",
+                    px(fonts.icon_xsmall),
+                    theme::TEXT_MUTED,
+                )),
             )
             .when(snap.is_busy, |d| {
-                d.child(div().ml_1().size(px(5.)).rounded_full().bg(theme::WORKING).flex_shrink_0())
+                d.child(
+                    div()
+                        .ml_1()
+                        .size(px(5.))
+                        .rounded_full()
+                        .bg(theme::WORKING)
+                        .flex_shrink_0(),
+                )
             })
             .child(
                 div()
@@ -1813,9 +2075,15 @@ impl TileView {
                         .child(
                             tip(
                                 div()
-                                    .id(gpui::ElementId::NamedInteger("steer".into(), steer_key as u64))
+                                    .id(gpui::ElementId::NamedInteger(
+                                        "steer".into(),
+                                        steer_key as u64,
+                                    ))
                                     .role(Role::Button)
-                                    .aria_label(SharedString::from(format!("Steer — {}", entry.text.chars().take(40).collect::<String>())))
+                                    .aria_label(SharedString::from(format!(
+                                        "Steer — {}",
+                                        entry.text.chars().take(40).collect::<String>()
+                                    )))
                                     .px_2()
                                     .py_1()
                                     .rounded_md()
@@ -1829,7 +2097,11 @@ impl TileView {
                                     .gap_1(),
                                 "Abort the running turn and send this next",
                             )
-                            .child(crate::ui::icon("icons/arrow-up.svg", px(fonts.icon_tiny), theme::TEXT))
+                            .child(crate::ui::icon(
+                                "icons/arrow-up.svg",
+                                px(fonts.icon_tiny),
+                                theme::TEXT,
+                            ))
                             .child("Steer")
                             .on_click({
                                 let store = store_handle.clone();
@@ -1841,9 +2113,15 @@ impl TileView {
                         .child(
                             tip(
                                 div()
-                                    .id(gpui::ElementId::NamedInteger("qedit".into(), edit_key as u64))
+                                    .id(gpui::ElementId::NamedInteger(
+                                        "qedit".into(),
+                                        edit_key as u64,
+                                    ))
                                     .role(Role::Button)
-                                    .aria_label(SharedString::from(format!("Edit queued — {}", entry.text.chars().take(40).collect::<String>())))
+                                    .aria_label(SharedString::from(format!(
+                                        "Edit queued — {}",
+                                        entry.text.chars().take(40).collect::<String>()
+                                    )))
                                     .cursor_pointer()
                                     .p_1()
                                     .rounded_sm()
@@ -1856,14 +2134,24 @@ impl TileView {
                                     store.update(cx, |s, cx| s.edit_queued(edit_key, cx));
                                 }
                             })
-                            .child(crate::ui::icon("icons/edit.svg", px(fonts.icon_xsmall), theme::TEXT_MUTED)),
+                            .child(crate::ui::icon(
+                                "icons/edit.svg",
+                                px(fonts.icon_xsmall),
+                                theme::TEXT_MUTED,
+                            )),
                         )
                         .child(
                             tip(
                                 div()
-                                    .id(gpui::ElementId::NamedInteger("qrm".into(), remove_key as u64))
+                                    .id(gpui::ElementId::NamedInteger(
+                                        "qrm".into(),
+                                        remove_key as u64,
+                                    ))
                                     .role(Role::Button)
-                                    .aria_label(SharedString::from(format!("Remove queued — {}", entry.text.chars().take(40).collect::<String>())))
+                                    .aria_label(SharedString::from(format!(
+                                        "Remove queued — {}",
+                                        entry.text.chars().take(40).collect::<String>()
+                                    )))
                                     .cursor_pointer()
                                     .p_1()
                                     .rounded_sm()
@@ -1876,7 +2164,11 @@ impl TileView {
                                     store.update(cx, |s, cx| s.remove_queued(remove_key, cx));
                                 }
                             })
-                            .child(crate::ui::icon("icons/close.svg", px(fonts.icon_xsmall), theme::TEXT_MUTED)),
+                            .child(crate::ui::icon(
+                                "icons/close.svg",
+                                px(fonts.icon_xsmall),
+                                theme::TEXT_MUTED,
+                            )),
                         ),
                 );
             }
@@ -1904,7 +2196,10 @@ impl TileView {
                 if att.is_image() {
                     if let Some(render) = self.image_for(&format!("att{akey}"), &att.data) {
                         chip = chip.child(
-                            img(render).size(px(56.)).object_fit(gpui::ObjectFit::Cover).rounded_sm(),
+                            img(render)
+                                .size(px(56.))
+                                .object_fit(gpui::ObjectFit::Cover)
+                                .rounded_sm(),
                         );
                     }
                 } else {
@@ -1914,17 +2209,25 @@ impl TileView {
                     div()
                         .id(gpui::ElementId::NamedInteger("att-rm".into(), akey as u64))
                         .role(Role::Button)
-                        .aria_label(SharedString::from(format!("Remove attachment {}", att.file_name)))
+                        .aria_label(SharedString::from(format!(
+                            "Remove attachment {}",
+                            att.file_name
+                        )))
                         .cursor_pointer()
                         .on_click({
                             let store_handle = store_handle.clone();
                             let key = key.clone();
                             move |_, _, cx| {
                                 let key = key.clone();
-                                store_handle.update(cx, move |s, cx| s.remove_attachment(&key, akey, cx));
+                                store_handle
+                                    .update(cx, move |s, cx| s.remove_attachment(&key, akey, cx));
                             }
                         })
-                        .child(crate::ui::icon("icons/close.svg", px(fonts.icon_xsmall), theme::TEXT_MUTED)),
+                        .child(crate::ui::icon(
+                            "icons/close.svg",
+                            px(fonts.icon_xsmall),
+                            theme::TEXT_MUTED,
+                        )),
                 );
                 strip = strip.child(chip);
             }
@@ -1940,13 +2243,20 @@ impl TileView {
         let mut pills = div().flex().items_center().gap_1();
         // harness pill: click toggles opencode ↔ dsh on a draft; a chat that
         // already has a session is bound to the server it was created on
-        let next_harness = if snap.harness_label == "dsh" { "opencode" } else { "dsh" };
+        let next_harness = if snap.harness_label == "dsh" {
+            "opencode"
+        } else {
+            "dsh"
+        };
         pills = pills.child(
             tip(
                 div()
                     .id("pill-harness")
                     .role(Role::Button)
-                    .aria_label(SharedString::from(format!("Harness: {} — click to use {}", snap.harness_label, next_harness)))
+                    .aria_label(SharedString::from(format!(
+                        "Harness: {} — click to use {}",
+                        snap.harness_label, next_harness
+                    )))
                     .flex()
                     .items_center()
                     .gap_1()
@@ -1965,10 +2275,21 @@ impl TileView {
                     format!("Harness — click to use {}", next_harness)
                 },
             )
-                .on_click(cx.listener(|this, _, window, cx| this.toggle_tile_harness(window, cx)))
-                .on_a11y_action(AccessibleAction::Click, TileView::a11y_activator(cx, TileView::toggle_tile_harness))
-            .child(div().text_size(px(fonts.font_small)).child(SharedString::from(snap.harness_label)))
-            .child(crate::ui::icon("icons/chevron-down.svg", px(fonts.icon_tiny), theme::TEXT_MUTED)),
+            .on_click(cx.listener(|this, _, window, cx| this.toggle_tile_harness(window, cx)))
+            .on_a11y_action(
+                AccessibleAction::Click,
+                TileView::a11y_activator(cx, TileView::toggle_tile_harness),
+            )
+            .child(
+                div()
+                    .text_size(px(fonts.font_small))
+                    .child(SharedString::from(snap.harness_label)),
+            )
+            .child(crate::ui::icon(
+                "icons/chevron-down.svg",
+                px(fonts.icon_tiny),
+                theme::TEXT_MUTED,
+            )),
         );
         if snap.has_agents {
             pills = pills.child(
@@ -1977,9 +2298,11 @@ impl TileView {
                         .id("pill-agent")
                         .role(Role::ComboBox)
                         .aria_label("Agent")
-                        .aria_value(SharedString::from(
-                            if snap.selected_agent.is_empty() { crate::store::DEFAULT_AGENT_ENTRY } else { snap.selected_agent.as_str() },
-                        ))
+                        .aria_value(SharedString::from(if snap.selected_agent.is_empty() {
+                            crate::store::DEFAULT_AGENT_ENTRY
+                        } else {
+                            snap.selected_agent.as_str()
+                        }))
                         .aria_expanded(matches!(self.picker, Some(PickerKind::Agent)))
                         .flex()
                         .items_center()
@@ -1993,15 +2316,24 @@ impl TileView {
                     "Agent",
                 )
                 .on_click(cx.listener(|this, _, window, cx| this.toggle_agent_picker(window, cx)))
-                .on_a11y_action(AccessibleAction::Click, TileView::a11y_activator(cx, TileView::toggle_agent_picker))
-                .child(div().text_size(px(fonts.font_small)).child(SharedString::from(
-                    if snap.selected_agent.is_empty() {
-                        crate::store::DEFAULT_AGENT_ENTRY.to_string()
-                    } else {
-                        snap.selected_agent.clone()
-                    },
-                )))
-                .child(crate::ui::icon("icons/chevron-down.svg", px(fonts.icon_tiny), theme::TEXT_MUTED)),
+                .on_a11y_action(
+                    AccessibleAction::Click,
+                    TileView::a11y_activator(cx, TileView::toggle_agent_picker),
+                )
+                .child(
+                    div()
+                        .text_size(px(fonts.font_small))
+                        .child(SharedString::from(if snap.selected_agent.is_empty() {
+                            crate::store::DEFAULT_AGENT_ENTRY.to_string()
+                        } else {
+                            snap.selected_agent.clone()
+                        })),
+                )
+                .child(crate::ui::icon(
+                    "icons/chevron-down.svg",
+                    px(fonts.icon_tiny),
+                    theme::TEXT_MUTED,
+                )),
             );
         }
         pills = pills
@@ -2012,7 +2344,11 @@ impl TileView {
                         .role(Role::ComboBox)
                         .aria_label("Model")
                         .aria_value(SharedString::from(
-                            if snap.selected_model_short.is_empty() { crate::store::DEFAULT_MODEL_ENTRY } else { snap.selected_model_short.as_str() },
+                            if snap.selected_model_short.is_empty() {
+                                crate::store::DEFAULT_MODEL_ENTRY
+                            } else {
+                                snap.selected_model_short.as_str()
+                            },
                         ))
                         .aria_expanded(matches!(self.picker, Some(PickerKind::Model)))
                         .flex()
@@ -2027,15 +2363,26 @@ impl TileView {
                     "Model",
                 )
                 .on_click(cx.listener(|this, _, window, cx| this.toggle_model_picker(window, cx)))
-                .on_a11y_action(AccessibleAction::Click, TileView::a11y_activator(cx, TileView::toggle_model_picker))
-                .child(div().text_size(px(fonts.font_small)).child(SharedString::from(
-                    if snap.selected_model_short.is_empty() {
-                        crate::store::DEFAULT_MODEL_ENTRY.to_string()
-                    } else {
-                        snap.selected_model_short.clone()
-                    },
-                )))
-                .child(crate::ui::icon("icons/chevron-down.svg", px(fonts.icon_tiny), theme::TEXT_MUTED)),
+                .on_a11y_action(
+                    AccessibleAction::Click,
+                    TileView::a11y_activator(cx, TileView::toggle_model_picker),
+                )
+                .child(
+                    div()
+                        .text_size(px(fonts.font_small))
+                        .child(SharedString::from(
+                            if snap.selected_model_short.is_empty() {
+                                crate::store::DEFAULT_MODEL_ENTRY.to_string()
+                            } else {
+                                snap.selected_model_short.clone()
+                            },
+                        )),
+                )
+                .child(crate::ui::icon(
+                    "icons/chevron-down.svg",
+                    px(fonts.icon_tiny),
+                    theme::TEXT_MUTED,
+                )),
             )
             .child(
                 tip(
@@ -2053,16 +2400,32 @@ impl TileView {
                         .rounded_lg()
                         .cursor_pointer()
                         .when(snap.has_variants, |d| {
-                            d.text_color(theme::TEXT_MUTED).hover(|s| s.bg(theme::HOVER).text_color(accent))
+                            d.text_color(theme::TEXT_MUTED)
+                                .hover(|s| s.bg(theme::HOVER).text_color(accent))
                         })
                         .when(!snap.has_variants, |d| d.opacity(0.4)),
                     "Response variant",
                 )
                 .on_click(cx.listener(|this, _, window, cx| this.toggle_variant_picker(window, cx)))
-                .on_a11y_action(AccessibleAction::Click, TileView::a11y_activator(cx, TileView::toggle_variant_picker))
-                .child(crate::ui::icon("icons/gauge.svg", px(fonts.icon_body), theme::TEXT_MUTED))
-                .child(div().text_size(px(fonts.font_small)).child(SharedString::from(snap.selected_variant.clone())))
-                .child(crate::ui::icon("icons/chevron-down.svg", px(fonts.icon_tiny), theme::TEXT_MUTED)),
+                .on_a11y_action(
+                    AccessibleAction::Click,
+                    TileView::a11y_activator(cx, TileView::toggle_variant_picker),
+                )
+                .child(crate::ui::icon(
+                    "icons/gauge.svg",
+                    px(fonts.icon_body),
+                    theme::TEXT_MUTED,
+                ))
+                .child(
+                    div()
+                        .text_size(px(fonts.font_small))
+                        .child(SharedString::from(snap.selected_variant.clone())),
+                )
+                .child(crate::ui::icon(
+                    "icons/chevron-down.svg",
+                    px(fonts.icon_tiny),
+                    theme::TEXT_MUTED,
+                )),
             );
 
         pills.into_any_element()
@@ -2094,7 +2457,11 @@ impl TileView {
         if locked {
             return;
         }
-        let is_dsh = store.read(cx).tile_by_key(&key).map(|t| t.harness == HarnessKind::Dsh).unwrap_or(false);
+        let is_dsh = store
+            .read(cx)
+            .tile_by_key(&key)
+            .map(|t| t.harness == HarnessKind::Dsh)
+            .unwrap_or(false);
         let next = HarnessKind::from_label(if is_dsh { "opencode" } else { "dsh" });
         store.update(cx, |s, cx| s.set_tile_harness(&key, next, cx));
         // the kit placeholder was baked in at construction; the flip rewrites
@@ -2108,7 +2475,11 @@ impl TileView {
     }
 
     fn toggle_agent_picker(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
-        self.picker = if matches!(self.picker, Some(PickerKind::Agent)) { None } else { Some(PickerKind::Agent) };
+        self.picker = if matches!(self.picker, Some(PickerKind::Agent)) {
+            None
+        } else {
+            Some(PickerKind::Agent)
+        };
         cx.notify();
     }
 
@@ -2124,8 +2495,18 @@ impl TileView {
     }
 
     fn toggle_variant_picker(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
-        if self.store.read(cx).tile_by_key(&self.key).map(|t| t.has_variants()).unwrap_or(false) {
-            self.picker = if matches!(self.picker, Some(PickerKind::Variant)) { None } else { Some(PickerKind::Variant) };
+        if self
+            .store
+            .read(cx)
+            .tile_by_key(&self.key)
+            .map(|t| t.has_variants())
+            .unwrap_or(false)
+        {
+            self.picker = if matches!(self.picker, Some(PickerKind::Variant)) {
+                None
+            } else {
+                Some(PickerKind::Variant)
+            };
             cx.notify();
         }
     }
@@ -2163,7 +2544,11 @@ impl TileView {
                     }),
                 "Stop",
             )
-            .child(crate::ui::icon("icons/stop.svg", px(fonts.icon_medium), theme::TEXT_MUTED))
+            .child(crate::ui::icon(
+                "icons/stop.svg",
+                px(fonts.icon_medium),
+                theme::TEXT_MUTED,
+            ))
             .into_any_element()
         } else {
             let store = self.store.clone();
@@ -2196,7 +2581,11 @@ impl TileView {
                     }),
                 "Send",
             )
-            .child(crate::ui::icon("icons/arrow-up.svg", px(fonts.icon_xl), theme::TEXT_MUTED))
+            .child(crate::ui::icon(
+                "icons/arrow-up.svg",
+                px(fonts.icon_xl),
+                theme::TEXT_MUTED,
+            ))
             .into_any_element()
         }
     }
@@ -2207,7 +2596,12 @@ impl TileView {
         let accent = snap.accent;
         let mut flyout = div();
         if self.flyout_open && snap.has_tasks_or_agents {
-            let mut content = div().flex().flex_col().gap_2().min_w(px(300.)).max_w(px(440.));
+            let mut content = div()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .min_w(px(300.))
+                .max_w(px(440.));
             if snap.has_tasks {
                 content = content
                     .child(
@@ -2235,27 +2629,49 @@ impl TileView {
                             // all-gray rows; status reads from brightness:
                             // active row brightest, finished dimmest
                             let (icon, text) = if task.completed() {
-                                (crate::ui::icon("icons/circle-check.svg", px(fonts.icon_body), theme::TEXT_MUTED), theme::TEXT_MUTED)
+                                (
+                                    crate::ui::icon(
+                                        "icons/circle-check.svg",
+                                        px(fonts.icon_body),
+                                        theme::TEXT_MUTED,
+                                    ),
+                                    theme::TEXT_MUTED,
+                                )
                             } else if task.in_progress() {
-                                (crate::ui::icon("icons/play.svg", px(fonts.icon_body), theme::TEXT_DIM), theme::TEXT)
+                                (
+                                    crate::ui::icon(
+                                        "icons/play.svg",
+                                        px(fonts.icon_body),
+                                        theme::TEXT_DIM,
+                                    ),
+                                    theme::TEXT,
+                                )
                             } else if task.cancelled() {
-                                (crate::ui::icon("icons/dash.svg", px(fonts.icon_body), theme::TEXT_FAINT), theme::TEXT_FAINT)
+                                (
+                                    crate::ui::icon(
+                                        "icons/dash.svg",
+                                        px(fonts.icon_body),
+                                        theme::TEXT_FAINT,
+                                    ),
+                                    theme::TEXT_FAINT,
+                                )
                             } else {
-                                (crate::ui::icon("icons/circle.svg", px(fonts.icon_body), theme::TEXT_FAINT), theme::TEXT_DIM)
+                                (
+                                    crate::ui::icon(
+                                        "icons/circle.svg",
+                                        px(fonts.icon_body),
+                                        theme::TEXT_FAINT,
+                                    ),
+                                    theme::TEXT_DIM,
+                                )
                             };
                             list = list.child(
-                                div()
-                                    .flex()
-                                    .items_start()
-                                    .gap_2()
-                                    .py_1()
-                                    .child(icon)
-                                    .child(
-                                        div()
-                                            .text_size(px(fonts.font_body))
-                                            .text_color(text)
-                                            .child(SharedString::from(task.content.clone())),
-                                    ),
+                                div().flex().items_start().gap_2().py_1().child(icon).child(
+                                    div()
+                                        .text_size(px(fonts.font_body))
+                                        .text_color(text)
+                                        .child(SharedString::from(task.content.clone())),
+                                ),
                             );
                         }
                         list
@@ -2296,9 +2712,15 @@ impl TileView {
                                 div()
                                     // the whole row opens the agent's chat; the stop
                                     // button below keeps itself click-exclusive
-                                    .id(gpui::ElementId::NamedInteger("open-agent".into(), TileView::hash(&sid_open)))
+                                    .id(gpui::ElementId::NamedInteger(
+                                        "open-agent".into(),
+                                        TileView::hash(&sid_open),
+                                    ))
                                     .role(Role::Button)
-                                    .aria_label(SharedString::from(format!("Open agent {}", agent.title)))
+                                    .aria_label(SharedString::from(format!(
+                                        "Open agent {}",
+                                        agent.title
+                                    )))
                                     .flex()
                                     .items_center()
                                     .gap_2()
@@ -2320,10 +2742,18 @@ impl TileView {
                                     })
                                     .child(div().size(px(5.)).rounded_full().bg(accent))
                                     .when(agent.is_subagent, |d| {
-                                        d.child(crate::ui::icon("icons/play.svg", px(fonts.icon_nano), accent))
+                                        d.child(crate::ui::icon(
+                                            "icons/play.svg",
+                                            px(fonts.icon_nano),
+                                            accent,
+                                        ))
                                     })
                                     .when(agent.needs_attention, |d| {
-                                        d.child(crate::ui::icon("icons/warn.svg", px(fonts.icon_body), theme::WARN))
+                                        d.child(crate::ui::icon(
+                                            "icons/warn.svg",
+                                            px(fonts.icon_body),
+                                            theme::WARN,
+                                        ))
                                     })
                                     .child(
                                         div()
@@ -2342,17 +2772,29 @@ impl TileView {
                                                     div()
                                                         .text_size(px(fonts.font_micro))
                                                         .text_color(theme::TEXT_FAINT)
-                                                        .child(SharedString::from(agent.workspace.clone())),
+                                                        .child(SharedString::from(
+                                                            agent.workspace.clone(),
+                                                        )),
                                                 )
                                             }),
                                     )
                                     .child(div().flex_1())
-                                    .child(crate::ui::icon("icons/chevron-right.svg", px(fonts.icon_tiny), theme::TEXT_MUTED))
+                                    .child(crate::ui::icon(
+                                        "icons/chevron-right.svg",
+                                        px(fonts.icon_tiny),
+                                        theme::TEXT_MUTED,
+                                    ))
                                     .child(
                                         div()
-                                            .id(gpui::ElementId::NamedInteger("stop-agent".into(), TileView::hash(&sid_stop)))
+                                            .id(gpui::ElementId::NamedInteger(
+                                                "stop-agent".into(),
+                                                TileView::hash(&sid_stop),
+                                            ))
                                             .role(Role::Button)
-                                            .aria_label(SharedString::from(format!("Stop agent {}", agent.title)))
+                                            .aria_label(SharedString::from(format!(
+                                                "Stop agent {}",
+                                                agent.title
+                                            )))
                                             .cursor_pointer()
                                             .p_1()
                                             .rounded_sm()
@@ -2361,10 +2803,16 @@ impl TileView {
                                                 let store = store_handle.clone();
                                                 move |_, _, cx| {
                                                     cx.stop_propagation(); // the row under this button must not open
-                                                    store.update(cx, |s, cx| s.stop_running(&sid_stop, cx));
+                                                    store.update(cx, |s, cx| {
+                                                        s.stop_running(&sid_stop, cx)
+                                                    });
                                                 }
                                             })
-                                            .child(crate::ui::icon("icons/stop.svg", px(fonts.icon_xsmall), theme::TEXT_MUTED)),
+                                            .child(crate::ui::icon(
+                                                "icons/stop.svg",
+                                                px(fonts.icon_xsmall),
+                                                theme::TEXT_MUTED,
+                                            )),
                                     ),
                             );
                         }
@@ -2393,7 +2841,11 @@ impl TileView {
     /// Create (once) the filtered model dropdown for the composer pill. It
     /// applies picks and closes itself through these callbacks; the tile is
     /// held weakly so picker ↔ tile can't keep each other alive.
-    fn ensure_model_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Entity<FilteredPicker> {
+    fn ensure_model_picker(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Entity<FilteredPicker> {
         if let Some(picker) = &self.model_picker {
             return picker.clone();
         }
@@ -2417,10 +2869,14 @@ impl TileView {
             let key = key.clone();
             let tile = tile.clone();
             Box::new(move |value: &str, cx: &mut App| {
-                let model = if value.is_empty() { Some(DEFAULT_MODEL_ENTRY.into()) } else { Some(value.to_string()) };
+                let model = if value.is_empty() {
+                    Some(DEFAULT_MODEL_ENTRY.into())
+                } else {
+                    Some(value.to_string())
+                };
                 store.update(cx, |s, _| s.set_tile_model(&key, model));
                 if let Some(tile) = tile.upgrade() {
-                    let _ = tile.update(cx, |tv, cx| {
+                    tile.update(cx, |tv, cx| {
                         tv.picker = None;
                         cx.notify();
                     });
@@ -2431,7 +2887,7 @@ impl TileView {
             let tile = tile.clone();
             Box::new(move |cx: &mut App| {
                 if let Some(tile) = tile.upgrade() {
-                    let _ = tile.update(cx, |tv, cx| {
+                    tile.update(cx, |tv, cx| {
                         tv.picker = None;
                         cx.notify();
                     });
@@ -2446,7 +2902,12 @@ impl TileView {
     /// Model/variant/agent dropdown, anchored above the composer's right side.
     /// Model is the filtered picker entity (filter typing repaints only it);
     /// variant and agent stay flat server lists.
-    fn render_picker(&mut self, snap: &TileSnap, window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
+    fn render_picker(
+        &mut self,
+        snap: &TileSnap,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
         let fonts = snap.fonts;
         let mut picker_el: gpui::AnyElement = div().into_any_element();
         if let Some(kind) = &self.picker {
@@ -2458,7 +2919,10 @@ impl TileView {
                     let entries: Vec<String> = match kind {
                         PickerKind::Variant => {
                             let store = self.store.read(cx);
-                            store.tile_by_key(&self.key).map(|t| t.variants.clone()).unwrap_or_default()
+                            store
+                                .tile_by_key(&self.key)
+                                .map(|t| t.variants.clone())
+                                .unwrap_or_default()
                         }
                         PickerKind::Agent => {
                             let store = self.store.read(cx);
@@ -2471,14 +2935,23 @@ impl TileView {
                         PickerKind::Variant => 1,
                         PickerKind::Agent => 2,
                     };
-                    let mut menu = div().id("picker-list").flex().flex_col().min_w(px(220.)).max_h(px(320.)).overflow_y_scroll();
+                    let mut menu = div()
+                        .id("picker-list")
+                        .flex()
+                        .flex_col()
+                        .min_w(px(220.))
+                        .max_h(px(320.))
+                        .overflow_y_scroll();
                     for entry in &entries {
                         let value = entry.clone();
                         let is_sentinel = value.starts_with('(');
                         let key = format!("pk{kind_tag}{value}");
                         menu = menu.child(
                             div()
-                                .id(gpui::ElementId::NamedInteger("pkrow".into(), TileView::hash(&key)))
+                                .id(gpui::ElementId::NamedInteger(
+                                    "pkrow".into(),
+                                    TileView::hash(&key),
+                                ))
                                 .role(Role::ListBoxOption)
                                 .aria_label(SharedString::from(value.clone()))
                                 .px_2()
@@ -2495,19 +2968,38 @@ impl TileView {
                                         let key = this.key.clone();
                                         let store = this.store.clone();
                                         let value = value.clone();
-                                        store.update(cx, move |s, _| {
-                                            match kind {
-                                                Some(PickerKind::Model) => {
-                                                    s.set_tile_model(&key, if is_sentinel { Some("(server default)".into()) } else { Some(value) });
-                                                }
-                                                Some(PickerKind::Variant) => {
-                                                    s.set_tile_variant(&key, if is_sentinel { Some("(default)".into()) } else { Some(value) });
-                                                }
-                                                Some(PickerKind::Agent) => {
-                                                    s.set_tile_agent(&key, if is_sentinel { Some("(default build)".into()) } else { Some(value) });
-                                                }
-                                                None => {}
+                                        store.update(cx, move |s, _| match kind {
+                                            Some(PickerKind::Model) => {
+                                                s.set_tile_model(
+                                                    &key,
+                                                    if is_sentinel {
+                                                        Some("(server default)".into())
+                                                    } else {
+                                                        Some(value)
+                                                    },
+                                                );
                                             }
+                                            Some(PickerKind::Variant) => {
+                                                s.set_tile_variant(
+                                                    &key,
+                                                    if is_sentinel {
+                                                        Some("(default)".into())
+                                                    } else {
+                                                        Some(value)
+                                                    },
+                                                );
+                                            }
+                                            Some(PickerKind::Agent) => {
+                                                s.set_tile_agent(
+                                                    &key,
+                                                    if is_sentinel {
+                                                        Some("(default build)".into())
+                                                    } else {
+                                                        Some(value)
+                                                    },
+                                                );
+                                            }
+                                            None => {}
                                         });
                                         cx.notify();
                                     })
@@ -2577,7 +3069,9 @@ impl TileView {
                     move |_, window, cx| {
                         match &item {
                             ContextMenu::Copy(text) => {
-                                cx.write_to_clipboard(gpui::ClipboardItem::new_string(text.to_string()));
+                                cx.write_to_clipboard(gpui::ClipboardItem::new_string(
+                                    text.to_string(),
+                                ));
                             }
                             ContextMenu::EditInput(text) => {
                                 let text = text.clone();
@@ -2594,9 +3088,12 @@ impl TileView {
                                     }
                                 });
                                 // set_value emits no Change, so the store copy above stands
-                                composer.update(cx, |field, cx| field.set_value(text.as_ref(), window, cx));
+                                composer.update(cx, |field, cx| {
+                                    field.set_value(text.as_ref(), window, cx)
+                                });
                                 // keep the tile's field-text mirror in step
-                                tile_entity.update(cx, |tv, _| tv.last_field_text = text.to_string());
+                                tile_entity
+                                    .update(cx, |tv, _| tv.last_field_text = text.to_string());
                             }
                             ContextMenu::Reprompt(text) => {
                                 let key = menu_owner_key.clone();
@@ -2606,7 +3103,9 @@ impl TileView {
                             ContextMenu::ForkFromHere(msg_key) => {
                                 let key = menu_owner_key.clone();
                                 let msg_key = *msg_key;
-                                store_handle.update(cx, move |s, cx| s.fork_from_message(&key, msg_key, cx));
+                                store_handle.update(cx, move |s, cx| {
+                                    s.fork_from_message(&key, msg_key, cx)
+                                });
                             }
                             ContextMenu::CopyImage { png } => {
                                 let image = gpui::Image {
@@ -2651,7 +3150,12 @@ impl TileView {
 
     /// The composer frame: attachment strip, textarea, bottom row, and the
     /// slash/fill popovers anchored above it.
-    fn render_composer_frame(&mut self, snap: &TileSnap, _window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
+    fn render_composer_frame(
+        &mut self,
+        snap: &TileSnap,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
         let fonts = snap.fonts;
         let accent = snap.accent;
         let attachments_el = self.render_attachments(snap);
@@ -2682,7 +3186,11 @@ impl TileView {
                                 })),
                             "Attach files",
                         )
-                        .child(crate::ui::icon("icons/plus.svg", px(fonts.icon_medium), theme::TEXT_MUTED)),
+                        .child(crate::ui::icon(
+                            "icons/plus.svg",
+                            px(fonts.icon_medium),
+                            theme::TEXT_MUTED,
+                        )),
                     )
                     .child(
                         tip(
@@ -2690,7 +3198,11 @@ impl TileView {
                                 .id("allow-toggle")
                                 .role(Role::Button)
                                 .aria_label("Auto-allow tool permissions")
-                                .aria_toggled(if snap.allow_on { Toggled::True } else { Toggled::False })
+                                .aria_toggled(if snap.allow_on {
+                                    Toggled::True
+                                } else {
+                                    Toggled::False
+                                })
                                 .cursor_pointer()
                                 .p_1()
                                 .rounded_md()
@@ -2709,9 +3221,17 @@ impl TileView {
                             "Auto-allow tool permissions",
                         )
                         .child(if snap.allow_on {
-                            crate::ui::icon("icons/shield-filled.svg", px(fonts.icon_medium), theme::WARN)
+                            crate::ui::icon(
+                                "icons/shield-filled.svg",
+                                px(fonts.icon_medium),
+                                theme::WARN,
+                            )
                         } else {
-                            crate::ui::icon("icons/shield.svg", px(fonts.icon_medium), theme::TEXT_MUTED)
+                            crate::ui::icon(
+                                "icons/shield.svg",
+                                px(fonts.icon_medium),
+                                theme::TEXT_MUTED,
+                            )
                         }),
                     )
                     .child(
@@ -2720,7 +3240,11 @@ impl TileView {
                                 .id("mcp-toggle")
                                 .role(Role::Button)
                                 .aria_label("Toggle MCP servers")
-                                .aria_toggled(if snap.mcp_on { Toggled::True } else { Toggled::False })
+                                .aria_toggled(if snap.mcp_on {
+                                    Toggled::True
+                                } else {
+                                    Toggled::False
+                                })
                                 .when(!snap.has_mcp, |d| d.opacity(0.4))
                                 .cursor_pointer()
                                 .p_1()
@@ -2738,7 +3262,11 @@ impl TileView {
                         .child(if snap.mcp_on {
                             crate::ui::icon("icons/plug.svg", px(fonts.icon_medium), accent)
                         } else {
-                            crate::ui::icon("icons/plug.svg", px(fonts.icon_medium), theme::TEXT_MUTED)
+                            crate::ui::icon(
+                                "icons/plug.svg",
+                                px(fonts.icon_medium),
+                                theme::TEXT_MUTED,
+                            )
                         }),
                     ),
             )
@@ -2807,7 +3335,8 @@ impl TileView {
         let moved = state.read(cx).cursor() != before;
         if !moved {
             let key = self.key.clone();
-            self.store.update(cx, |s, _| s.cycle_prompt_history(&key, true));
+            self.store
+                .update(cx, |s, _| s.cycle_prompt_history(&key, true));
         }
     }
 
@@ -2822,7 +3351,8 @@ impl TileView {
         let moved = state.read(cx).cursor() != before;
         if !moved {
             let key = self.key.clone();
-            self.store.update(cx, |s, _| s.cycle_prompt_history(&key, false));
+            self.store
+                .update(cx, |s, _| s.cycle_prompt_history(&key, false));
         }
     }
 
@@ -2834,7 +3364,8 @@ impl TileView {
     fn action_slash_up(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         // the menu leaf owns the selection; moving it notifies only the leaf
         if self.suggest.read(cx).open {
-            self.suggest.update(cx, |menu, cx| menu.move_selection(-1, cx));
+            self.suggest
+                .update(cx, |menu, cx| menu.move_selection(-1, cx));
             return;
         }
         // stock composer up-key: caret move, else per-tile history
@@ -2843,7 +3374,8 @@ impl TileView {
 
     fn action_slash_down(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.suggest.read(cx).open {
-            self.suggest.update(cx, |menu, cx| menu.move_selection(1, cx));
+            self.suggest
+                .update(cx, |menu, cx| menu.move_selection(1, cx));
             return;
         }
         self.action_composer_down(window, cx);
@@ -2856,7 +3388,8 @@ impl TileView {
             // action context would panic (entity already being updated).
             // Nothing to accept leaves the menu open, like a no-op row.
             if let Some(text) = self.suggest.read(cx).compute_acceptance(cx) {
-                self.suggest.update(cx, |menu, cx| menu.close_after_accept(cx));
+                self.suggest
+                    .update(cx, |menu, cx| menu.close_after_accept(cx));
                 self.insert_composer_text(text, window, cx);
             }
             return;
@@ -2864,7 +3397,14 @@ impl TileView {
         let state = self.composer.clone();
         if state.read(cx).focus_handle(cx).is_focused(window) {
             let focus = state.read(cx).focus_handle(cx).clone();
-            focus.dispatch_action(&Enter { secondary: false, shift: false }, window, cx);
+            focus.dispatch_action(
+                &Enter {
+                    secondary: false,
+                    shift: false,
+                },
+                window,
+                cx,
+            );
         }
     }
 
@@ -2950,12 +3490,14 @@ impl Render for TileView {
         let composer_text_changed = snap.input != self.last_composer_text;
         if composer_text_changed && self.last_field_text != snap.input {
             let text = snap.input.clone();
-            self.composer.update(cx, |field, cx| field.set_value(text, window, cx));
+            self.composer
+                .update(cx, |field, cx| field.set_value(text, window, cx));
             self.last_field_text = snap.input.clone();
             // set_value emits no Change: nudge the suggest menu's filter to
             // the externally inserted text (the recompute is dismiss-safe)
             let text = snap.input.clone();
-            self.suggest.update(cx, |menu, cx| menu.recompute(&text, true, cx));
+            self.suggest
+                .update(cx, |menu, cx| menu.recompute(&text, true, cx));
         }
         self.last_composer_text = snap.input.clone();
 
@@ -2989,20 +3531,22 @@ impl Render for TileView {
             .min_h_0()
             .overflow_hidden()
             .track_scroll(&self.scroll.clone())
-            .on_scroll_wheel(cx.listener(|this, event: &gpui::ScrollWheelEvent, window, cx| {
-                // the wheel no longer scrolls natively (overflow_hidden keeps
-                // the handle-driven offset) — each delta applies straight to
-                // the handle offset, no glide
-                let delta = event.delta.pixel_delta(window.line_height()).y;
-                if delta == px(0.) {
-                    return;
-                }
-                let max = this.scroll.max_offset();
-                // wheel deltas are positive-up; the offset counts down
-                let next = (-this.scroll.offset().y - delta).clamp(px(0.), max.y);
-                this.pinned = next >= max.y - px(1.);
-                this.scroll_to(next, cx);
-            }))
+            .on_scroll_wheel(
+                cx.listener(|this, event: &gpui::ScrollWheelEvent, window, cx| {
+                    // the wheel no longer scrolls natively (overflow_hidden keeps
+                    // the handle-driven offset) — each delta applies straight to
+                    // the handle offset, no glide
+                    let delta = event.delta.pixel_delta(window.line_height()).y;
+                    if delta == px(0.) {
+                        return;
+                    }
+                    let max = this.scroll.max_offset();
+                    // wheel deltas are positive-up; the offset counts down
+                    let next = (-this.scroll.offset().y - delta).clamp(px(0.), max.y);
+                    this.pinned = next >= max.y - px(1.);
+                    this.scroll_to(next, cx);
+                }),
+            )
             .p_1()
             .flex()
             .flex_col()
@@ -3027,14 +3571,22 @@ impl Render for TileView {
                     if open {
                         visible_tools.extend(run.iter().map(|(id, _)| id.clone()));
                     }
-                    transcript =
-                        transcript.child(self.render_tool_group(run, &group_key, open, fonts, accent, window, cx));
+                    transcript = transcript.child(
+                        self.render_tool_group(run, &group_key, open, fonts, accent, window, cx),
+                    );
                     idx = end;
                     continue;
                 }
                 visible_tools.insert(item_id.clone());
             }
-            transcript = transcript.child(self.render_item(item_id, item.as_ref(), fonts, accent, window, cx));
+            transcript = transcript.child(self.render_item(
+                item_id,
+                item.as_ref(),
+                fonts,
+                accent,
+                window,
+                cx,
+            ));
             idx += 1;
         }
         let transcript_empty = items.is_empty();
@@ -3067,7 +3619,8 @@ impl Render for TileView {
         }
         live.extend(snap.attachments.iter().map(|a| format!("att{}", a.key)));
         self.prune_caches(&live, window, cx);
-        self.question_inputs.retain(|k, _| self.question_keys_seen.contains(k));
+        self.question_inputs
+            .retain(|k, _| self.question_keys_seen.contains(k));
 
         let jump_visible = !self.pinned && snap.has_messages;
 
@@ -3098,116 +3651,158 @@ impl Render for TileView {
                         .items_center()
                         .justify_center()
                         .gap_2()
-                        .child(crate::ui::icon("icons/spark.svg", px(32.), theme::TEXT_FAINT))
+                        .child(crate::ui::icon(
+                            "icons/spark.svg",
+                            px(32.),
+                            theme::TEXT_FAINT,
+                        ))
                         .child(
                             div()
                                 .text_size(px(fonts.font_small))
                                 .italic()
                                 .text_color(theme::TEXT_FAINT)
-                                .child("Nothing here yet — say hello, or / for commands · @ for files"),
+                                .child(
+                                    "Nothing here yet — say hello, or / for commands · @ for files",
+                                ),
                         ),
                 )
             });
 
-        let root = div()
-            .id(gpui::ElementId::NamedInteger("tile".into(), TileView::hash(&self.key)))
-            .role(Role::Group)
-            .aria_label(SharedString::from(format!("Chat: {}", snap.title)))
-            // the a11y Click action (AT "press") lands here: same effect as
-            // the mouse-down focus path below, and it makes the tile
-            // discoverable/clickable by name in accessibility tooling
-            .on_click(cx.listener({
-                let store = self.store.clone();
-                let key = self.key.clone();
-                move |_, _, _, cx| {
-                    store.update(cx, |s, cx| s.focus_tile(&key, cx));
-                }
-            }))
-            .relative()
-            .size_full()
-            // let the grid track shrink below long-word min-content
-            .min_w_0()
-            .flex()
-            .flex_col()
-            .rounded_xl()
-            .border_1()
-            .when(snap.is_focused, |d| d.border_color(accent))
-            .when(!snap.is_focused, |d| d.border_color(theme::HAIRLINE))
-            .bg(theme::CARD)
-            .overflow_hidden()
-            // composer-only key overrides (bound over the kit's "Input" context)
-            .on_action(cx.listener(|this, _: &ComposerUp, window, cx| this.action_composer_up(window, cx)))
-            .on_action(cx.listener(|this, _: &ComposerDown, window, cx| this.action_composer_down(window, cx)))
-            .on_action(cx.listener(|this, _: &ComposerCycleAgent, _window, cx| this.action_cycle_agent(cx)))
-            // slash-menu keys (bound over "Composer > Input", see main.rs): while
-            // the menu is open they own up/down/enter/escape; closed they fall
-            // through to the exact stock behavior
-            .on_action(cx.listener(|this, _: &ComposerSlashUp, window, cx| this.action_slash_up(window, cx)))
-            .on_action(cx.listener(|this, _: &ComposerSlashDown, window, cx| this.action_slash_down(window, cx)))
-            .on_action(cx.listener(|this, _: &ComposerSlashEnter, window, cx| this.action_slash_enter(window, cx)))
-            .on_action(cx.listener(|this, _: &ComposerSlashEscape, window, cx| this.action_slash_escape(window, cx)))
-            .on_mouse_down(MouseButton::Left, {
-                let store = self.store.clone();
-                let key = self.key.clone();
-                move |_, _, cx| {
-                    store.update(cx, |s, cx| s.focus_tile(&key, cx));
-                }
-            })
-            // paint-phase capture of the tile's window bounds, so right-click
-            // positions can be turned into tile-local context-menu anchors
-            // (same paint-listener pattern as the sidebar splitter)
-            .child({
-                let origin = self.origin.clone();
-                canvas(
-                    |_, _, _| {},
-                    move |bounds, _, _, _| {
-                        origin.set((
-                            bounds.origin.x.as_f32(),
-                            bounds.origin.y.as_f32(),
-                            bounds.size.width.as_f32(),
-                            bounds.size.height.as_f32(),
-                        ));
-                    },
-                )
-                .absolute()
+        let root =
+            div()
+                .id(gpui::ElementId::NamedInteger(
+                    "tile".into(),
+                    TileView::hash(&self.key),
+                ))
+                .role(Role::Group)
+                .aria_label(SharedString::from(format!("Chat: {}", snap.title)))
+                // the a11y Click action (AT "press") lands here: same effect as
+                // the mouse-down focus path below, and it makes the tile
+                // discoverable/clickable by name in accessibility tooling
+                .on_click(cx.listener({
+                    let store = self.store.clone();
+                    let key = self.key.clone();
+                    move |_, _, _, cx| {
+                        store.update(cx, |s, cx| s.focus_tile(&key, cx));
+                    }
+                }))
+                .relative()
                 .size_full()
-            })
-            .child(header)
-            .child(div().h(px(1.)).mt_1p5().mx_2p5().bg(theme::TILE_HEADER_SEPARATOR))
-            .child(transcript_area)
-            .when(jump_visible, |d| {
-                d.child(
-                    tip(
-                        div()
-                            .absolute()
-                            .bottom(px(150.))
-                            .right_2()
-                            .id("jump")
-                            .role(Role::Button)
-                            .aria_label("Jump to latest")
-                            .rounded_full()
-                            .border_1()
-                            .border_color(theme::HAIRLINE)
-                            .bg(theme::CHIP)
-                            .p_2()
-                            .cursor_pointer()
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.pinned = true;
-                                let target = this.scroll.max_offset().y;
-                                this.scroll_to(target, cx);
-                            })),
-                        "Jump to latest",
+                // let the grid track shrink below long-word min-content
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .rounded_xl()
+                .border_1()
+                .when(snap.is_focused, |d| d.border_color(accent))
+                .when(!snap.is_focused, |d| d.border_color(theme::HAIRLINE))
+                .bg(theme::CARD)
+                .overflow_hidden()
+                // composer-only key overrides (bound over the kit's "Input" context)
+                .on_action(cx.listener(|this, _: &ComposerUp, window, cx| {
+                    this.action_composer_up(window, cx)
+                }))
+                .on_action(cx.listener(|this, _: &ComposerDown, window, cx| {
+                    this.action_composer_down(window, cx)
+                }))
+                .on_action(cx.listener(|this, _: &ComposerCycleAgent, _window, cx| {
+                    this.action_cycle_agent(cx)
+                }))
+                // slash-menu keys (bound over "Composer > Input", see main.rs): while
+                // the menu is open they own up/down/enter/escape; closed they fall
+                // through to the exact stock behavior
+                .on_action(cx.listener(|this, _: &ComposerSlashUp, window, cx| {
+                    this.action_slash_up(window, cx)
+                }))
+                .on_action(cx.listener(|this, _: &ComposerSlashDown, window, cx| {
+                    this.action_slash_down(window, cx)
+                }))
+                .on_action(cx.listener(|this, _: &ComposerSlashEnter, window, cx| {
+                    this.action_slash_enter(window, cx)
+                }))
+                .on_action(cx.listener(|this, _: &ComposerSlashEscape, window, cx| {
+                    this.action_slash_escape(window, cx)
+                }))
+                .on_mouse_down(MouseButton::Left, {
+                    let store = self.store.clone();
+                    let key = self.key.clone();
+                    move |_, _, cx| {
+                        store.update(cx, |s, cx| s.focus_tile(&key, cx));
+                    }
+                })
+                // paint-phase capture of the tile's window bounds, so right-click
+                // positions can be turned into tile-local context-menu anchors
+                // (same paint-listener pattern as the sidebar splitter)
+                .child({
+                    let origin = self.origin.clone();
+                    canvas(
+                        |_, _, _| {},
+                        move |bounds, _, _, _| {
+                            origin.set((
+                                bounds.origin.x.as_f32(),
+                                bounds.origin.y.as_f32(),
+                                bounds.size.width.as_f32(),
+                                bounds.size.height.as_f32(),
+                            ));
+                        },
                     )
-                    .child(crate::ui::icon("icons/arrow-down.svg", px(fonts.icon_medium), theme::TEXT)),
+                    .absolute()
+                    .size_full()
+                })
+                .child(header)
+                .child(
+                    div()
+                        .h(px(1.))
+                        .mt_1p5()
+                        .mx_2p5()
+                        .bg(theme::TILE_HEADER_SEPARATOR),
                 )
-            })
-            .when(snap.has_queue, |d| {
-                d.child(div().id("queue-strip").max_h(px(150.)).mx_1().mb_0p5().overflow_y_scroll().child(queue_el))
-            })
-            .child(composer_frame)
-            .child(flyout)
-            .child(picker_el)
-            .child(menu_el);
+                .child(transcript_area)
+                .when(jump_visible, |d| {
+                    d.child(
+                        tip(
+                            div()
+                                .absolute()
+                                .bottom(px(150.))
+                                .right_2()
+                                .id("jump")
+                                .role(Role::Button)
+                                .aria_label("Jump to latest")
+                                .rounded_full()
+                                .border_1()
+                                .border_color(theme::HAIRLINE)
+                                .bg(theme::CHIP)
+                                .p_2()
+                                .cursor_pointer()
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.pinned = true;
+                                    let target = this.scroll.max_offset().y;
+                                    this.scroll_to(target, cx);
+                                })),
+                            "Jump to latest",
+                        )
+                        .child(crate::ui::icon(
+                            "icons/arrow-down.svg",
+                            px(fonts.icon_medium),
+                            theme::TEXT,
+                        )),
+                    )
+                })
+                .when(snap.has_queue, |d| {
+                    d.child(
+                        div()
+                            .id("queue-strip")
+                            .max_h(px(150.))
+                            .mx_1()
+                            .mb_0p5()
+                            .overflow_y_scroll()
+                            .child(queue_el),
+                    )
+                })
+                .child(composer_frame)
+                .child(flyout)
+                .child(picker_el)
+                .child(menu_el);
 
         root.into_any_element()
     }
@@ -3258,7 +3853,11 @@ impl SuggestMenu {
         let prefix = text.get(1..).unwrap_or("");
         // the typed part is `/name` — cut at the first space so args don't
         // narrow the list away
-        let prefix = prefix.split(char::is_whitespace).next().unwrap_or("").to_lowercase();
+        let prefix = prefix
+            .split(char::is_whitespace)
+            .next()
+            .unwrap_or("")
+            .to_lowercase();
         self.store
             .read(cx)
             .tile_commands(&self.tile_key)
@@ -3340,7 +3939,9 @@ impl SuggestMenu {
     fn arm_search(&mut self, query: String, cx: &mut Context<Self>) {
         self.pending_search = Some(query);
         self.search_task = Some(cx.spawn(async move |menu, cx| {
-            cx.background_executor().timer(std::time::Duration::from_millis(200)).await;
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(200))
+                .await;
             let _ = menu.update(cx, |menu, cx| menu.fire_search(cx));
         }));
     }
@@ -3348,7 +3949,9 @@ impl SuggestMenu {
     /// Debounce elapsed: send the pending query unless typing moved on (the
     /// task was replaced, so a stale timer never reaches here).
     fn fire_search(&mut self, cx: &mut Context<Self>) {
-        let Some(query) = self.pending_search.take() else { return };
+        let Some(query) = self.pending_search.take() else {
+            return;
+        };
         if self.open
             && self.mode == SuggestMode::Files
             && self.find_requested.as_deref() != Some(query.as_str())
@@ -3366,7 +3969,11 @@ impl SuggestMenu {
         let count = self.visible(&text, cx);
         if count > 0 {
             self.selected = if dir < 0 {
-                if self.selected == 0 { count - 1 } else { self.selected - 1 }
+                if self.selected == 0 {
+                    count - 1
+                } else {
+                    self.selected - 1
+                }
             } else {
                 (self.selected + 1) % count
             };
@@ -3397,7 +4004,10 @@ impl SuggestMenu {
                 })
             }
             SuggestMode::Files => {
-                let paths = self.store.read(cx).file_results_for(&self.tile_key, &self.at_query)?;
+                let paths = self
+                    .store
+                    .read(cx)
+                    .file_results_for(&self.tile_key, &self.at_query)?;
                 let path = paths.get(self.selected).cloned()?;
                 let start = self.at_start.min(text.len());
                 if !text.is_char_boundary(start) {
@@ -3420,9 +4030,12 @@ impl SuggestMenu {
     /// Row click: same acceptance as Enter — a click does not run inside the
     /// tile's update, so driving the tile entity from here is safe.
     fn accept_row(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(text) = self.compute_acceptance(cx) else { return };
+        let Some(text) = self.compute_acceptance(cx) else {
+            return;
+        };
         self.close_after_accept(cx);
-        self.tile.update(cx, |tile, cx| tile.insert_composer_text(text, window, cx));
+        self.tile
+            .update(cx, |tile, cx| tile.insert_composer_text(text, window, cx));
     }
 }
 
@@ -3454,23 +4067,35 @@ impl Render for SuggestMenu {
                 let matches = self.command_matches(&input, cx);
                 count = matches.len();
                 if count == 0 {
-                    rows = rows.child(muted_row(if self.store.read(cx).tile_commands(&self.tile_key).is_empty() {
-                        "no server commands".into()
-                    } else {
-                        "no matching command".into()
-                    }));
+                    rows = rows.child(muted_row(
+                        if self.store.read(cx).tile_commands(&self.tile_key).is_empty() {
+                            "no server commands".into()
+                        } else {
+                            "no matching command".into()
+                        },
+                    ));
                 }
                 for (ix, cmd) in matches.iter().enumerate() {
                     if ix == SLASH_MENU_VISIBLE {
-                        rows = rows.child(muted_row(format!("+{} more — keep typing", count - SLASH_MENU_VISIBLE)));
+                        rows = rows.child(muted_row(format!(
+                            "+{} more — keep typing",
+                            count - SLASH_MENU_VISIBLE
+                        )));
                         break;
                     }
                     let selected = ix == self.selected;
                     rows = rows.child(
                         div()
-                            .id(gpui::ElementId::NamedInteger("suggest-row".into(), ix as u64))
+                            .id(gpui::ElementId::NamedInteger(
+                                "suggest-row".into(),
+                                ix as u64,
+                            ))
                             .role(Role::ListBoxOption)
-                            .aria_label(SharedString::from(format!("/{} — {}", cmd.name, cmd.description.lines().next().unwrap_or(""))))
+                            .aria_label(SharedString::from(format!(
+                                "/{} — {}",
+                                cmd.name,
+                                cmd.description.lines().next().unwrap_or("")
+                            )))
                             .aria_selected(selected)
                             .flex()
                             .items_center()
@@ -3501,7 +4126,12 @@ impl Render for SuggestMenu {
                                     .text_color(theme::TEXT_MUTED)
                                     .truncate()
                                     .child({
-                                        let desc = cmd.description.lines().next().unwrap_or("").to_string();
+                                        let desc = cmd
+                                            .description
+                                            .lines()
+                                            .next()
+                                            .unwrap_or("")
+                                            .to_string();
                                         SharedString::from(desc)
                                     }),
                             )
@@ -3510,28 +4140,44 @@ impl Render for SuggestMenu {
                                     .flex_shrink_0()
                                     .text_size(px(fonts.font_micro))
                                     .text_color(theme::TEXT_FAINT)
-                                    .child(if cmd.source == "skill" { "skill" } else { "cmd" }),
+                                    .child(if cmd.source == "skill" {
+                                        "skill"
+                                    } else {
+                                        "cmd"
+                                    }),
                             ),
                     );
                 }
             }
             SuggestMode::Files => {
-                let results = self.store.read(cx).file_results_for(&self.tile_key, &self.at_query).cloned();
+                let results = self
+                    .store
+                    .read(cx)
+                    .file_results_for(&self.tile_key, &self.at_query)
+                    .cloned();
                 match results {
                     None => rows = rows.child(muted_row("searching files…".into())),
-                    Some(paths) if paths.is_empty() => rows = rows.child(muted_row("no matching file".into())),
+                    Some(paths) if paths.is_empty() => {
+                        rows = rows.child(muted_row("no matching file".into()))
+                    }
                     Some(paths) => {
                         count = paths.len();
                         for (ix, path) in paths.iter().enumerate() {
                             if ix == SLASH_MENU_VISIBLE {
-                                rows = rows.child(muted_row(format!("+{} more — keep typing", count - SLASH_MENU_VISIBLE)));
+                                rows = rows.child(muted_row(format!(
+                                    "+{} more — keep typing",
+                                    count - SLASH_MENU_VISIBLE
+                                )));
                                 break;
                             }
                             let selected = ix == self.selected;
                             let path = path.clone();
                             rows = rows.child(
                                 div()
-                                    .id(gpui::ElementId::NamedInteger("suggest-row".into(), ix as u64))
+                                    .id(gpui::ElementId::NamedInteger(
+                                        "suggest-row".into(),
+                                        ix as u64,
+                                    ))
                                     .role(Role::ListBoxOption)
                                     .aria_label(SharedString::from(path.clone()))
                                     .aria_selected(selected)
@@ -3548,7 +4194,11 @@ impl Render for SuggestMenu {
                                         this.selected = ix;
                                         this.accept_row(window, cx);
                                     }))
-                                    .child(crate::ui::icon("icons/doc.svg", px(fonts.icon_small), theme::TEXT_MUTED))
+                                    .child(crate::ui::icon(
+                                        "icons/doc.svg",
+                                        px(fonts.icon_small),
+                                        theme::TEXT_MUTED,
+                                    ))
                                     .child(
                                         div()
                                             .flex_1()

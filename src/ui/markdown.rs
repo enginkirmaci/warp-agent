@@ -9,8 +9,8 @@
 //! string, everything else skips straight through.
 
 use gpui::{
-    div, px, AnyElement, ElementId, IntoElement, InteractiveElement, ParentElement, SharedString,
-    StatefulInteractiveElement, Styled, WeakEntity,
+    AnyElement, ElementId, InteractiveElement, IntoElement, ParentElement, SharedString,
+    StatefulInteractiveElement, Styled, WeakEntity, div, px,
 };
 use gpui_kit::base::text::TextView;
 
@@ -49,38 +49,43 @@ pub fn render_markdown(
         ElementId::NamedInteger("md".into(), TileView::hash(&flash_base)),
         text,
     )
-        .selectable(true)
-        .shared_code_block_highlighter(warpui_kit_diff::shared_highlighter(cx))
-        .code_block_actions(move |block, _, _| {
-            let code = block.code();
-            let n = block_index.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            let key = format!("{flash_base}#code{n}");
-            let flashed = flash_active.as_deref() == Some(key.as_str());
-            let (icon_path, icon_color, border) = if flashed {
-                ("icons/check.svg", accent, accent)
-            } else {
-                ("icons/copy.svg", crate::theme::TEXT_MUTED, crate::theme::HAIRLINE)
-            };
-            let click_view = view.clone();
-            let click_key = key.clone();
-            crate::ui::tooltip::tip(
-                div()
-                    .id("copy-code")
-                    .cursor_pointer()
-                    .p_1()
-                    .rounded_sm()
-                    .border_1()
-                    .border_color(border)
-                    .bg(crate::theme::CHIP)
-                    .hover(|s| s.bg(crate::theme::HOVER))
-                    .on_click(move |_, _, cx| {
-                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(code.to_string()));
-                        // flash_copied owns the one-second revert timer
-                        let _ = click_view.update(cx, |this, cx| this.flash_copied(click_key.clone(), cx));
-                    }),
-                "Copy code",
+    .selectable(true)
+    .shared_code_block_highlighter(warpui_kit_diff::shared_highlighter(cx))
+    .code_block_actions(move |block, _, _| {
+        let code = block.code();
+        let n = block_index.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let key = format!("{flash_base}#code{n}");
+        let flashed = flash_active.as_deref() == Some(key.as_str());
+        let (icon_path, icon_color, border) = if flashed {
+            ("icons/check.svg", accent, accent)
+        } else {
+            (
+                "icons/copy.svg",
+                crate::theme::TEXT_MUTED,
+                crate::theme::HAIRLINE,
             )
-            .child(crate::ui::icon(icon_path, px(icon_px), icon_color))
-        })
-        .into_any_element()
+        };
+        let click_view = view.clone();
+        let click_key = key.clone();
+        crate::ui::tooltip::tip(
+            div()
+                .id("copy-code")
+                .cursor_pointer()
+                .p_1()
+                .rounded_sm()
+                .border_1()
+                .border_color(border)
+                .bg(crate::theme::CHIP)
+                .hover(|s| s.bg(crate::theme::HOVER))
+                .on_click(move |_, _, cx| {
+                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(code.to_string()));
+                    // flash_copied owns the one-second revert timer
+                    let _ =
+                        click_view.update(cx, |this, cx| this.flash_copied(click_key.clone(), cx));
+                }),
+            "Copy code",
+        )
+        .child(crate::ui::icon(icon_path, px(icon_px), icon_color))
+    })
+    .into_any_element()
 }

@@ -15,7 +15,9 @@ pub struct EmbedAssets {
 
 impl EmbedAssets {
     pub fn new() -> Self {
-        Self { kit: gpui_kit::assets::Assets }
+        Self {
+            kit: gpui_kit::assets::Assets,
+        }
     }
 }
 

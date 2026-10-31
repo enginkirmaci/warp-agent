@@ -6,7 +6,9 @@
 
 use crate::theme;
 use gpui::prelude::*;
-use gpui::{div, px, AnyElement, App, ClickEvent, Div, ElementId, FontWeight, Role, SharedString, Window};
+use gpui::{
+    AnyElement, App, ClickEvent, Div, ElementId, FontWeight, Role, SharedString, Window, div, px,
+};
 
 /// The button looks: accent-filled pill, quiet chip pill, and the outlined
 /// settings/restore style (hairline border, 26px min height). Primary carries

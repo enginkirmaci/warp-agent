@@ -10,8 +10,8 @@
 //! client and event translation live in [`crate::dsh`], keyed by the reserved
 //! workspace key [`DSH_SERVER_KEY`].
 
-use anyhow::{anyhow, Context as _, Result};
-use serde_json::{json, Value};
+use anyhow::{Context as _, Result, anyhow};
+use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -150,28 +150,48 @@ impl ServerProcess {
         // attached to (its token is unknowable), so always spawn our own
         if kind == HarnessKind::OpenCode && is_healthy(&client, &base_url).await {
             tracing::info!("attached to a healthy opencode server at {base_url}");
-            on_log(format!("attaching to a healthy opencode server at {base_url}"));
-            return Ok(ServerProcess { base_url, token: None, child: Arc::new(Mutex::new(None)) });
+            on_log(format!(
+                "attaching to a healthy opencode server at {base_url}"
+            ));
+            return Ok(ServerProcess {
+                base_url,
+                token: None,
+                child: Arc::new(Mutex::new(None)),
+            });
         }
 
         let mut command = tokio::process::Command::new(executable);
         match kind {
             HarnessKind::OpenCode => {
                 command
-                    .args(["serve", "--hostname", "127.0.0.1", "--port", &port.to_string()])
+                    .args([
+                        "serve",
+                        "--hostname",
+                        "127.0.0.1",
+                        "--port",
+                        &port.to_string(),
+                    ])
                     .env("OPENCODE_CONFIG_CONTENT", ASK_CONFIG);
             }
             HarnessKind::Dsh => {
-                command
-                    .args(["web", "--no-open", "--host", "127.0.0.1", "--port", &port.to_string()]);
+                command.args([
+                    "web",
+                    "--no-open",
+                    "--host",
+                    "127.0.0.1",
+                    "--port",
+                    &port.to_string(),
+                ]);
             }
         }
         command
-            .current_dir(std::path::Path::new(if std::path::Path::new(folder).exists() {
-                folder
-            } else {
-                "."
-            }))
+            .current_dir(std::path::Path::new(
+                if std::path::Path::new(folder).exists() {
+                    folder
+                } else {
+                    "."
+                },
+            ))
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
@@ -220,8 +240,11 @@ impl ServerProcess {
             });
         }
 
-        let mut process =
-            ServerProcess { base_url: base_url.clone(), token: None, child: Arc::new(Mutex::new(Some(child))) };
+        let mut process = ServerProcess {
+            base_url: base_url.clone(),
+            token: None,
+            child: Arc::new(Mutex::new(Some(child))),
+        };
 
         // dsh is a node app — give its boot far more headroom than opencode
         let timeout = match kind {
@@ -240,11 +263,11 @@ impl ServerProcess {
             }
             {
                 let mut guard = process.child.lock().expect("child lock");
-                if let Some(child) = guard.as_mut() {
-                    if let Ok(Some(status)) = child.try_wait() {
-                        tracing::warn!("server exited early with code {status}");
-                        return Err(anyhow!("the server exited with code {status}."));
-                    }
+                if let Some(child) = guard.as_mut()
+                    && let Ok(Some(status)) = child.try_wait()
+                {
+                    tracing::warn!("server exited early with code {status}");
+                    return Err(anyhow!("the server exited with code {status}."));
                 }
             }
             match kind {
@@ -319,7 +342,11 @@ impl ApiClient {
     }
 
     pub async fn list_sessions(&self) -> Result<Vec<SessionInfo>> {
-        let resp = self.http.get(format!("{}/session", self.base_url)).send().await?;
+        let resp = self
+            .http
+            .get(format!("{}/session", self.base_url))
+            .send()
+            .await?;
         let value: Value = error_for_status(resp).await?.json().await?;
         Ok(value
             .as_array()
@@ -351,7 +378,7 @@ impl ApiClient {
                 let parts = m
                     .get("parts")
                     .and_then(Value::as_array)
-                    .map(|p| p.clone())
+                    .cloned()
                     .unwrap_or_default();
                 messages.push(StoredMessage {
                     id: id.to_string(),
@@ -446,6 +473,10 @@ impl ApiClient {
     /// config and starts the turn — the client never sees the expanded text.
     /// `model` is a "provider/model" string on this route, unlike the object
     /// shape the plain message route takes.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the parameter list mirrors the server's POST body one-to-one"
+    )]
     pub async fn send_command(
         &self,
         session_id: &str,
@@ -490,10 +521,18 @@ impl ApiClient {
         error_for_status(resp).await.map(|_| ())
     }
 
-    pub async fn respond_permission(&self, session_id: &str, permission_id: &str, response: &str) -> Result<()> {
+    pub async fn respond_permission(
+        &self,
+        session_id: &str,
+        permission_id: &str,
+        response: &str,
+    ) -> Result<()> {
         let resp = self
             .http
-            .post(format!("{}/session/{}/permissions/{}", self.base_url, session_id, permission_id))
+            .post(format!(
+                "{}/session/{}/permissions/{}",
+                self.base_url, session_id, permission_id
+            ))
             .json(&json!({ "response": response }))
             .send()
             .await?;
@@ -511,7 +550,11 @@ impl ApiClient {
     }
 
     pub async fn get_questions(&self) -> Result<Vec<QuestionRequestInfo>> {
-        let resp = self.http.get(format!("{}/question", self.base_url)).send().await?;
+        let resp = self
+            .http
+            .get(format!("{}/question", self.base_url))
+            .send()
+            .await?;
         let value: Value = error_for_status(resp).await?.json().await?;
         Ok(value
             .as_array()
@@ -540,7 +583,11 @@ impl ApiClient {
     }
 
     pub async fn get_agents(&self) -> Result<Vec<AgentInfo>> {
-        let resp = self.http.get(format!("{}/agent", self.base_url)).send().await?;
+        let resp = self
+            .http
+            .get(format!("{}/agent", self.base_url))
+            .send()
+            .await?;
         let value: Value = error_for_status(resp).await?.json().await?;
         let mut agents = Vec::new();
         if let Some(arr) = value.as_array() {
@@ -560,7 +607,11 @@ impl ApiClient {
 
     /// The server's slash commands and skills, in server order.
     pub async fn get_commands(&self) -> Result<Vec<CommandInfo>> {
-        let resp = self.http.get(format!("{}/command", self.base_url)).send().await?;
+        let resp = self
+            .http
+            .get(format!("{}/command", self.base_url))
+            .send()
+            .await?;
         let value: Value = error_for_status(resp).await?.json().await?;
         let mut commands = Vec::new();
         if let Some(arr) = value.as_array() {
@@ -571,8 +622,16 @@ impl ApiClient {
                 commands.push(CommandInfo {
                     name_lower: name.to_lowercase(),
                     name: name.to_string(),
-                    description: c.get("description").and_then(Value::as_str).unwrap_or("").into(),
-                    source: c.get("source").and_then(Value::as_str).unwrap_or("command").into(),
+                    description: c
+                        .get("description")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .into(),
+                    source: c
+                        .get("source")
+                        .and_then(Value::as_str)
+                        .unwrap_or("command")
+                        .into(),
                 });
             }
         }
@@ -602,8 +661,16 @@ impl ApiClient {
     /// The server's merged config (global + project + env content). The `mcp`
     /// section lists the workspace's configured MCP servers.
     pub async fn get_config(&self) -> Result<Value> {
-        let resp = self.http.get(format!("{}/config", self.base_url)).send().await?;
-        error_for_status(resp).await?.json().await.map_err(anyhow::Error::from)
+        let resp = self
+            .http
+            .get(format!("{}/config", self.base_url))
+            .send()
+            .await?;
+        error_for_status(resp)
+            .await?
+            .json()
+            .await
+            .map_err(anyhow::Error::from)
     }
 
     /// Runtime MCP toggles: they change which tools the running server exposes
@@ -710,7 +777,9 @@ impl ApiClient {
                 let line: Vec<u8> = buffer.drain(..=pos).collect();
                 let line = String::from_utf8_lossy(&line[..line.len() - 1]);
                 let line = line.trim_end_matches('\r');
-                let Some(payload) = line.strip_prefix("data:") else { continue };
+                let Some(payload) = line.strip_prefix("data:") else {
+                    continue;
+                };
                 let payload = payload.trim();
                 if payload.is_empty() {
                     continue;
@@ -729,7 +798,14 @@ async fn error_for_status(resp: reqwest::Response) -> Result<reqwest::Response> 
         let detail = resp.text().await.unwrap_or_default();
         let detail = truncate(&detail, 1000);
         tracing::warn!("request failed: {status} — {detail}");
-        return Err(anyhow!("{status}{}", if detail.is_empty() { String::new() } else { format!(" — {detail}") }));
+        return Err(anyhow!(
+            "{status}{}",
+            if detail.is_empty() {
+                String::new()
+            } else {
+                format!(" — {detail}")
+            }
+        ));
     }
     Ok(resp)
 }
@@ -751,8 +827,14 @@ fn read_session(s: &Value) -> SessionInfo {
     SessionInfo {
         id: s.get("id").and_then(Value::as_str).unwrap_or("").into(),
         title: s.get("title").and_then(Value::as_str).unwrap_or("").into(),
-        updated_ms: s.pointer("/time/updated").and_then(Value::as_i64).unwrap_or(0),
-        created_ms: s.pointer("/time/created").and_then(Value::as_i64).unwrap_or(0),
+        updated_ms: s
+            .pointer("/time/updated")
+            .and_then(Value::as_i64)
+            .unwrap_or(0),
+        created_ms: s
+            .pointer("/time/created")
+            .and_then(Value::as_i64)
+            .unwrap_or(0),
         parent_id: s.get("parentID").and_then(Value::as_str).map(String::from),
     }
 }
@@ -773,14 +855,22 @@ pub fn read_question_request(r: &Value) -> Option<QuestionRequestInfo> {
                         let label = o.get("label").and_then(Value::as_str)?;
                         Some(QuestionOptionInfo {
                             label: label.into(),
-                            description: o.get("description").and_then(Value::as_str).unwrap_or("").into(),
+                            description: o
+                                .get("description")
+                                .and_then(Value::as_str)
+                                .unwrap_or("")
+                                .into(),
                         })
                     })
                     .collect()
             })
             .unwrap_or_default();
         questions.push(QuestionPromptInfo {
-            question: q.get("question").and_then(Value::as_str).unwrap_or("").into(),
+            question: q
+                .get("question")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .into(),
             header: q.get("header").and_then(Value::as_str).unwrap_or("").into(),
             multiple: q.get("multiple").and_then(Value::as_bool).unwrap_or(false),
             options,
@@ -797,12 +887,24 @@ pub(crate) fn base64_encode(data: &[u8]) -> String {
     const TABLE: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
     for chunk in data.chunks(3) {
-        let b = [chunk[0], *chunk.get(1).unwrap_or(&0), *chunk.get(2).unwrap_or(&0)];
+        let b = [
+            chunk[0],
+            *chunk.get(1).unwrap_or(&0),
+            *chunk.get(2).unwrap_or(&0),
+        ];
         let n = ((b[0] as u32) << 16) | ((b[1] as u32) << 8) | b[2] as u32;
         out.push(TABLE[(n >> 18) as usize & 63] as char);
         out.push(TABLE[(n >> 12) as usize & 63] as char);
-        out.push(if chunk.len() > 1 { TABLE[(n >> 6) as usize & 63] as char } else { '=' });
-        out.push(if chunk.len() > 2 { TABLE[n as usize & 63] as char } else { '=' });
+        out.push(if chunk.len() > 1 {
+            TABLE[(n >> 6) as usize & 63] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            TABLE[n as usize & 63] as char
+        } else {
+            '='
+        });
     }
     out
 }
@@ -812,7 +914,12 @@ pub(crate) fn base64_encode(data: &[u8]) -> String {
 pub enum NetCommand {
     /// Spawn (or attach to) the server for a workspace and start its event pump.
     /// `ws_key` is [`DSH_SERVER_KEY`] for the shared dsh singleton.
-    StartServer { ws_key: String, kind: HarnessKind, executable: String, folder: String },
+    StartServer {
+        ws_key: String,
+        kind: HarnessKind,
+        executable: String,
+        folder: String,
+    },
     /// Stop the workspace's server and event pump.
     StopServer { ws_key: String },
     /// Run a request against the workspace's API; results come back as UiEvents.
@@ -839,38 +946,81 @@ pub enum ApiRequest {
     /// dsh: one workspace folder's sessions, filtered by cwd from the shared
     /// server's list. The reply carries the folder as ws_key so the store
     /// applies it like that workspace's own list.
-    ListDshSessions { folder: String },
+    ListDshSessions {
+        folder: String,
+    },
     /// dsh: create a session owned by `folder` (dsh sessions carry their own
     /// cwd). The reply carries the folder as ws_key.
-    CreateDshSession { folder: String, title: String },
+    CreateDshSession {
+        folder: String,
+        title: String,
+    },
     /// dsh: the fork flow — an empty session whose composer is seeded with
     /// `context` (the dsh server has no parts-append endpoint either).
-    CreateDshForkSession { folder: String, title: String, context: String },
+    CreateDshForkSession {
+        folder: String,
+        title: String,
+        context: String,
+    },
     ListModels,
     ListAgents,
-    GetMessages { session_id: String },
-    CreateSession { title: String },
+    GetMessages {
+        session_id: String,
+    },
+    CreateSession {
+        title: String,
+    },
     /// Fork: create an empty session for a transcript seed; the context rides
     /// back on the event because it goes into the new tile's composer, never
     /// to the model (the serve API cannot append parts without a turn).
-    CreateForkSession { title: String, context: String },
-    RenameSession { session_id: String, title: String },
-    DeleteSession { session_id: String },
-    Abort { session_id: String },
-    RespondPermission { session_id: String, permission_id: String, response: String },
-    ReplyV2 { request_id: String, response: String },
-    GetQuestions { for_session: String },
-    ReplyQuestion { request_id: String, answers: Vec<Vec<String>> },
-    RejectQuestion { request_id: String },
+    CreateForkSession {
+        title: String,
+        context: String,
+    },
+    RenameSession {
+        session_id: String,
+        title: String,
+    },
+    DeleteSession {
+        session_id: String,
+    },
+    Abort {
+        session_id: String,
+    },
+    RespondPermission {
+        session_id: String,
+        permission_id: String,
+        response: String,
+    },
+    ReplyV2 {
+        request_id: String,
+        response: String,
+    },
+    GetQuestions {
+        for_session: String,
+    },
+    ReplyQuestion {
+        request_id: String,
+        answers: Vec<Vec<String>>,
+    },
+    RejectQuestion {
+        request_id: String,
+    },
     /// The workspace's slash commands and skills (GET /command).
     ListCommands,
     /// Filename search for the `@` mention menu (GET /find/file).
-    FindFiles { query: String },
+    FindFiles {
+        query: String,
+    },
     /// Names of the workspace's configured MCP servers (GET /config "mcp" section).
     ListMcpNames,
     /// Runtime MCP toggle for one configured server; instant, no config write.
-    McpConnect { name: String },
-    McpDisconnect { name: String },
+    McpConnect {
+        name: String,
+    },
+    McpDisconnect {
+        name: String,
+    },
 }
 
 /// Live state of a workspace's event pump. Connected is reported on every
@@ -886,36 +1036,107 @@ pub enum StreamStatus {
 
 /// Everything the UI learns from the network thread arrives as one of these.
 pub enum UiEvent {
-    ServerStarted { ws_key: String, result: Result<()> },
+    ServerStarted {
+        ws_key: String,
+        result: Result<()>,
+    },
     ServerStopped,
     /// the spawned serve process exited on its own (not a user stop)
-    ServerCrashed { ws_key: String },
-    Event { ws_key: String, event: Value },
-    StreamStatus { ws_key: String, status: StreamStatus },
+    ServerCrashed {
+        ws_key: String,
+    },
+    Event {
+        ws_key: String,
+        event: Value,
+    },
+    StreamStatus {
+        ws_key: String,
+        status: StreamStatus,
+    },
     /// Latest /global/health answer; None until the first poll lands.
-    HealthChanged { ws_key: String, healthy: Option<bool> },
-    SessionsLoaded { ws_key: String, result: Result<Vec<SessionInfo>> },
-    MessagesLoaded { ws_key: String, session_id: String, result: Result<Vec<StoredMessage>> },
-    SessionCreated { ws_key: String, result: Result<SessionInfo> },
-    ForkSessionCreated { ws_key: String, context: String, result: Result<SessionInfo> },
-    SessionRenamed { session_id: String, result: Result<SessionInfo> },
-    SessionDeleted { session_id: String, result: Result<()> },
-    Aborted { session_id: String, result: Result<()> },
-    PermissionReplied { permission_id: String, response: String, is_auto: bool, result: Result<()> },
-    QuestionsPulled { for_session: String, result: Result<Vec<QuestionRequestInfo>> },
-    QuestionReplied { request_id: String, summary: String, result: Result<()> },
-    ModelsLoaded { result: Result<Vec<ModelInfo>> },
-    AgentsLoaded { result: Result<Vec<AgentInfo>> },
-    CommandsLoaded { ws_key: String, result: Result<Vec<CommandInfo>> },
+    HealthChanged {
+        ws_key: String,
+        healthy: Option<bool>,
+    },
+    SessionsLoaded {
+        ws_key: String,
+        result: Result<Vec<SessionInfo>>,
+    },
+    MessagesLoaded {
+        ws_key: String,
+        session_id: String,
+        result: Result<Vec<StoredMessage>>,
+    },
+    SessionCreated {
+        ws_key: String,
+        result: Result<SessionInfo>,
+    },
+    ForkSessionCreated {
+        ws_key: String,
+        context: String,
+        result: Result<SessionInfo>,
+    },
+    SessionRenamed {
+        session_id: String,
+        result: Result<SessionInfo>,
+    },
+    SessionDeleted {
+        session_id: String,
+        result: Result<()>,
+    },
+    Aborted {
+        session_id: String,
+        result: Result<()>,
+    },
+    PermissionReplied {
+        permission_id: String,
+        response: String,
+        is_auto: bool,
+        result: Result<()>,
+    },
+    QuestionsPulled {
+        for_session: String,
+        result: Result<Vec<QuestionRequestInfo>>,
+    },
+    QuestionReplied {
+        request_id: String,
+        summary: String,
+        result: Result<()>,
+    },
+    ModelsLoaded {
+        result: Result<Vec<ModelInfo>>,
+    },
+    AgentsLoaded {
+        result: Result<Vec<AgentInfo>>,
+    },
+    CommandsLoaded {
+        ws_key: String,
+        result: Result<Vec<CommandInfo>>,
+    },
     /// Answer to a FindFiles request; the query rides along so stale answers
     /// can be told apart from the menu's current token.
-    FilesFound { ws_key: String, query: String, result: Result<Vec<String>> },
+    FilesFound {
+        ws_key: String,
+        query: String,
+        result: Result<Vec<String>>,
+    },
     /// The workspace's configured MCP server names, in stable name order.
-    McpNamesLoaded { ws_key: String, result: Result<Vec<String>> },
-    MessageSendFailed { session_id: String, error: String },
-    Log { ws_key: String, line: String },
+    McpNamesLoaded {
+        ws_key: String,
+        result: Result<Vec<String>>,
+    },
+    MessageSendFailed {
+        session_id: String,
+        error: String,
+    },
+    Log {
+        ws_key: String,
+        line: String,
+    },
     /// A door command relayed from the ipc listener; answered by the store.
-    Ipc { command: crate::ipc::IpcCommand },
+    Ipc {
+        command: crate::ipc::IpcCommand,
+    },
 }
 
 struct WorkspaceNet {
@@ -940,7 +1161,11 @@ impl NetSender {
     }
 }
 
-pub fn spawn_net_thread() -> (std::thread::JoinHandle<()>, NetSender, async_channel::Receiver<UiEvent>) {
+pub fn spawn_net_thread() -> (
+    std::thread::JoinHandle<()>,
+    NetSender,
+    async_channel::Receiver<UiEvent>,
+) {
     let (command_tx, command_rx) = async_channel::unbounded::<NetCommand>();
     let (event_tx, event_rx) = async_channel::unbounded::<UiEvent>();
     let handle = std::thread::Builder::new()
@@ -956,7 +1181,10 @@ pub fn spawn_net_thread() -> (std::thread::JoinHandle<()>, NetSender, async_chan
     (handle, NetSender(command_tx), event_rx)
 }
 
-async fn net_main(command_rx: async_channel::Receiver<NetCommand>, event_tx: async_channel::Sender<UiEvent>) {
+async fn net_main(
+    command_rx: async_channel::Receiver<NetCommand>,
+    event_tx: async_channel::Sender<UiEvent>,
+) {
     let mut workspaces: HashMap<String, WorkspaceNet> = HashMap::new();
     // the DevTools door rides this runtime; a bind failure logs and the app
     // keeps working — the door is an integration, not a dependency
@@ -970,21 +1198,42 @@ async fn net_main(command_rx: async_channel::Receiver<NetCommand>, event_tx: asy
     };
     while let Ok(command) = command_rx.recv().await {
         match command {
-            NetCommand::StartServer { ws_key, kind, executable, folder } => {
+            NetCommand::StartServer {
+                ws_key,
+                kind,
+                executable,
+                folder,
+            } => {
                 let event_tx = event_tx.clone();
                 // sequential spawn keeps one workspace's failed start from racing others
-                match start_workspace(&mut workspaces, &ws_key, kind, &executable, &folder, &event_tx).await {
+                match start_workspace(
+                    &mut workspaces,
+                    &ws_key,
+                    kind,
+                    &executable,
+                    &folder,
+                    &event_tx,
+                )
+                .await
+                {
                     Ok(()) => {
                         // async_channel::send is a future — dropping it without
                         // awaiting silently discards the event
-                        let _ = event_tx.send(UiEvent::ServerStarted { ws_key: ws_key.clone(), result: Ok(()) }).await;
+                        let _ = event_tx
+                            .send(UiEvent::ServerStarted {
+                                ws_key: ws_key.clone(),
+                                result: Ok(()),
+                            })
+                            .await;
                     }
                     Err(err) => {
                         workspaces.remove(&ws_key);
-                        let _ = event_tx.send(UiEvent::ServerStarted {
-                            ws_key,
-                            result: Err(anyhow!("{err}")),
-                        }).await;
+                        let _ = event_tx
+                            .send(UiEvent::ServerStarted {
+                                ws_key,
+                                result: Err(anyhow!("{err}")),
+                            })
+                            .await;
                     }
                 }
             }
@@ -1016,7 +1265,9 @@ async fn net_main(command_rx: async_channel::Receiver<NetCommand>, event_tx: asy
                         });
                     }
                     HarnessKind::Dsh => {
-                        let Some(handle) = ws.dsh.clone() else { continue };
+                        let Some(handle) = ws.dsh.clone() else {
+                            continue;
+                        };
                         tokio::spawn(async move {
                             let event = crate::dsh::run_request(&handle, ws_key, request).await;
                             let _ = event_tx.send(event).await;
@@ -1024,7 +1275,16 @@ async fn net_main(command_rx: async_channel::Receiver<NetCommand>, event_tx: asy
                     }
                 }
             }
-            NetCommand::SendMessage { ws_key, session_id, text, model, variant, agent, attachments, command } => {
+            NetCommand::SendMessage {
+                ws_key,
+                session_id,
+                text,
+                model,
+                variant,
+                agent,
+                attachments,
+                command,
+            } => {
                 let Some(ws) = workspaces.get(&ws_key) else {
                     // don't drop silently — the tile would sit "running" forever
                     let _ = event_tx
@@ -1040,7 +1300,18 @@ async fn net_main(command_rx: async_channel::Receiver<NetCommand>, event_tx: asy
                     HarnessKind::OpenCode => {
                         let client = ws.api.clone();
                         tokio::spawn(async move {
-                            send_with_blips(&client, session_id, text, model, variant, agent, attachments, command, &event_tx).await;
+                            send_with_blips(
+                                &client,
+                                session_id,
+                                text,
+                                model,
+                                variant,
+                                agent,
+                                attachments,
+                                command,
+                                &event_tx,
+                            )
+                            .await;
                         });
                     }
                     HarnessKind::Dsh => {
@@ -1067,7 +1338,10 @@ async fn net_main(command_rx: async_channel::Receiver<NetCommand>, event_tx: asy
                             .await;
                             if let Err(err) = result {
                                 let _ = event_tx
-                                    .send(UiEvent::MessageSendFailed { session_id, error: format!("{err:#}") })
+                                    .send(UiEvent::MessageSendFailed {
+                                        session_id,
+                                        error: format!("{err:#}"),
+                                    })
                                     .await;
                             }
                         });
@@ -1098,7 +1372,11 @@ async fn start_workspace(
     folder: &str,
     event_tx: &async_channel::Sender<UiEvent>,
 ) -> Result<()> {
-    if workspaces.get(ws_key).map(|ws| ws.process.is_some()).unwrap_or(false) {
+    if workspaces
+        .get(ws_key)
+        .map(|ws| ws.process.is_some())
+        .unwrap_or(false)
+    {
         // already running: reuse
         return Ok(());
     }
@@ -1112,7 +1390,10 @@ async fn start_workspace(
         port,
         Box::new(move |line| {
             // sync closure: send_blocking; unbounded channel so it never blocks
-            let _ = log_tx.send_blocking(UiEvent::Log { ws_key: key.clone(), line });
+            let _ = log_tx.send_blocking(UiEvent::Log {
+                ws_key: key.clone(),
+                line,
+            });
         }),
     )
     .await?;
@@ -1145,7 +1426,11 @@ async fn start_workspace(
             loop {
                 if child_exited(&poll_probe) {
                     tracing::warn!("[{poll_key}] dsh web exited — reporting crash");
-                    let _ = poll_tx.send(UiEvent::ServerCrashed { ws_key: poll_key.clone() }).await;
+                    let _ = poll_tx
+                        .send(UiEvent::ServerCrashed {
+                            ws_key: poll_key.clone(),
+                        })
+                        .await;
                     return;
                 }
                 let healthy = tokio::select! {
@@ -1153,7 +1438,10 @@ async fn start_workspace(
                     healthy = poll_handle.alive() => healthy,
                 };
                 let _ = poll_tx
-                    .send(UiEvent::HealthChanged { ws_key: poll_key.clone(), healthy: Some(healthy) })
+                    .send(UiEvent::HealthChanged {
+                        ws_key: poll_key.clone(),
+                        healthy: Some(healthy),
+                    })
                     .await;
                 tokio::select! {
                     _ = stop_rx.recv() => return,
@@ -1198,7 +1486,10 @@ async fn start_workspace(
                 let pump_key = pump_key.clone();
                 move |event: Value| {
                     // sync callback: send_blocking; unbounded channel so it never blocks
-                    let _ = pump_tx.send_blocking(UiEvent::Event { ws_key: pump_key.clone(), event });
+                    let _ = pump_tx.send_blocking(UiEvent::Event {
+                        ws_key: pump_key.clone(),
+                        event,
+                    });
                 }
             };
             let on_attached = {
@@ -1207,8 +1498,10 @@ async fn start_workspace(
                 let was_connected = was_connected.clone();
                 move || {
                     was_connected.store(true, Ordering::Release);
-                    let _ = pump_tx
-                        .send_blocking(UiEvent::StreamStatus { ws_key: pump_key.clone(), status: StreamStatus::Connected });
+                    let _ = pump_tx.send_blocking(UiEvent::StreamStatus {
+                        ws_key: pump_key.clone(),
+                        status: StreamStatus::Connected,
+                    });
                 }
             };
             tokio::select! {
@@ -1231,7 +1524,9 @@ async fn start_workspace(
             }
             attempts += 1;
             if attempts >= RECONNECT_MAX_ATTEMPTS {
-                tracing::error!("[{pump_key}] event stream still down after {RECONNECT_MAX_ATTEMPTS} attempts — giving up");
+                tracing::error!(
+                    "[{pump_key}] event stream still down after {RECONNECT_MAX_ATTEMPTS} attempts — giving up"
+                );
                 let _ = pump_tx.send_blocking(UiEvent::StreamStatus {
                     ws_key: pump_key.clone(),
                     status: StreamStatus::Failed,
@@ -1282,7 +1577,11 @@ async fn start_workspace(
         loop {
             if child_exited(&poll_probe) {
                 tracing::warn!("[{poll_key}] serve process exited — reporting crash");
-                let _ = poll_tx.send(UiEvent::ServerCrashed { ws_key: poll_key.clone() }).await;
+                let _ = poll_tx
+                    .send(UiEvent::ServerCrashed {
+                        ws_key: poll_key.clone(),
+                    })
+                    .await;
                 return;
             }
             let healthy = tokio::select! {
@@ -1290,7 +1589,10 @@ async fn start_workspace(
                 healthy = is_healthy(&poll_client.http, &poll_client.base_url) => healthy,
             };
             let _ = poll_tx
-                .send(UiEvent::HealthChanged { ws_key: poll_key.clone(), healthy: Some(healthy) })
+                .send(UiEvent::HealthChanged {
+                    ws_key: poll_key.clone(),
+                    healthy: Some(healthy),
+                })
                 .await;
             tokio::select! {
                 _ = stop_rx.recv() => return,
@@ -1301,13 +1603,23 @@ async fn start_workspace(
 
     workspaces.insert(
         ws_key.to_string(),
-        WorkspaceNet { kind, process: Some(process), api, dsh: None, event_stop: Some(stop_tx) },
+        WorkspaceNet {
+            kind,
+            process: Some(process),
+            api,
+            dsh: None,
+            event_stop: Some(stop_tx),
+        },
     );
     Ok(())
 }
 
 /// opencode send with the quiet connect-blip retry (a failure in the connect
 /// phase never reached the server, so a re-POST cannot double-send).
+#[expect(
+    clippy::too_many_arguments,
+    reason = "single private caller already holds these pieces; a param struct would just re-pack them"
+)]
 async fn send_with_blips(
     client: &ApiClient,
     session_id: String,
@@ -1324,12 +1636,27 @@ async fn send_with_blips(
         let attempt = match &command {
             Some((name, args)) => {
                 client
-                    .send_command(&session_id, name, args, model.as_deref(), variant.as_deref(), agent.as_deref(), &attachments)
+                    .send_command(
+                        &session_id,
+                        name,
+                        args,
+                        model.as_deref(),
+                        variant.as_deref(),
+                        agent.as_deref(),
+                        &attachments,
+                    )
                     .await
             }
             None => {
                 client
-                    .send_message(&session_id, &text, model.as_deref(), variant.as_deref(), agent.as_deref(), &attachments)
+                    .send_message(
+                        &session_id,
+                        &text,
+                        model.as_deref(),
+                        variant.as_deref(),
+                        agent.as_deref(),
+                        &attachments,
+                    )
                     .await
             }
         };
@@ -1344,7 +1671,12 @@ async fn send_with_blips(
         }
     };
     if let Err(err) = result {
-        let _ = event_tx.send(UiEvent::MessageSendFailed { session_id, error: format!("{err:#}") }).await;
+        let _ = event_tx
+            .send(UiEvent::MessageSendFailed {
+                session_id,
+                error: format!("{err:#}"),
+            })
+            .await;
     }
 }
 
@@ -1409,30 +1741,66 @@ async fn run_request(client: &ApiClient, ws_key: String, request: ApiRequest) ->
             let result = client.abort(&session_id).await;
             UiEvent::Aborted { session_id, result }
         }
-        ApiRequest::RespondPermission { session_id, permission_id, response } => {
-            let result = client.respond_permission(&session_id, &permission_id, &response).await;
-            UiEvent::PermissionReplied { permission_id, response, is_auto: false, result }
+        ApiRequest::RespondPermission {
+            session_id,
+            permission_id,
+            response,
+        } => {
+            let result = client
+                .respond_permission(&session_id, &permission_id, &response)
+                .await;
+            UiEvent::PermissionReplied {
+                permission_id,
+                response,
+                is_auto: false,
+                result,
+            }
         }
-        ApiRequest::ReplyV2 { request_id, response } => {
+        ApiRequest::ReplyV2 {
+            request_id,
+            response,
+        } => {
             let result = client.reply_v2(&request_id, &response).await;
-            UiEvent::PermissionReplied { permission_id: request_id, response, is_auto: false, result }
+            UiEvent::PermissionReplied {
+                permission_id: request_id,
+                response,
+                is_auto: false,
+                result,
+            }
         }
         ApiRequest::GetQuestions { for_session } => UiEvent::QuestionsPulled {
             for_session,
             result: client.get_questions().await,
         },
-        ApiRequest::ReplyQuestion { request_id, answers } => {
+        ApiRequest::ReplyQuestion {
+            request_id,
+            answers,
+        } => {
             let summary = answers
                 .iter()
-                .map(|a| if a.is_empty() { "(empty)".to_string() } else { a.join(", ") })
+                .map(|a| {
+                    if a.is_empty() {
+                        "(empty)".to_string()
+                    } else {
+                        a.join(", ")
+                    }
+                })
                 .collect::<Vec<_>>()
                 .join(" · ");
             let result = client.reply_question(&request_id, &answers).await;
-            UiEvent::QuestionReplied { request_id, summary, result }
+            UiEvent::QuestionReplied {
+                request_id,
+                summary,
+                result,
+            }
         }
         ApiRequest::RejectQuestion { request_id } => {
             let result = client.reject_question(&request_id).await;
-            UiEvent::QuestionReplied { request_id, summary: "dismissed".into(), result }
+            UiEvent::QuestionReplied {
+                request_id,
+                summary: "dismissed".into(),
+                result,
+            }
         }
         ApiRequest::ListCommands => UiEvent::CommandsLoaded {
             ws_key,
@@ -1484,7 +1852,30 @@ fn mcp_names(config: &Value) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::store::decode_base64;
     use serde_json::json;
+
+    #[test]
+    fn base64_roundtrips_rfc4648_vectors() {
+        for (raw, want) in [
+            (&b""[..], ""),
+            (b"f".as_slice(), "Zg=="),
+            (b"fo".as_slice(), "Zm8="),
+            (b"foo".as_slice(), "Zm9v"),
+            (b"foob".as_slice(), "Zm9vYg=="),
+            (b"fooba".as_slice(), "Zm9vYmE="),
+            (b"foobar".as_slice(), "Zm9vYmFy"),
+        ] {
+            assert_eq!(base64_encode(raw), want, "encoding {raw:?}");
+            assert_eq!(decode_base64(want).as_deref(), Some(raw), "decoding {want}");
+        }
+        // the attachment decoder tolerates transport newlines
+        assert_eq!(
+            decode_base64("Zm9v\nYmFy").as_deref(),
+            Some(b"foobar".as_slice())
+        );
+        assert_eq!(decode_base64("not*base64"), None);
+    }
 
     #[test]
     fn mcp_names_parses_section_and_skips_non_objects() {
@@ -1496,7 +1887,10 @@ mod tests {
             },
             "agent": {}
         });
-        assert_eq!(mcp_names(&config), vec!["tools".to_string(), "wiki".to_string()]);
+        assert_eq!(
+            mcp_names(&config),
+            vec!["tools".to_string(), "wiki".to_string()]
+        );
     }
 
     #[test]

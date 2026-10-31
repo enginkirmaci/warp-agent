@@ -13,8 +13,8 @@
 //! field names the store already parses defensively) and emits them as
 //! `UiEvent::Event` values, exactly like the opencode SSE pump does.
 
-use anyhow::{anyhow, Context as _, Result};
-use serde_json::{json, Value};
+use anyhow::{Context as _, Result, anyhow};
+use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
@@ -24,11 +24,11 @@ use crate::oc::{
     SessionInfo, StoredMessage, StreamStatus, UiEvent,
 };
 
-/// dsh has no health endpoint; the WS pump's own connection state is the
-/// liveness signal, mirrored into the health gauge by the net thread.
-const SNAPSHOT_WAIT: Duration = Duration::from_secs(10);
 /// How long a single follow snapshot may take to arrive before GetMessages
 /// gives up (the pump may still be reconnecting).
+const SNAPSHOT_WAIT: Duration = Duration::from_secs(10);
+/// HTTP timeout for the `/connect` token exchange (dsh has no health
+/// endpoint; the WS pump's own connection state is the liveness signal).
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(8);
 
 // ---- spawn ---------------------------------------------------------------
@@ -56,7 +56,10 @@ pub async fn connect_with_token(base_url: &str, token: &str) -> Result<String> {
             return Ok(pair.to_string());
         }
     }
-    Err(anyhow!("dsh /connect returned no auth cookie (status {})", resp.status()))
+    Err(anyhow!(
+        "dsh /connect returned no auth cookie (status {})",
+        resp.status()
+    ))
 }
 
 /// Extracts the launch token from a `dsh web` stdout line, if it is the URL
@@ -118,7 +121,11 @@ pub struct FoldOutcome {
 
 impl FoldOutcome {
     fn new() -> Self {
-        Self { message_updated: None, part_updated: Vec::new(), extra: Vec::new() }
+        Self {
+            message_updated: None,
+            part_updated: Vec::new(),
+            extra: Vec::new(),
+        }
     }
 }
 
@@ -208,10 +215,12 @@ impl DshHandle {
     /// Plain liveness probe for the health poll: any HTTP answer (the fence's
     /// 401 included) proves the server process is serving.
     pub async fn alive(&self) -> bool {
-        matches!(
-            self.inner.http.get(format!("{}/", self.inner.base_url)).send().await,
-            Ok(_)
-        )
+        self.inner
+            .http
+            .get(format!("{}/", self.inner.base_url))
+            .send()
+            .await
+            .is_ok()
     }
 
     /// Unary RPC. A 401 means the cookie died with a dropped WS: re-exchange
@@ -219,7 +228,9 @@ impl DshHandle {
     pub async fn rpc(&self, method: &str, args: Value) -> Result<Value> {
         let id = format!(
             "warp-{}",
-            self.inner.rpc_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            self.inner
+                .rpc_counter
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         );
         let mut refreshed = false;
         for _ in 0..2 {
@@ -251,11 +262,19 @@ impl DshHandle {
                 return Ok(result.get("value").cloned().unwrap_or(Value::Null));
             }
             let error = result.get("error").cloned().unwrap_or(Value::Null);
-            let message = error.get("message").and_then(Value::as_str).unwrap_or("unknown dsh error");
-            let code = error.get("code").and_then(Value::as_str).unwrap_or("gateway/error");
+            let message = error
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown dsh error");
+            let code = error
+                .get("code")
+                .and_then(Value::as_str)
+                .unwrap_or("gateway/error");
             return Err(anyhow!("dsh {method}: {message} ({code})"));
         }
-        Err(anyhow!("dsh rpc {method}: unauthorized after cookie refresh"))
+        Err(anyhow!(
+            "dsh rpc {method}: unauthorized after cookie refresh"
+        ))
     }
 
     /// Opens (once) the follow stream for a session and waits for its snapshot
@@ -269,7 +288,11 @@ impl DshHandle {
                 if let Some(state) = sessions.get(session_id)
                     && state.snapshot_seen
                 {
-                    return Ok(state.messages.iter().map(MessageAcc::opencode_message).collect());
+                    return Ok(state
+                        .messages
+                        .iter()
+                        .map(MessageAcc::opencode_message)
+                        .collect());
                 }
             }
             if std::time::Instant::now() >= deadline {
@@ -326,8 +349,13 @@ impl DshHandle {
     /// Answer an approval waterfall: response is the opencode vocabulary
     /// ("once"/"always"/"reject"); dsh only has one-shot grants.
     pub async fn answer_approval(&self, event_id: &str, response: &str) -> Result<()> {
-        let value = if response == "reject" { "rejected" } else { "allowed-once" };
-        self.event_result(event_id, json!({ "kind": "result", "value": value })).await
+        let value = if response == "reject" {
+            "rejected"
+        } else {
+            "allowed-once"
+        };
+        self.event_result(event_id, json!({ "kind": "result", "value": value }))
+            .await
     }
 
     /// Answer a question waterfall from the opencode `Vec<Vec<String>>` shape
@@ -353,15 +381,20 @@ impl DshHandle {
                     custom = answer.clone();
                 }
             }
-            items.push(json!({ "id": question_key(question), "selected": selected, "custom": custom }));
+            items.push(
+                json!({ "id": question_key(question), "selected": selected, "custom": custom }),
+            );
         }
         self.inner
             .pending_questions
             .lock()
             .expect("dsh questions")
             .remove(event_id);
-        self.event_result(event_id, json!({ "kind": "result", "value": { "answers": items } }))
-            .await
+        self.event_result(
+            event_id,
+            json!({ "kind": "result", "value": { "answers": items } }),
+        )
+        .await
     }
 
     pub async fn reject_question(&self, event_id: &str) -> Result<()> {
@@ -440,7 +473,11 @@ fn follow_stream_id(session_id: &str) -> String {
 /// the question text so answers still correlate).
 fn question_key(question: &QuestionPromptInfo) -> String {
     let id = question.question.trim();
-    if id.is_empty() { "(empty)".to_string() } else { id.to_string() }
+    if id.is_empty() {
+        "(empty)".to_string()
+    } else {
+        id.to_string()
+    }
 }
 
 // ---- request mapping ------------------------------------------------------
@@ -448,24 +485,30 @@ fn question_key(question: &QuestionPromptInfo) -> String {
 /// Runs one ApiRequest against the dsh web API and shapes the reply the store
 /// already knows. `ws_key` is DSH_KEY; `folder` is the real workspace folder
 /// for the requests whose reply events key off the workspace.
-pub async fn run_request(
-    handle: &DshHandle,
-    ws_key: String,
-    request: ApiRequest,
-) -> UiEvent {
+pub async fn run_request(handle: &DshHandle, ws_key: String, request: ApiRequest) -> UiEvent {
     match request {
         ApiRequest::ListSessions | ApiRequest::ListMcpNames => {
             // dsh sessions are listed per workspace folder (ListDshSessions);
             // a bare list has no folder to filter by and MCP has no dsh
             // equivalent — both degrade to empty
-            UiEvent::SessionsLoaded { ws_key, result: Ok(Vec::new()) }
+            UiEvent::SessionsLoaded {
+                ws_key,
+                result: Ok(Vec::new()),
+            }
         }
         ApiRequest::ListDshSessions { folder } => {
             let result = list_sessions_filtered(handle, &folder).await;
-            UiEvent::SessionsLoaded { ws_key: folder, result }
+            UiEvent::SessionsLoaded {
+                ws_key: folder,
+                result,
+            }
         }
-        ApiRequest::ListModels => UiEvent::ModelsLoaded { result: model_catalog(handle).await },
-        ApiRequest::ListAgents => UiEvent::AgentsLoaded { result: agent_presets(handle).await },
+        ApiRequest::ListModels => UiEvent::ModelsLoaded {
+            result: model_catalog(handle).await,
+        },
+        ApiRequest::ListAgents => UiEvent::AgentsLoaded {
+            result: agent_presets(handle).await,
+        },
         ApiRequest::ListCommands => {
             let result = skills(handle).await;
             UiEvent::CommandsLoaded { ws_key, result }
@@ -473,7 +516,11 @@ pub async fn run_request(
         ApiRequest::GetMessages { session_id } => {
             handle.ensure_follow(&session_id).ok();
             let result = handle.messages(&session_id).await;
-            UiEvent::MessagesLoaded { ws_key, session_id, result }
+            UiEvent::MessagesLoaded {
+                ws_key,
+                session_id,
+                result,
+            }
         }
         ApiRequest::CreateSession { title } | ApiRequest::CreateForkSession { title, .. } => {
             // no folder known: create in the cwd the server was spawned in
@@ -482,19 +529,37 @@ pub async fn run_request(
         }
         ApiRequest::CreateDshSession { folder, title } => {
             let result = create_session(handle, Some(&folder), &title).await;
-            UiEvent::SessionCreated { ws_key: folder, result }
+            UiEvent::SessionCreated {
+                ws_key: folder,
+                result,
+            }
         }
-        ApiRequest::CreateDshForkSession { folder, title, context } => {
+        ApiRequest::CreateDshForkSession {
+            folder,
+            title,
+            context,
+        } => {
             let result = create_session(handle, Some(&folder), &title).await;
-            UiEvent::ForkSessionCreated { ws_key: folder, context, result }
+            UiEvent::ForkSessionCreated {
+                ws_key: folder,
+                context,
+                result,
+            }
         }
         ApiRequest::RenameSession { session_id, title } => {
             let result = handle
-                .rpc("session/rename", json!({ "request": { "sessionId": session_id, "title": title } }))
+                .rpc(
+                    "session/rename",
+                    json!({ "request": { "sessionId": session_id, "title": title } }),
+                )
                 .await
                 .map(|v| SessionInfo {
                     id: session_id.clone(),
-                    title: v.get("title").and_then(Value::as_str).unwrap_or(&title).to_string(),
+                    title: v
+                        .get("title")
+                        .and_then(Value::as_str)
+                        .unwrap_or(&title)
+                        .to_string(),
                     updated_ms: now_ms(),
                     created_ms: 0,
                     parent_id: None,
@@ -504,20 +569,33 @@ pub async fn run_request(
         ApiRequest::DeleteSession { session_id } => {
             // dsh has no hard delete; archiving removes it from the list
             let result = handle
-                .rpc("workspace/archiveSession", json!({ "request": { "sessionId": session_id } }))
+                .rpc(
+                    "workspace/archiveSession",
+                    json!({ "request": { "sessionId": session_id } }),
+                )
                 .await
                 .map(|_| ());
             UiEvent::SessionDeleted { session_id, result }
         }
         ApiRequest::Abort { session_id } => {
             let result = handle
-                .rpc("session/cancel", json!({ "request": { "sessionId": session_id } }))
+                .rpc(
+                    "session/cancel",
+                    json!({ "request": { "sessionId": session_id } }),
+                )
                 .await
                 .map(|_| ());
             UiEvent::Aborted { session_id, result }
         }
-        ApiRequest::RespondPermission { permission_id, response, .. }
-        | ApiRequest::ReplyV2 { request_id: permission_id, response } => {
+        ApiRequest::RespondPermission {
+            permission_id,
+            response,
+            ..
+        }
+        | ApiRequest::ReplyV2 {
+            request_id: permission_id,
+            response,
+        } => {
             let result = handle.answer_approval(&permission_id, &response).await;
             UiEvent::PermissionReplied {
                 permission_id,
@@ -528,32 +606,61 @@ pub async fn run_request(
         }
         ApiRequest::GetQuestions { for_session } => {
             // questions arrive as waterfalls only; nothing to pull
-            UiEvent::QuestionsPulled { for_session, result: Ok(Vec::new()) }
+            UiEvent::QuestionsPulled {
+                for_session,
+                result: Ok(Vec::new()),
+            }
         }
-        ApiRequest::ReplyQuestion { request_id, answers } => {
+        ApiRequest::ReplyQuestion {
+            request_id,
+            answers,
+        } => {
             let summary = answers
                 .iter()
-                .map(|a| if a.is_empty() { "(empty)".to_string() } else { a.join(", ") })
+                .map(|a| {
+                    if a.is_empty() {
+                        "(empty)".to_string()
+                    } else {
+                        a.join(", ")
+                    }
+                })
                 .collect::<Vec<_>>()
                 .join(" · ");
             let result = handle.answer_question(&request_id, &answers).await;
-            UiEvent::QuestionReplied { request_id, summary, result }
+            UiEvent::QuestionReplied {
+                request_id,
+                summary,
+                result,
+            }
         }
         ApiRequest::RejectQuestion { request_id } => {
             let result = handle.reject_question(&request_id).await;
-            UiEvent::QuestionReplied { request_id, summary: "dismissed".into(), result }
+            UiEvent::QuestionReplied {
+                request_id,
+                summary: "dismissed".into(),
+                result,
+            }
         }
         ApiRequest::FindFiles { query } => {
             let result = find_files(handle, &query).await;
-            UiEvent::FilesFound { ws_key, query, result }
+            UiEvent::FilesFound {
+                ws_key,
+                query,
+                result,
+            }
         }
-        ApiRequest::McpConnect { name } | ApiRequest::McpDisconnect { name } => {
-            UiEvent::Log { ws_key, line: format!("mcp: {name}: not available on dsh") }
-        }
+        ApiRequest::McpConnect { name } | ApiRequest::McpDisconnect { name } => UiEvent::Log {
+            ws_key,
+            line: format!("mcp: {name}: not available on dsh"),
+        },
     }
 }
 
-async fn create_session(handle: &DshHandle, folder: Option<&str>, _title: &str) -> Result<SessionInfo> {
+async fn create_session(
+    handle: &DshHandle,
+    folder: Option<&str>,
+    _title: &str,
+) -> Result<SessionInfo> {
     let mut args = json!({});
     if let Some(folder) = folder.filter(|f| !f.is_empty()) {
         args["request"]["cwd"] = json!(folder);
@@ -577,15 +684,25 @@ async fn create_session(handle: &DshHandle, folder: Option<&str>, _title: &str) 
 }
 
 async fn list_sessions_filtered(handle: &DshHandle, folder: &str) -> Result<Vec<SessionInfo>> {
-    let value = handle.rpc("session/list", json!({ "_request": {} })).await?;
+    let value = handle
+        .rpc("session/list", json!({ "_request": {} }))
+        .await?;
     let mut sessions = Vec::new();
-    for item in value.pointer("/items").and_then(Value::as_array).unwrap_or(&Vec::new()) {
+    for item in value
+        .pointer("/items")
+        .and_then(Value::as_array)
+        .unwrap_or(&Vec::new())
+    {
         // dsh serves every folder from one process; a workspace only sees its own
         if item.get("cwd").and_then(Value::as_str) != Some(folder) {
             continue;
         }
         sessions.push(SessionInfo {
-            id: item.get("sessionId").and_then(Value::as_str).unwrap_or("").to_string(),
+            id: item
+                .get("sessionId")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string(),
             title: item
                 .pointer("/projections/values/title/title")
                 .and_then(Value::as_str)
@@ -594,7 +711,10 @@ async fn list_sessions_filtered(handle: &DshHandle, folder: &str) -> Result<Vec<
                 .to_string(),
             updated_ms: item.get("updatedAt").and_then(Value::as_i64).unwrap_or(0),
             created_ms: 0,
-            parent_id: item.get("parentSessionId").and_then(Value::as_str).map(String::from),
+            parent_id: item
+                .get("parentSessionId")
+                .and_then(Value::as_str)
+                .map(String::from),
         });
     }
     Ok(sessions)
@@ -603,12 +723,20 @@ async fn list_sessions_filtered(handle: &DshHandle, folder: &str) -> Result<Vec<
 async fn model_catalog(handle: &DshHandle) -> Result<Vec<ModelInfo>> {
     let value = handle.rpc("session/modelCatalog", json!({})).await?;
     let mut models = Vec::new();
-    for group in value.get("groups").and_then(Value::as_array).unwrap_or(&Vec::new()) {
+    for group in value
+        .get("groups")
+        .and_then(Value::as_array)
+        .unwrap_or(&Vec::new())
+    {
         let provider = group.get("id").and_then(Value::as_str).unwrap_or("");
         if provider.is_empty() {
             continue;
         }
-        for model in group.get("models").and_then(Value::as_array).unwrap_or(&Vec::new()) {
+        for model in group
+            .get("models")
+            .and_then(Value::as_array)
+            .unwrap_or(&Vec::new())
+        {
             let name = model.get("id").and_then(Value::as_str).unwrap_or("");
             if name.is_empty() {
                 continue;
@@ -637,15 +765,28 @@ async fn model_catalog(handle: &DshHandle) -> Result<Vec<ModelInfo>> {
 async fn agent_presets(handle: &DshHandle) -> Result<Vec<AgentInfo>> {
     let value = handle.rpc("agentPresets/list", json!({})).await?;
     let mut agents = Vec::new();
-    for preset in value.pointer("/presets").and_then(Value::as_array).unwrap_or(&Vec::new()) {
-        let Some(name) = preset.get("id").and_then(Value::as_str) else { continue };
-        let is_default = preset.get("isDefault").and_then(Value::as_bool).unwrap_or(false);
+    for preset in value
+        .pointer("/presets")
+        .and_then(Value::as_array)
+        .unwrap_or(&Vec::new())
+    {
+        let Some(name) = preset.get("id").and_then(Value::as_str) else {
+            continue;
+        };
+        let is_default = preset
+            .get("isDefault")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
         if preset.get("broken").and_then(Value::as_str).is_some() {
             continue;
         }
         agents.push(AgentInfo {
             name: name.to_string(),
-            mode: if is_default { "primary".into() } else { "all".into() },
+            mode: if is_default {
+                "primary".into()
+            } else {
+                "all".into()
+            },
             hidden: false,
         });
     }
@@ -657,14 +798,29 @@ async fn skills(handle: &DshHandle) -> Result<Vec<CommandInfo>> {
     let Some(session) = handle.any_session() else {
         return Ok(Vec::new());
     };
-    let value = handle.rpc("skills/list", json!({ "request": { "sessionId": session } })).await?;
+    let value = handle
+        .rpc(
+            "skills/list",
+            json!({ "request": { "sessionId": session } }),
+        )
+        .await?;
     let mut commands = Vec::new();
-    for skill in value.get("skills").and_then(Value::as_array).unwrap_or(&Vec::new()) {
-        let Some(name) = skill.get("name").and_then(Value::as_str) else { continue };
+    for skill in value
+        .get("skills")
+        .and_then(Value::as_array)
+        .unwrap_or(&Vec::new())
+    {
+        let Some(name) = skill.get("name").and_then(Value::as_str) else {
+            continue;
+        };
         commands.push(CommandInfo {
             name: name.to_string(),
             name_lower: name.to_lowercase(),
-            description: skill.get("description").and_then(Value::as_str).unwrap_or("").into(),
+            description: skill
+                .get("description")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .into(),
             source: "skill".into(),
         });
     }
@@ -677,7 +833,10 @@ async fn find_files(handle: &DshHandle, query: &str) -> Result<Vec<String>> {
         return Ok(Vec::new());
     };
     let value = handle
-        .rpc("fileReferences/list", json!({ "agentId": agent, "query": query }))
+        .rpc(
+            "fileReferences/list",
+            json!({ "agentId": agent, "query": query }),
+        )
         .await?;
     Ok(value
         .as_array()
@@ -707,13 +866,17 @@ pub async fn send_message(
             None => (model, ""),
         };
         if !name.is_empty() {
-            let mut selection = json!({ "sessionId": session_id, "provider": provider, "model": name });
+            let mut selection =
+                json!({ "sessionId": session_id, "provider": provider, "model": name });
             if let Some(effort) = variant {
                 selection["reasoningEffort"] = json!(effort);
             }
             // selection is durable "next request"; failures fall back to the
             // session's current model rather than blocking the send
-            if let Err(err) = handle.rpc("session/selectModel", json!({ "request": selection })).await {
+            if let Err(err) = handle
+                .rpc("session/selectModel", json!({ "request": selection }))
+                .await
+            {
                 tracing::warn!("[dsh] selectModel ignored: {err:#}");
             }
         }
@@ -730,7 +893,8 @@ pub async fn send_message(
                 "name": file_name,
             }));
         } else {
-            content.push(json!({ "type": "text", "text": format!("[attached file: {file_name}]") }));
+            content
+                .push(json!({ "type": "text", "text": format!("[attached file: {file_name}]") }));
         }
     }
     if !text.is_empty() {
@@ -739,7 +903,15 @@ pub async fn send_message(
     if content.is_empty() {
         return Ok(());
     }
-    let request_id = format!("warp-send-{}", now_ms());
+    // a counter, not a timestamp: two sends within one millisecond (queue
+    // drain racing a user send) must not share a requestId
+    let request_id = format!(
+        "warp-send-{}",
+        handle
+            .inner
+            .rpc_counter
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    );
     handle
         .rpc(
             "session/prompt",
@@ -774,15 +946,14 @@ pub fn fold_event(state: &mut DshSessionState, session_id: &str, event: &Value) 
     let data = event.get("data").cloned().unwrap_or(Value::Null);
 
     // compaction replaces an earlier surface range with this event
-    if let Some(op) = event.get("surfaceOp").and_then(Value::as_str) {
-        if op == "replace"
-            && let (Some(start), Some(end)) = (
-                event.pointer("/surfaceOp/startSeq").and_then(Value::as_i64),
-                event.pointer("/surfaceOp/endSeq").and_then(Value::as_i64),
-            )
-        {
-            prune_range(state, start, end);
-        }
+    if let Some(op) = event.get("surfaceOp").and_then(Value::as_str)
+        && op == "replace"
+        && let (Some(start), Some(end)) = (
+            event.pointer("/surfaceOp/startSeq").and_then(Value::as_i64),
+            event.pointer("/surfaceOp/endSeq").and_then(Value::as_i64),
+        )
+    {
+        prune_range(state, start, end);
     }
 
     match event_type {
@@ -801,7 +972,10 @@ pub fn fold_event(state: &mut DshSessionState, session_id: &str, event: &Value) 
                 "properties": { "sessionID": session_id },
             }));
             if data.pointer("/reason/kind").and_then(Value::as_str) == Some("error") {
-                let error = data.pointer("/reason/error").cloned().unwrap_or(Value::Null);
+                let error = data
+                    .pointer("/reason/error")
+                    .cloned()
+                    .unwrap_or(Value::Null);
                 outcome.extra.push(json!({
                     "type": "session.error",
                     "properties": { "sessionID": session_id, "error": {
@@ -859,7 +1033,10 @@ fn prune_range(state: &mut DshSessionState, start: i64, end: i64) {
 /// skill catalogs, time notices, model-change notes) ride user/message events
 /// with other source kinds and would bury the transcript.
 fn is_human_prompt(data: &Value) -> bool {
-    matches!(data.pointer("/source/kind").and_then(Value::as_str), Some("user"))
+    matches!(
+        data.pointer("/source/kind").and_then(Value::as_str),
+        Some("user")
+    )
 }
 
 fn fold_user_message(
@@ -873,7 +1050,11 @@ fn fold_user_message(
     if !is_human_prompt(data) {
         return;
     }
-    let id = data.get("id").and_then(Value::as_str).unwrap_or("").to_string();
+    let id = data
+        .get("id")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
     if id.is_empty() {
         return;
     }
@@ -885,7 +1066,10 @@ fn fold_user_message(
         json!({ "id": id, "role": "user", "time": { "created": time } }),
     );
     let empty_blocks = Vec::new();
-    let blocks = data.get("content").and_then(Value::as_array).unwrap_or(&empty_blocks);
+    let blocks = data
+        .get("content")
+        .and_then(Value::as_array)
+        .unwrap_or(&empty_blocks);
     for (index, block) in blocks.iter().enumerate() {
         if block.get("type").and_then(Value::as_str) != Some("text") {
             continue; // image/file attachment refs need a fetch; render nothing
@@ -921,7 +1105,10 @@ fn fold_assistant_message(
     let step = data.get("step").and_then(Value::as_i64).unwrap_or(0);
     let id = format!("dsh-{turn}-{step}");
     let message_value = data.get("message").cloned().unwrap_or(Value::Null);
-    let source = message_value.pointer("/source").cloned().unwrap_or(Value::Null);
+    let source = message_value
+        .pointer("/source")
+        .cloned()
+        .unwrap_or(Value::Null);
     let usage = data.get("usage").cloned().unwrap_or(Value::Null);
     let tokens = if usage.is_null() {
         json!({})
@@ -1040,14 +1227,23 @@ fn fold_tool_result(
     outcome: &mut FoldOutcome,
 ) {
     let message_value = data.get("message").cloned().unwrap_or(Value::Null);
-    let call_id = message_value.get("toolCallId").and_then(Value::as_str).unwrap_or("");
+    let call_id = message_value
+        .get("toolCallId")
+        .and_then(Value::as_str)
+        .unwrap_or("");
     if call_id.is_empty() {
         return;
     }
     let part_id = format!("tool-{call_id}");
-    let is_error = message_value.get("isError").and_then(Value::as_bool).unwrap_or(false);
+    let is_error = message_value
+        .get("isError")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
     let empty_blocks = Vec::new();
-    let blocks = message_value.get("content").and_then(Value::as_array).unwrap_or(&empty_blocks);
+    let blocks = message_value
+        .get("content")
+        .and_then(Value::as_array)
+        .unwrap_or(&empty_blocks);
     let output: String = blocks
         .iter()
         .filter_map(|b| {
@@ -1097,7 +1293,9 @@ fn fold_tool_result(
                 "state": state_json,
             });
             message.parts.push(part.clone());
-            message.part_at.insert(part_id.clone(), message.parts.len() - 1);
+            message
+                .part_at
+                .insert(part_id.clone(), message.parts.len() - 1);
             part
         }
     };
@@ -1184,12 +1382,18 @@ pub fn fold_remote_event(frame: &Value) -> Vec<Value> {
 
 fn fold_emit(frame: &Value) -> Vec<Value> {
     let event = frame.get("event").and_then(Value::as_str).unwrap_or("");
-    let args = frame.get("args").and_then(Value::as_array).cloned().unwrap_or_default();
+    let args = frame
+        .get("args")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
     match event {
         // args: [sessionId, running] — idle must arrive as session.idle so
         // queues drain and turn notes land
         "api-session/status" => {
-            let Some(session) = args.first().and_then(Value::as_str) else { return Vec::new() };
+            let Some(session) = args.first().and_then(Value::as_str) else {
+                return Vec::new();
+            };
             let running = args.get(1).and_then(Value::as_bool).unwrap_or(false);
             if running {
                 vec![status_event(session, "busy")]
@@ -1202,8 +1406,13 @@ fn fold_emit(frame: &Value) -> Vec<Value> {
         }
         // args: [sessionId, message]
         "api-session/error" => {
-            let Some(session) = args.first().and_then(Value::as_str) else { return Vec::new() };
-            let message = args.get(1).and_then(Value::as_str).unwrap_or("the agent failed");
+            let Some(session) = args.first().and_then(Value::as_str) else {
+                return Vec::new();
+            };
+            let message = args
+                .get(1)
+                .and_then(Value::as_str)
+                .unwrap_or("the agent failed");
             vec![json!({
                 "type": "session.error",
                 "properties": { "sessionID": session, "error": { "name": "error", "message": message } },
@@ -1249,9 +1458,16 @@ fn fold_waterfall(frame: &Value) -> Vec<Value> {
             let prompts: Vec<QuestionPromptInfo> = questions
                 .iter()
                 .map(|q| QuestionPromptInfo {
-                    question: q.get("question").and_then(Value::as_str).unwrap_or("").into(),
+                    question: q
+                        .get("question")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .into(),
                     header: q.get("header").and_then(Value::as_str).unwrap_or("").into(),
-                    multiple: q.get("multiSelect").and_then(Value::as_bool).unwrap_or(false),
+                    multiple: q
+                        .get("multiSelect")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false),
                     options: q
                         .get("options")
                         .and_then(Value::as_array)
@@ -1259,7 +1475,11 @@ fn fold_waterfall(frame: &Value) -> Vec<Value> {
                             options
                                 .iter()
                                 .map(|o| QuestionOptionInfo {
-                                    label: o.get("label").and_then(Value::as_str).unwrap_or("").into(),
+                                    label: o
+                                        .get("label")
+                                        .and_then(Value::as_str)
+                                        .unwrap_or("")
+                                        .into(),
                                     description: o
                                         .get("description")
                                         .and_then(Value::as_str)
@@ -1349,7 +1569,10 @@ pub async fn run_pump(
         // 2) websocket — the builder fills the handshake headers; the
         // pre-built http::Request path adds nothing (no sec-websocket-key)
         let uri: tokio_tungstenite::tungstenite::http::Uri =
-            format!("{}/api/remote.mux", handle.base_url()).replace("http", "ws").parse().expect("ws uri");
+            format!("{}/api/remote.mux", handle.base_url())
+                .replace("http", "ws")
+                .parse()
+                .expect("ws uri");
         let request = tokio_tungstenite::tungstenite::client::ClientRequestBuilder::new(uri)
             .with_header("cookie", cookie.clone());
         let connected = tokio::select! {
@@ -1360,8 +1583,16 @@ pub async fn run_pump(
             Ok(socket) => socket,
             Err(err) => {
                 tracing::warn!("[{ws_key}] dsh websocket failed: {err}");
-                if let Err(err) = reconnect_pace(&stop, &mut attempts, &mut delay, &was_connected, &event_tx, &ws_key).await {
-                    let _ = err;
+                if !reconnect_pace(
+                    &stop,
+                    &mut attempts,
+                    &mut delay,
+                    &was_connected,
+                    &event_tx,
+                    &ws_key,
+                )
+                .await
+                {
                     return;
                 }
                 continue;
@@ -1372,7 +1603,10 @@ pub async fn run_pump(
         delay = crate::oc::RECONNECT_INITIAL;
         was_connected.store(true, std::sync::atomic::Ordering::Release);
         let _ = event_tx
-            .send(UiEvent::StreamStatus { ws_key: ws_key.clone(), status: StreamStatus::Connected })
+            .send(UiEvent::StreamStatus {
+                ws_key: ws_key.clone(),
+                status: StreamStatus::Connected,
+            })
             .await;
         // the store's connect note keys off this event; scoped announce keeps
         // it inside dsh tiles (opencode's own server.connected must not land here)
@@ -1396,7 +1630,7 @@ pub async fn run_pump(
                 frame = outbound.recv() => {
                     match frame {
                         Ok(frame) => {
-                            if sink.send(Message::Text(frame.into())).await.is_err() {
+                            if sink.send(Message::Text(frame)).await.is_err() {
                                 break;
                             }
                         }
@@ -1432,9 +1666,15 @@ pub async fn run_pump(
         }
         attempts += 1;
         if attempts >= crate::oc::RECONNECT_MAX_ATTEMPTS {
-            tracing::error!("[{ws_key}] dsh event stream still down after {} attempts — giving up", crate::oc::RECONNECT_MAX_ATTEMPTS);
+            tracing::error!(
+                "[{ws_key}] dsh event stream still down after {} attempts — giving up",
+                crate::oc::RECONNECT_MAX_ATTEMPTS
+            );
             let _ = event_tx
-                .send(UiEvent::StreamStatus { ws_key: ws_key.clone(), status: StreamStatus::Failed })
+                .send(UiEvent::StreamStatus {
+                    ws_key: ws_key.clone(),
+                    status: StreamStatus::Failed,
+                })
                 .await;
             return;
         }
@@ -1461,13 +1701,17 @@ async fn reconnect_pace(
     was_connected: &Arc<std::sync::atomic::AtomicBool>,
     event_tx: &async_channel::Sender<UiEvent>,
     ws_key: &str,
-) -> Result<(), ()> {
+) -> bool {
+    // true = keep retrying (the caller loops), false = stop the pump
     *attempts += 1;
     if *attempts >= crate::oc::RECONNECT_MAX_ATTEMPTS {
         let _ = event_tx
-            .send(UiEvent::StreamStatus { ws_key: ws_key.to_string(), status: StreamStatus::Failed })
+            .send(UiEvent::StreamStatus {
+                ws_key: ws_key.to_string(),
+                status: StreamStatus::Failed,
+            })
             .await;
-        return Err(());
+        return false;
     }
     if was_connected.swap(false, std::sync::atomic::Ordering::AcqRel) {
         let _ = event_tx
@@ -1478,11 +1722,11 @@ async fn reconnect_pace(
             .await;
     }
     tokio::select! {
-        _ = stop.recv() => return Err(()),
+        _ = stop.recv() => return false,
         _ = tokio::time::sleep(*delay) => {},
     }
     *delay = (*delay * 2).min(crate::oc::RECONNECT_MAX);
-    Ok(())
+    true
 }
 
 /// Guards the store from a second error card for one backend failure: both
@@ -1491,8 +1735,14 @@ fn error_is_duplicate(handle: &DshHandle, event: &Value) -> bool {
     if event.get("type").and_then(Value::as_str) != Some("session.error") {
         return false;
     }
-    let session = event.pointer("/properties/sessionID").and_then(Value::as_str).unwrap_or("");
-    let message = event.pointer("/properties/error/message").and_then(Value::as_str).unwrap_or("");
+    let session = event
+        .pointer("/properties/sessionID")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let message = event
+        .pointer("/properties/error/message")
+        .and_then(Value::as_str)
+        .unwrap_or("");
     !handle.error_seen(session, message)
 }
 
@@ -1504,18 +1754,30 @@ fn dispatch_frame(
     event_tx: &async_channel::Sender<UiEvent>,
     frame: &Value,
 ) {
-    let stream_id = frame.get("streamId").and_then(Value::as_str).unwrap_or("").to_string();
+    let stream_id = frame
+        .get("streamId")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
     let frame_type = frame.get("type").and_then(Value::as_str).unwrap_or("");
     if frame_type == "error" {
-        let code = frame.pointer("/error/code").and_then(Value::as_str).unwrap_or("unknown");
-        let message = frame.pointer("/error/message").and_then(Value::as_str).unwrap_or("");
+        let code = frame
+            .pointer("/error/code")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        let message = frame
+            .pointer("/error/message")
+            .and_then(Value::as_str)
+            .unwrap_or("");
         tracing::warn!("[{ws_key}] dsh stream {stream_id} error: {code} {message}");
         return;
     }
     if frame_type != "item" {
         return;
     }
-    let Some(value) = frame.get("value") else { return };
+    let Some(value) = frame.get("value") else {
+        return;
+    };
 
     if stream_id == "events" {
         if value.get("type").and_then(Value::as_str) == Some("ready") {
@@ -1561,7 +1823,11 @@ fn dispatch_frame(
             let state = sessions.entry(session_id.to_string()).or_default();
             *state = DshSessionState::default();
             state.snapshot_seen = true;
-            for record in value.get("records").and_then(Value::as_array).unwrap_or(&Vec::new()) {
+            for record in value
+                .get("records")
+                .and_then(Value::as_array)
+                .unwrap_or(&Vec::new())
+            {
                 let event = record.get("event").cloned().unwrap_or(Value::Null);
                 if !event.is_null() {
                     // history fold: builds state, emits nothing — GetMessages
@@ -1569,7 +1835,10 @@ fn dispatch_frame(
                     let _ = fold_event(state, session_id, &event);
                 }
             }
-            if let Some(title) = value.pointer("/projections/values/title/title").and_then(Value::as_str) {
+            if let Some(title) = value
+                .pointer("/projections/values/title/title")
+                .and_then(Value::as_str)
+            {
                 state.title = Some(title.to_string());
             }
             drop(sessions);
@@ -1626,7 +1895,8 @@ mod tests {
 
     #[test]
     fn token_from_line_extracts_urlsafe_token() {
-        let line = "dsh web: http://127.0.0.1:39871/?token=0gdgPb7dID15XjFBuBiGF_F6nR9eTeYnmEuJMxbawJs";
+        let line =
+            "dsh web: http://127.0.0.1:39871/?token=0gdgPb7dID15XjFBuBiGF_F6nR9eTeYnmEuJMxbawJs";
         assert_eq!(
             token_from_line(line),
             Some("0gdgPb7dID15XjFBuBiGF_F6nR9eTeYnmEuJMxbawJs")
@@ -1677,10 +1947,14 @@ mod tests {
         let call = fold_event(
             &mut state,
             sid,
-            &wire_event("tool/call", 10, json!({
-                "turn": 1, "step": 1, "callId": "call-1", "name": "write",
-                "arguments": "{\"path\":\"notes.txt\",\"content\":\"probe\"}",
-            })),
+            &wire_event(
+                "tool/call",
+                10,
+                json!({
+                    "turn": 1, "step": 1, "callId": "call-1", "name": "write",
+                    "arguments": "{\"path\":\"notes.txt\",\"content\":\"probe\"}",
+                }),
+            ),
         );
         let part = call.part_updated[0].clone();
         assert_eq!(part.pointer("/state/status"), Some(&json!("running")));
@@ -1690,21 +1964,31 @@ mod tests {
         let assistant = fold_event(
             &mut state,
             sid,
-            &wire_event("assistant/message", 11, json!({
-                "turn": 1, "step": 1,
-                "message": {
-                    "id": "msg-a", "role": "assistant",
-                    "content": [
-                        { "type": "reasoning", "text": "thinking" },
-                        { "type": "text", "text": "ready" },
-                        { "type": "tool-call", "id": "call-1", "name": "write", "arguments": "{}" },
-                    ],
-                    "source": { "kind": "model", "provider": "zai", "model": "glm-5.3-flash" },
-                },
-                "usage": { "inputTokens": 10, "outputTokens": 2, "cacheReadTokens": 5 },
-            })),
+            &wire_event(
+                "assistant/message",
+                11,
+                json!({
+                    "turn": 1, "step": 1,
+                    "message": {
+                        "id": "msg-a", "role": "assistant",
+                        "content": [
+                            { "type": "reasoning", "text": "thinking" },
+                            { "type": "text", "text": "ready" },
+                            { "type": "tool-call", "id": "call-1", "name": "write", "arguments": "{}" },
+                        ],
+                        "source": { "kind": "model", "provider": "zai", "model": "glm-5.3-flash" },
+                    },
+                    "usage": { "inputTokens": 10, "outputTokens": 2, "cacheReadTokens": 5 },
+                }),
+            ),
         );
-        let info = assistant.message_updated.as_ref().unwrap().pointer("/properties/info").cloned().unwrap();
+        let info = assistant
+            .message_updated
+            .as_ref()
+            .unwrap()
+            .pointer("/properties/info")
+            .cloned()
+            .unwrap();
         assert_eq!(info.get("providerID"), Some(&json!("zai")));
         assert_eq!(info.get("modelID"), Some(&json!("glm-5.3-flash")));
         assert_eq!(info.pointer("/tokens/cache/read"), Some(&json!(5)));
@@ -1715,25 +1999,37 @@ mod tests {
         let result = fold_event(
             &mut state,
             sid,
-            &wire_event("tool/result", 12, json!({
-                "turn": 1, "step": 1,
-                "message": {
-                    "id": "msg-tr", "role": "tool", "toolCallId": "call-1", "isError": false,
-                    "content": [ { "type": "text", "text": "wrote 1 file" } ],
-                },
-            })),
+            &wire_event(
+                "tool/result",
+                12,
+                json!({
+                    "turn": 1, "step": 1,
+                    "message": {
+                        "id": "msg-tr", "role": "tool", "toolCallId": "call-1", "isError": false,
+                        "content": [ { "type": "text", "text": "wrote 1 file" } ],
+                    },
+                }),
+            ),
         );
         let part = result.part_updated[0].clone();
         assert_eq!(part.pointer("/state/status"), Some(&json!("completed")));
         assert_eq!(part.pointer("/state/output"), Some(&json!("wrote 1 file")));
 
         // turn lifecycle
-        let start = fold_event(&mut state, sid, &wire_event("turn/start", 13, json!({ "turn": 1 })));
+        let start = fold_event(
+            &mut state,
+            sid,
+            &wire_event("turn/start", 13, json!({ "turn": 1 })),
+        );
         assert_eq!(start.extra[0].get("type"), Some(&json!("session.status")));
         let end = fold_event(
             &mut state,
             sid,
-            &wire_event("turn/end", 14, json!({ "turn": 1, "reason": { "kind": "completed" } })),
+            &wire_event(
+                "turn/end",
+                14,
+                json!({ "turn": 1, "reason": { "kind": "completed" } }),
+            ),
         );
         assert_eq!(end.extra[0].get("type"), Some(&json!("session.idle")));
         assert!(end.extra.len() == 1); // no error event on success
@@ -1750,10 +2046,14 @@ mod tests {
         let outcome = fold_event(
             &mut state,
             "s",
-            &wire_event("turn/end", 18, json!({
-                "turn": 1,
-                "reason": { "kind": "error", "error": { "message": "Insufficient Balance", "code": "ACCOUNT_QUOTA", "status": 402 } },
-            })),
+            &wire_event(
+                "turn/end",
+                18,
+                json!({
+                    "turn": 1,
+                    "reason": { "kind": "error", "error": { "message": "Insufficient Balance", "code": "ACCOUNT_QUOTA", "status": 402 } },
+                }),
+            ),
         );
         assert_eq!(outcome.extra[0].get("type"), Some(&json!("session.idle")));
         assert_eq!(outcome.extra[1].get("type"), Some(&json!("session.error")));
@@ -1782,8 +2082,14 @@ mod tests {
             "request": { "toolName": "write", "reason": "writing notes.txt" },
         }));
         assert_eq!(events[0].get("type"), Some(&json!("permission.v2.asked")));
-        assert_eq!(events[0].pointer("/properties/sessionID"), Some(&json!("s1")));
-        assert_eq!(events[0].pointer("/properties/action"), Some(&json!("write")));
+        assert_eq!(
+            events[0].pointer("/properties/sessionID"),
+            Some(&json!("s1"))
+        );
+        assert_eq!(
+            events[0].pointer("/properties/action"),
+            Some(&json!("write"))
+        );
         assert_eq!(
             events[0].pointer("/properties/resources/0"),
             Some(&json!("writing notes.txt"))

@@ -7,8 +7,8 @@
 
 use gpui::prelude::*;
 use gpui::{
-    div, px, AnyView, App, Bounds, Context, Entity, Global, IntoElement, MouseButton, Pixels,
-    Render, SharedString, StatefulInteractiveElement, Styled, Window,
+    AnyView, App, Bounds, Context, Entity, Global, IntoElement, MouseButton, Pixels, Render,
+    SharedString, StatefulInteractiveElement, Styled, Window, div, px,
 };
 use gpui_kit::base::{ElementExt, TooltipOverlay, TooltipRequest};
 use std::cell::Cell;
@@ -31,7 +31,11 @@ impl Global for TooltipHost {}
 /// window's last child so tooltips paint above everything.
 pub fn install(cx: &mut App, font_xsmall: f32) -> Entity<TooltipOverlay> {
     let overlay = cx.new(|_| TooltipOverlay::new());
-    cx.set_global(TooltipHost { overlay: overlay.clone(), enabled: true, font_xsmall });
+    cx.set_global(TooltipHost {
+        overlay: overlay.clone(),
+        enabled: true,
+        font_xsmall,
+    });
     overlay
 }
 
@@ -92,7 +96,9 @@ where
                     o.request_show(
                         TooltipRequest::new(at, {
                             let text = text.clone();
-                            move |_, cx| -> AnyView { cx.new(|_| Tip { text: text.clone() }).into() }
+                            move |_, cx| -> AnyView {
+                                cx.new(|_| Tip { text: text.clone() }).into()
+                            }
                         }),
                         window,
                         cx,

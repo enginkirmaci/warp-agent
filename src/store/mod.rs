@@ -2,8 +2,10 @@
 //! transcripts, queues, permissions, questions and subagent tracking. A 1:1
 //! port of MainViewModel + ChatTileViewModel + the ChatItems model.
 
-use crate::oc::{self, ApiRequest, CommandInfo, NetCommand, SessionInfo, StoredMessage, UiEvent, DSH_SERVER_KEY};
-use crate::settings::{AppSettings, HarnessKind, UiState, WorkspaceState, DEFAULT_EXECUTABLE};
+use crate::oc::{
+    self, ApiRequest, CommandInfo, DSH_SERVER_KEY, NetCommand, SessionInfo, StoredMessage, UiEvent,
+};
+use crate::settings::{AppSettings, DEFAULT_EXECUTABLE, HarnessKind, UiState, WorkspaceState};
 pub mod ipc;
 use crate::theme::{self, AccentColors, FontTokens};
 use chrono::{Local, TimeZone, Timelike};
@@ -25,12 +27,15 @@ const STREAM_REPAINT_INTERVAL: Duration = Duration::from_millis(100);
 /// ["(default)"] plus the model's variants — a tile's picker list. Stays at
 /// the bare sentinel until the server's model list lands (ModelsLoaded) or
 /// the model is a real key present in `variants_by_model`.
-fn variant_list_for(variants_by_model: &HashMap<String, Vec<String>>, model: &Option<String>) -> Vec<String> {
+fn variant_list_for(
+    variants_by_model: &HashMap<String, Vec<String>>,
+    model: &Option<String>,
+) -> Vec<String> {
     let mut variants = vec![DEFAULT_VARIANT_ENTRY.to_string()];
-    if let Some(m) = model {
-        if let Some(vs) = variants_by_model.get(m) {
-            variants.extend(vs.iter().cloned());
-        }
+    if let Some(m) = model
+        && let Some(vs) = variants_by_model.get(m)
+    {
+        variants.extend(vs.iter().cloned());
     }
     variants
 }
@@ -45,7 +50,10 @@ fn session_chat_settings(messages: &[StoredMessage]) -> Option<(String, Option<S
     if provider.is_empty() || model.is_empty() {
         return None;
     }
-    let variant = info.get("variant").and_then(serde_json::Value::as_str).map(String::from);
+    let variant = info
+        .get("variant")
+        .and_then(serde_json::Value::as_str)
+        .map(String::from);
     Some((format!("{provider}/{model}"), variant))
 }
 
@@ -76,7 +84,9 @@ pub fn at_token_start(text: &str) -> Option<(usize, String)> {
     let byte_at = text.rfind('@')?;
     if text.is_char_boundary(byte_at) {
         let prev = text[..byte_at].chars().next_back();
-        if prev.is_none_or(|c| c.is_whitespace()) && !text[byte_at + 1..].chars().any(char::is_whitespace) {
+        if prev.is_none_or(|c| c.is_whitespace())
+            && !text[byte_at + 1..].chars().any(char::is_whitespace)
+        {
             return Some((byte_at, text[byte_at + 1..].to_string()));
         }
     }
@@ -104,11 +114,16 @@ pub fn format_tokens(tokens: i64) -> String {
     if tokens < 1000 {
         tokens.to_string()
     } else if tokens < 1_000_000 {
-        format!("{:.1$}k", tokens as f64 / 1000.0, 1).trim_end_matches(".0").to_string()
+        format!("{:.1$}k", tokens as f64 / 1000.0, 1)
+            .trim_end_matches(".0")
+            .to_string()
     } else {
         let v = tokens as f64 / 1_000_000.0;
         if (v * 100.0).fract().abs() < f64::EPSILON {
-            format!("{:.2}M", v).trim_end_matches("00").trim_end_matches('.').to_string()
+            format!("{:.2}M", v)
+                .trim_end_matches("00")
+                .trim_end_matches('.')
+                .to_string()
         } else {
             format!("{:.2}M", v).trim_end_matches('0').to_string()
         }
@@ -156,7 +171,9 @@ pub fn message_time_label(created_ms: i64) -> String {
 }
 
 pub fn relative_time_label(updated_ms: i64) -> String {
-    let Some(at) = from_ms(updated_ms) else { return String::new() };
+    let Some(at) = from_ms(updated_ms) else {
+        return String::new();
+    };
     let now = Local::now();
     let span = now.signed_duration_since(at);
     if span.num_minutes() < 1 {
@@ -566,9 +583,16 @@ impl ChatTile {
     /// ModelsLoaded restore, and (list-only) set_tile_model. With
     /// `prefer_highest` (the settings checkbox), an unset/default pick
     /// upgrades to the model's top variant once real options are known.
-    fn apply_variant_list(&mut self, variants_by_model: &HashMap<String, Vec<String>>, prefer_highest: bool) {
+    fn apply_variant_list(
+        &mut self,
+        variants_by_model: &HashMap<String, Vec<String>>,
+        prefer_highest: bool,
+    ) {
         self.variants = variant_list_for(variants_by_model, &self.selected_model);
-        let selected_ok = self.variants.iter().any(|v| Some(v.as_str()) == self.selected_variant.as_deref());
+        let selected_ok = self
+            .variants
+            .iter()
+            .any(|v| Some(v.as_str()) == self.selected_variant.as_deref());
         // a real model missing from the map means its options aren't known yet
         // (MessagesLoaded can outrun ModelsLoaded on a fresh server) — keep the
         // pick pending instead of resetting it to the sentinel the later
@@ -580,18 +604,29 @@ impl ChatTile {
         if !selected_ok && !options_pending {
             self.selected_variant = Some(DEFAULT_VARIANT_ENTRY.into());
         }
-        if prefer_highest && self.selected_variant.as_deref() == Some(DEFAULT_VARIANT_ENTRY) {
-            if let Some(model) = &self.selected_model {
-                if let Some(highest) = variants_by_model.get(model).and_then(|vs| highest_variant(vs)) {
-                    self.selected_variant = Some(highest);
-                }
-            }
+        if prefer_highest
+            && self.selected_variant.as_deref() == Some(DEFAULT_VARIANT_ENTRY)
+            && let Some(model) = &self.selected_model
+            && let Some(highest) = variants_by_model
+                .get(model)
+                .and_then(|vs| highest_variant(vs))
+        {
+            self.selected_variant = Some(highest);
         }
     }
 
-    pub fn new(key: String, seed_model: Option<String>, seed_agent: Option<String>, seed_variant: Option<String>) -> Self {
+    pub fn new(
+        key: String,
+        seed_model: Option<String>,
+        seed_agent: Option<String>,
+        seed_variant: Option<String>,
+    ) -> Self {
         let variants = vec![DEFAULT_VARIANT_ENTRY.to_string()];
-        let selected_variant = if seed_variant.is_some() { seed_variant.clone() } else { Some(DEFAULT_VARIANT_ENTRY.into()) };
+        let selected_variant = if seed_variant.is_some() {
+            seed_variant.clone()
+        } else {
+            Some(DEFAULT_VARIANT_ENTRY.into())
+        };
         ChatTile {
             key,
             session_id: None,
@@ -627,11 +662,16 @@ impl ChatTile {
     }
 
     pub fn is_busy(&self, store: &Store) -> bool {
-        self.session_id.as_ref().is_some_and(|id| store.running_by_session.contains(id))
+        self.session_id
+            .as_ref()
+            .is_some_and(|id| store.running_by_session.contains(id))
     }
 
     pub fn is_untouched(&self) -> bool {
-        self.session_id.is_none() && self.input.is_empty() && self.attachments.is_empty() && self.items.is_empty()
+        self.session_id.is_none()
+            && self.input.is_empty()
+            && self.attachments.is_empty()
+            && self.items.is_empty()
     }
 
     pub fn reset_history(&mut self) {
@@ -641,7 +681,10 @@ impl ChatTile {
 
     /// How many user messages this tile itself has sent — the ↑/↓ recall source.
     pub fn sent_prompt_count(&self) -> usize {
-        self.items.iter().filter(|i| matches!(i.as_ref(), ChatItem::UserMessage { .. })).count()
+        self.items
+            .iter()
+            .filter(|i| matches!(i.as_ref(), ChatItem::UserMessage { .. }))
+            .count()
     }
 
     /// The `steps_from_end`-th sent user message of this tile (0 = newest).
@@ -663,10 +706,10 @@ impl ChatTile {
     /// when the row is gone — the caller treats that as a stale menu click.
     fn peek_sent_prompt_key(&self, key: usize) -> String {
         for item in &self.items {
-            if let ChatItem::UserMessage { key: k, text, .. } = item.as_ref() {
-                if *k == key {
-                    return text.clone();
-                }
+            if let ChatItem::UserMessage { key: k, text, .. } = item.as_ref()
+                && *k == key
+            {
+                return text.clone();
             }
         }
         String::new()
@@ -685,7 +728,11 @@ impl ChatTile {
         !self.tasks.is_empty()
     }
     pub fn tasks_progress(&self) -> String {
-        format!("{}/{}", self.tasks.iter().filter(|t| t.done()).count(), self.tasks.len())
+        format!(
+            "{}/{}",
+            self.tasks.iter().filter(|t| t.done()).count(),
+            self.tasks.len()
+        )
     }
     pub fn has_tile_agents(&self) -> bool {
         !self.tile_agents.is_empty()
@@ -714,7 +761,11 @@ impl ChatTile {
     }
 
     fn update_context_text(&mut self) {
-        let total = self.token_order.last().map(|id| self.tokens_by_message[id]).unwrap_or(0);
+        let total = self
+            .token_order
+            .last()
+            .map(|id| self.tokens_by_message[id])
+            .unwrap_or(0);
         self.context_frac = if total > 0 && self.context_limit > 0 {
             (total as f32 / self.context_limit as f32).clamp(0., 1.)
         } else {
@@ -743,7 +794,10 @@ impl ChatTile {
     }
 
     fn meta_for(&self, message_id: Option<&String>) -> String {
-        message_id.and_then(|id| self.meta_by_message.get(id)).cloned().unwrap_or_default()
+        message_id
+            .and_then(|id| self.meta_by_message.get(id))
+            .cloned()
+            .unwrap_or_default()
     }
 
     fn created_at_for(&self, message_id: Option<&String>) -> i64 {
@@ -773,16 +827,24 @@ impl ChatTile {
         if self.role_by_message.get(&id).map(String::as_str) != Some(role) {
             self.role_by_message.insert(id.clone(), role.to_string());
         }
-        if let Some(ms) = info.pointer("/time/created").and_then(serde_json::Value::as_i64) {
-            if self.created_by_message.get(&id).copied() != Some(ms) {
-                self.created_by_message.insert(id.clone(), ms);
-            }
+        if let Some(ms) = info
+            .pointer("/time/created")
+            .and_then(serde_json::Value::as_i64)
+            && self.created_by_message.get(&id).copied() != Some(ms)
+        {
+            self.created_by_message.insert(id.clone(), ms);
         }
         if role != "assistant" {
             return;
         }
-        let provider = info.get("providerID").and_then(serde_json::Value::as_str).unwrap_or("");
-        let model = info.get("modelID").and_then(serde_json::Value::as_str).unwrap_or("");
+        let provider = info
+            .get("providerID")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("");
+        let model = info
+            .get("modelID")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("");
         if !provider.is_empty() && !model.is_empty() {
             let next = format!("{provider}/{model}");
             if self.last_used_model.as_deref() != Some(next.as_str()) {
@@ -798,10 +860,11 @@ impl ChatTile {
                 && let Some(items) = self.meta_items(&id)
             {
                 for key in items {
-                    if let Some(index) = self.find_item_index(&key) {
-                        if let ChatItem::AssistantText { meta_label, .. } = Arc::make_mut(&mut self.items[index]) {
-                            *meta_label = meta.clone();
-                        }
+                    if let Some(index) = self.find_item_index(&key)
+                        && let ChatItem::AssistantText { meta_label, .. } =
+                            Arc::make_mut(&mut self.items[index])
+                    {
+                        *meta_label = meta.clone();
                     }
                 }
                 self.meta_by_message.insert(id.clone(), meta);
@@ -833,16 +896,26 @@ impl ChatTile {
     /// transcript shows actually changed — the caller skips the repaint when
     /// the stream re-sends an unchanged part.
     pub fn on_part_updated(&mut self, data: &serde_json::Value) -> bool {
-        let Some(part) = data.get("part") else { return false };
-        let Some(id) = part.get("id").and_then(serde_json::Value::as_str) else { return false };
-        let part_type = part.get("type").and_then(serde_json::Value::as_str).unwrap_or("");
-        let message_id = part.get("messageID").and_then(serde_json::Value::as_str).map(String::from);
+        let Some(part) = data.get("part") else {
+            return false;
+        };
+        let Some(id) = part.get("id").and_then(serde_json::Value::as_str) else {
+            return false;
+        };
+        let part_type = part
+            .get("type")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("");
+        let message_id = part
+            .get("messageID")
+            .and_then(serde_json::Value::as_str)
+            .map(String::from);
 
         // user parts are rendered locally at send time; stream echoes are skipped
-        if let Some(mid) = &message_id {
-            if self.role_by_message.get(mid).map(String::as_str) == Some("user") {
-                return false;
-            }
+        if let Some(mid) = &message_id
+            && self.role_by_message.get(mid).map(String::as_str) == Some("user")
+        {
+            return false;
         }
 
         match part_type {
@@ -866,14 +939,17 @@ impl ChatTile {
                         self.items.len() - 1
                     }
                 };
-                let text = part.get("text").and_then(serde_json::Value::as_str).unwrap_or("");
+                let text = part
+                    .get("text")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("");
                 // compare through the Arc first: make_mut on an item the render
                 // snapshot still holds deep-copies the whole text just to
                 // conclude "unchanged"
-                if let ChatItem::AssistantText { text: t, .. } = self.items[index].as_ref() {
-                    if t == text {
-                        return false;
-                    }
+                if let ChatItem::AssistantText { text: t, .. } = self.items[index].as_ref()
+                    && t == text
+                {
+                    return false;
                 }
                 match Arc::make_mut(&mut self.items[index]) {
                     ChatItem::AssistantText { text: t, .. } => {
@@ -895,11 +971,14 @@ impl ChatTile {
                         self.items.len() - 1
                     }
                 };
-                let text = part.get("text").and_then(serde_json::Value::as_str).unwrap_or("");
-                if let ChatItem::Reasoning { text: t, .. } = self.items[index].as_ref() {
-                    if t == text {
-                        return false;
-                    }
+                let text = part
+                    .get("text")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("");
+                if let ChatItem::Reasoning { text: t, .. } = self.items[index].as_ref()
+                    && t == text
+                {
+                    return false;
                 }
                 match Arc::make_mut(&mut self.items[index]) {
                     ChatItem::Reasoning { text: t, .. } => {
@@ -914,7 +993,10 @@ impl ChatTile {
                 let index = match self.find_item_index(&item_id) {
                     Some(index) => index,
                     None => {
-                        let tool_name = part.get("tool").and_then(serde_json::Value::as_str).unwrap_or("tool");
+                        let tool_name = part
+                            .get("tool")
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or("tool");
                         self.items.push(Arc::new(ChatItem::Tool(ToolItem {
                             part_id: id.to_string(),
                             tool: tool_name.into(),
@@ -931,7 +1013,9 @@ impl ChatTile {
                         self.items.len() - 1
                     }
                 };
-                let Some(state) = part.get("state") else { return true };
+                let Some(state) = part.get("state") else {
+                    return true;
+                };
                 let sig = {
                     use std::hash::{Hash, Hasher};
                     let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -943,7 +1027,8 @@ impl ChatTile {
                 {
                     return false;
                 }
-                let changed = {
+
+                {
                     let tool = match Arc::make_mut(&mut self.items[index]) {
                         ChatItem::Tool(tool) => tool,
                         _ => return false,
@@ -953,8 +1038,7 @@ impl ChatTile {
                     apply_tool_metadata(state, tool);
                     tool.state_sig = Some(sig);
                     *tool != before
-                };
-                changed
+                }
             }
             "file" => {
                 let item_id = format!("i{id}");
@@ -964,16 +1048,15 @@ impl ChatTile {
                 if let (Some(url), Some(file_name)) = (
                     part.get("url").and_then(serde_json::Value::as_str),
                     part.get("filename").and_then(serde_json::Value::as_str),
-                ) {
-                    if let Some(png) = decode_data_url(url) {
-                        self.items.push(Arc::new(ChatItem::Image {
-                            key: id.to_string(),
-                            file_name: file_name.into(),
-                            png: Arc::new(png),
-                            created_ms: self.created_at_for(message_id.as_ref()),
-                        }));
-                        return true;
-                    }
+                ) && let Some(png) = decode_data_url(url)
+                {
+                    self.items.push(Arc::new(ChatItem::Image {
+                        key: id.to_string(),
+                        file_name: file_name.into(),
+                        png: Arc::new(png),
+                        created_ms: self.created_at_for(message_id.as_ref()),
+                    }));
+                    return true;
                 }
                 false
             }
@@ -992,7 +1075,11 @@ impl ChatTile {
             })
             .map(String::from);
         let Some(id) = id else { return };
-        if let Some(index) = self.items.iter().position(|i| i.matches_part_id(id.as_str())) {
+        if let Some(index) = self
+            .items
+            .iter()
+            .position(|i| i.matches_part_id(id.as_str()))
+        {
             self.items.remove(index);
         }
     }
@@ -1009,8 +1096,14 @@ impl ChatTile {
             if content.is_empty() {
                 continue;
             }
-            let status = todo.get("status").and_then(serde_json::Value::as_str).unwrap_or("pending");
-            self.tasks.push(TaskItem { content: content.into(), status: status.into() });
+            let status = todo
+                .get("status")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("pending");
+            self.tasks.push(TaskItem {
+                content: content.into(),
+                status: status.into(),
+            });
         }
         !self.tasks.is_empty()
     }
@@ -1019,23 +1112,36 @@ impl ChatTile {
     pub fn restore(&mut self, messages: &[StoredMessage], store: &Store, next_key: &mut usize) {
         let mut todos: Option<Vec<TaskItem>> = None;
         for msg in messages {
-            self.role_by_message.insert(msg.id.clone(), msg.role.clone());
-            self.created_by_message.insert(msg.id.clone(), msg.created_ms);
+            self.role_by_message
+                .insert(msg.id.clone(), msg.role.clone());
+            self.created_by_message
+                .insert(msg.id.clone(), msg.created_ms);
             if let Some(meta) = build_meta(&msg.info) {
                 self.meta_by_message.insert(msg.id.clone(), meta);
             }
             if msg.role == "assistant" {
-                let provider = msg.info.get("providerID").and_then(serde_json::Value::as_str).unwrap_or("");
-                let model = msg.info.get("modelID").and_then(serde_json::Value::as_str).unwrap_or("");
+                let provider = msg
+                    .info
+                    .get("providerID")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("");
+                let model = msg
+                    .info
+                    .get("modelID")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("");
                 if !provider.is_empty() && !model.is_empty() {
                     self.last_used_model = Some(format!("{provider}/{model}"));
                     self.update_context_limit(store);
                 }
                 let total = read_token_total(&msg.info);
-                if total > 0 {
-                    if self.tokens_by_message.insert(msg.id.clone(), total).is_none() {
-                        self.token_order.push(msg.id.clone());
-                    }
+                if total > 0
+                    && self
+                        .tokens_by_message
+                        .insert(msg.id.clone(), total)
+                        .is_none()
+                {
+                    self.token_order.push(msg.id.clone());
                 }
             }
             for part in &msg.parts {
@@ -1047,7 +1153,10 @@ impl ChatTile {
                 };
                 match part_type {
                     "text" => {
-                        let text = part.get("text").and_then(serde_json::Value::as_str).unwrap_or("");
+                        let text = part
+                            .get("text")
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or("");
                         if msg.role == "user" {
                             if !text.is_empty() {
                                 self.items.push(Arc::new(ChatItem::UserMessage {
@@ -1065,15 +1174,26 @@ impl ChatTile {
                                 meta_label: self.meta_for(Some(&msg.id)),
                                 created_ms: msg.created_ms,
                             }));
-                            self.key_by_part.insert(format!("{}:{}", msg.id, id), item_id);
+                            self.key_by_part
+                                .insert(format!("{}:{}", msg.id, id), item_id);
                         }
                     }
                     "reasoning" => {
-                        let text = part.get("text").and_then(serde_json::Value::as_str).unwrap_or("").to_string();
-                        self.items.push(Arc::new(ChatItem::Reasoning { key: id.into(), text }));
+                        let text = part
+                            .get("text")
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or("")
+                            .to_string();
+                        self.items.push(Arc::new(ChatItem::Reasoning {
+                            key: id.into(),
+                            text,
+                        }));
                     }
                     "tool" => {
-                        let tool_name = part.get("tool").and_then(serde_json::Value::as_str).unwrap_or("tool");
+                        let tool_name = part
+                            .get("tool")
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or("tool");
                         let mut tool = ToolItem {
                             part_id: id.into(),
                             tool: tool_name.into(),
@@ -1155,11 +1275,22 @@ pub fn read_token_total(info: &serde_json::Value) -> i64 {
     let Some(tokens) = info.get("tokens").and_then(serde_json::Value::as_object) else {
         return 0;
     };
-    let sum = |name: &str| tokens.get(name).and_then(serde_json::Value::as_i64).unwrap_or(0);
+    let sum = |name: &str| {
+        tokens
+            .get(name)
+            .and_then(serde_json::Value::as_i64)
+            .unwrap_or(0)
+    };
     let (mut cache_read, mut cache_write) = (0, 0);
     if let Some(cache) = tokens.get("cache").and_then(serde_json::Value::as_object) {
-        cache_read = cache.get("read").and_then(serde_json::Value::as_i64).unwrap_or(0);
-        cache_write = cache.get("write").and_then(serde_json::Value::as_i64).unwrap_or(0);
+        cache_read = cache
+            .get("read")
+            .and_then(serde_json::Value::as_i64)
+            .unwrap_or(0);
+        cache_write = cache
+            .get("write")
+            .and_then(serde_json::Value::as_i64)
+            .unwrap_or(0);
     }
     sum("input") + sum("output") + sum("reasoning") + cache_read + cache_write
 }
@@ -1171,15 +1302,33 @@ pub fn build_meta(info: &serde_json::Value) -> Option<String> {
     }
     let mut parts: Vec<String> = Vec::new();
     if let Some(tokens) = info.get("tokens").and_then(serde_json::Value::as_object) {
-        let input = tokens.get("input").and_then(serde_json::Value::as_i64).unwrap_or(0);
-        let output = tokens.get("output").and_then(serde_json::Value::as_i64).unwrap_or(0);
+        let input = tokens
+            .get("input")
+            .and_then(serde_json::Value::as_i64)
+            .unwrap_or(0);
+        let output = tokens
+            .get("output")
+            .and_then(serde_json::Value::as_i64)
+            .unwrap_or(0);
         if input > 0 || output > 0 {
-            parts.push(format!("↑{} ↓{}", format_tokens(input), format_tokens(output)));
+            parts.push(format!(
+                "↑{} ↓{}",
+                format_tokens(input),
+                format_tokens(output)
+            ));
         }
     }
-    let cost = info.get("cost").and_then(serde_json::Value::as_f64).unwrap_or(0.0);
+    let cost = info
+        .get("cost")
+        .and_then(serde_json::Value::as_f64)
+        .unwrap_or(0.0);
     if cost > 0.0 {
-        parts.push(format!("${:.4}", cost).trim_end_matches('0').trim_end_matches('.').to_string());
+        parts.push(
+            format!("${:.4}", cost)
+                .trim_end_matches('0')
+                .trim_end_matches('.')
+                .to_string(),
+        );
     }
     if parts.is_empty() {
         None
@@ -1189,7 +1338,9 @@ pub fn build_meta(info: &serde_json::Value) -> Option<String> {
 }
 
 fn describe_part(state: &serde_json::Value, name: &str) -> String {
-    let Some(value) = state.get(name) else { return String::new() };
+    let Some(value) = state.get(name) else {
+        return String::new();
+    };
     if value.is_null() {
         return String::new();
     }
@@ -1243,7 +1394,9 @@ fn tool_label_from_input(state: &serde_json::Value) -> Option<String> {
     ];
     let mut pick: Option<String> = None;
     for key in CANDIDATES {
-        let Some(value) = input.get(key) else { continue };
+        let Some(value) = input.get(key) else {
+            continue;
+        };
         let text = match value {
             serde_json::Value::String(s) => Some(s.trim().to_string()),
             serde_json::Value::Number(n) => Some(n.to_string()),
@@ -1301,23 +1454,38 @@ fn apply_tool_state(state: &serde_json::Value, tool: &mut ToolItem) {
         output: describe_part(state, "output"),
         error: describe_part(state, "error"),
     };
-    tool.error_preview = tool.details.error.split('\n').next().unwrap_or("").to_string();
+    tool.error_preview = tool
+        .details
+        .error
+        .split('\n')
+        .next()
+        .unwrap_or("")
+        .to_string();
 }
 
 fn apply_tool_metadata(state: &serde_json::Value, tool: &mut ToolItem) {
     let Some(md) = state.get("metadata").and_then(serde_json::Value::as_object) else {
         return;
     };
-    if let Some(file_path) = md.get("filepath").and_then(serde_json::Value::as_str) {
-        if !file_path.is_empty() {
-            tool.file_path = file_path.into();
-        }
+    if let Some(file_path) = md.get("filepath").and_then(serde_json::Value::as_str)
+        && !file_path.is_empty()
+    {
+        tool.file_path = file_path.into();
     }
     if let Some(fd) = md.get("filediff").and_then(serde_json::Value::as_object) {
-        tool.diff = fd.get("patch").and_then(serde_json::Value::as_str).map(String::from);
+        tool.diff = fd
+            .get("patch")
+            .and_then(serde_json::Value::as_str)
+            .map(String::from);
         tool.numstat = Some(Numstat {
-            additions: fd.get("additions").and_then(serde_json::Value::as_i64).unwrap_or(0),
-            deletions: fd.get("deletions").and_then(serde_json::Value::as_i64).unwrap_or(0),
+            additions: fd
+                .get("additions")
+                .and_then(serde_json::Value::as_i64)
+                .unwrap_or(0),
+            deletions: fd
+                .get("deletions")
+                .and_then(serde_json::Value::as_i64)
+                .unwrap_or(0),
         });
     }
 }
@@ -1337,8 +1505,14 @@ fn todos_from_part(part: &serde_json::Value) -> Option<Vec<TaskItem>> {
         if content.is_empty() {
             continue;
         }
-        let status = todo.get("status").and_then(serde_json::Value::as_str).unwrap_or("pending");
-        result.push(TaskItem { content: content.into(), status: status.into() });
+        let status = todo
+            .get("status")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("pending");
+        result.push(TaskItem {
+            content: content.into(),
+            status: status.into(),
+        });
     }
     Some(result)
 }
@@ -1448,7 +1622,7 @@ fn workspace_order_key(path: &str) -> (bool, String) {
 }
 
 /// Sidebar order: General leads, the rest alphabetical by name (case-insensitive).
-fn sort_workspaces(workspaces: &mut Vec<WorkspaceState>) {
+fn sort_workspaces(workspaces: &mut [WorkspaceState]) {
     workspaces.sort_by_key(|w| workspace_order_key(&w.path));
 }
 
@@ -1464,7 +1638,13 @@ pub struct WorkspaceItem {
 impl WorkspaceItem {
     pub fn new(state: WorkspaceState) -> Self {
         let name = workspace_display_name(&state.path);
-        Self { state, name, is_running: false, is_selected: false, chats: Vec::new() }
+        Self {
+            state,
+            name,
+            is_running: false,
+            is_selected: false,
+            chats: Vec::new(),
+        }
     }
 
     pub fn folder_path(&self) -> &str {
@@ -1669,10 +1849,16 @@ impl Store {
         let fonts = theme::font_tokens(settings.font_scale.as_deref(), system_font_factor);
         let auto_allow = ui.auto_allow_always.unwrap_or(true);
 
-        if ui.workspaces.is_empty() {
-            if let Some(folder) = ui.folder.clone().filter(|f| !f.trim().is_empty()) {
-                ui.workspaces.insert(0, WorkspaceState { path: normalize_dir(&folder), ..Default::default() });
-            }
+        if ui.workspaces.is_empty()
+            && let Some(folder) = ui.folder.clone().filter(|f| !f.trim().is_empty())
+        {
+            ui.workspaces.insert(
+                0,
+                WorkspaceState {
+                    path: normalize_dir(&folder),
+                    ..Default::default()
+                },
+            );
         }
 
         let mut startup_models = vec![DEFAULT_MODEL_ENTRY.to_string()];
@@ -1714,8 +1900,10 @@ impl Store {
             sidebar_shown_width: ui
                 .sidebar_width
                 .unwrap_or(theme::SIDEBAR_DEFAULT_WIDTH as f64)
-                .clamp(theme::SIDEBAR_MIN_WIDTH as f64, theme::SIDEBAR_MAX_WIDTH as f64)
-                as f32,
+                .clamp(
+                    theme::SIDEBAR_MIN_WIDTH as f64,
+                    theme::SIDEBAR_MAX_WIDTH as f64,
+                ) as f32,
             sidebar_visible: ui.sidebar_visible.unwrap_or(true),
             next_key: 1,
             next_tile_key: 1,
@@ -1768,11 +1956,24 @@ impl Store {
         }
 
         // ensure the General workspace exists and leads the list
-        let general_path = crate::paths::AppPaths::general_workspace_path().to_string_lossy().to_string();
+        let general_path = crate::paths::AppPaths::general_workspace_path()
+            .to_string_lossy()
+            .to_string();
         if !store.ui.workspaces.iter().any(|w| w.path == general_path) {
-            store.ui.workspaces.insert(0, WorkspaceState { path: general_path.clone(), ..Default::default() });
+            store.ui.workspaces.insert(
+                0,
+                WorkspaceState {
+                    path: general_path.clone(),
+                    ..Default::default()
+                },
+            );
         } else if store.ui.workspaces[0].path != general_path {
-            let index = store.ui.workspaces.iter().position(|w| w.path == general_path).unwrap();
+            let index = store
+                .ui
+                .workspaces
+                .iter()
+                .position(|w| w.path == general_path)
+                .unwrap();
             let general = store.ui.workspaces.remove(index);
             store.ui.workspaces.insert(0, general);
         }
@@ -1786,7 +1987,12 @@ impl Store {
             // saved open-tile ids of chats that no longer exist could never restore
             ws.open_sessions.retain(|id| ws.sessions.contains(id));
         }
-        let pending_tiles: usize = store.ui.workspaces.iter().map(|w| w.open_sessions.len()).sum();
+        let pending_tiles: usize = store
+            .ui
+            .workspaces
+            .iter()
+            .map(|w| w.open_sessions.len())
+            .sum();
         store.restore_prompt_text = if pending_tiles == 1 {
             "1 chat was open last time".into()
         } else {
@@ -1794,10 +2000,18 @@ impl Store {
         };
         store.show_restore_prompt = pending_tiles > 0;
 
-        store.workspaces = store.ui.workspaces.clone().into_iter().map(WorkspaceItem::new).collect();
+        store.workspaces = store
+            .ui
+            .workspaces
+            .clone()
+            .into_iter()
+            .map(WorkspaceItem::new)
+            .collect();
         for ws in &store.workspaces {
             for sid in &ws.state.sessions {
-                store.workspace_by_session.insert(sid.clone(), ws.folder_path().to_string());
+                store
+                    .workspace_by_session
+                    .insert(sid.clone(), ws.folder_path().to_string());
             }
         }
 
@@ -1807,7 +2021,12 @@ impl Store {
             .iter()
             .find(|w| Some(w.folder_path()) == store.ui.active_workspace.as_deref())
             .map(|w| w.folder_path().to_string())
-            .or_else(|| store.workspaces.first().map(|w| w.folder_path().to_string()));
+            .or_else(|| {
+                store
+                    .workspaces
+                    .first()
+                    .map(|w| w.folder_path().to_string())
+            });
         let entity = cx.new(|_| store);
         entity.update(cx, |store, cx| {
             if let Some(path) = selected {
@@ -1820,13 +2039,19 @@ impl Store {
     // ---- seeds / persistence ----
 
     pub fn seed_model(&self) -> Option<String> {
-        self.ui.model.clone().or_else(|| self.settings.default_model.clone())
+        self.ui
+            .model
+            .clone()
+            .or_else(|| self.settings.default_model.clone())
     }
     pub fn seed_variant(&self) -> Option<String> {
         self.settings.default_variant.clone()
     }
     pub fn seed_agent(&self) -> Option<String> {
-        self.ui.agent.clone().or_else(|| self.settings.default_agent.clone())
+        self.ui
+            .agent
+            .clone()
+            .or_else(|| self.settings.default_agent.clone())
     }
 
     pub fn save_state(&mut self) {
@@ -1858,7 +2083,9 @@ impl Store {
     /// sessions that no longer exist anywhere are dropped.
     fn persist_drafts(&mut self) {
         for tile in &self.open_tiles {
-            let Some(sid) = &tile.session_id else { continue };
+            let Some(sid) = &tile.session_id else {
+                continue;
+            };
             if tile.input.trim().is_empty() {
                 self.ui.drafts.remove(sid);
             } else {
@@ -1867,7 +2094,10 @@ impl Store {
         }
         self.ui.drafts.retain(|sid, _| {
             self.tile_by_session.contains_key(sid)
-                || self.workspaces.iter().any(|w| w.state.sessions.contains(sid))
+                || self
+                    .workspaces
+                    .iter()
+                    .any(|w| w.state.sessions.contains(sid))
         });
     }
 
@@ -1880,7 +2110,12 @@ impl Store {
                 .open_tiles
                 .iter()
                 .filter_map(|t| t.session_id.clone())
-                .filter(|sid| self.workspace_by_session.get(sid).map(|p| p == ws.folder_path()).unwrap_or(false))
+                .filter(|sid| {
+                    self.workspace_by_session
+                        .get(sid)
+                        .map(|p| p == ws.folder_path())
+                        .unwrap_or(false)
+                })
                 .collect();
             ws.state.open_sessions = ids;
         }
@@ -1890,10 +2125,10 @@ impl Store {
                 .and_then(|t| t.session_id.clone());
             if let Some(sid) = focus_session {
                 let owner = self.workspace_by_session.get(&sid).cloned();
-                if let Some(ws) = self.selected_workspace_mut() {
-                    if owner.as_deref() == Some(ws.folder_path()) {
-                        ws.state.active_session = Some(sid);
-                    }
+                if let Some(ws) = self.selected_workspace_mut()
+                    && owner.as_deref() == Some(ws.folder_path())
+                {
+                    ws.state.active_session = Some(sid);
                 }
             }
         }
@@ -1903,9 +2138,12 @@ impl Store {
         let (model, variant, agent) = {
             let tile = self.focused_tile();
             (
-                tile.and_then(|t| t.selected_model.clone()).filter(|m| m != DEFAULT_MODEL_ENTRY),
-                tile.and_then(|t| t.selected_variant.clone()).filter(|v| v != DEFAULT_VARIANT_ENTRY),
-                tile.and_then(|t| t.selected_agent.clone()).filter(|a| a != DEFAULT_AGENT_ENTRY),
+                tile.and_then(|t| t.selected_model.clone())
+                    .filter(|m| m != DEFAULT_MODEL_ENTRY),
+                tile.and_then(|t| t.selected_variant.clone())
+                    .filter(|v| v != DEFAULT_VARIANT_ENTRY),
+                tile.and_then(|t| t.selected_agent.clone())
+                    .filter(|a| a != DEFAULT_AGENT_ENTRY),
             )
         };
         self.ui.model = model;
@@ -1927,7 +2165,10 @@ impl Store {
     /// Fire a /command refresh for the tile's workspace (menu open).
     pub fn refresh_commands(&mut self, tile_key: &str) {
         if let Some(ws) = self.tile_net_key_or(tile_key) {
-            self.net.send(NetCommand::Request { ws_key: ws, request: ApiRequest::ListCommands });
+            self.net.send(NetCommand::Request {
+                ws_key: ws,
+                request: ApiRequest::ListCommands,
+            });
         }
     }
 
@@ -1936,7 +2177,9 @@ impl Store {
         if let Some(ws) = self.tile_net_key_or(tile_key) {
             self.net.send(NetCommand::Request {
                 ws_key: ws,
-                request: ApiRequest::FindFiles { query: query.to_string() },
+                request: ApiRequest::FindFiles {
+                    query: query.to_string(),
+                },
             });
         }
     }
@@ -1945,7 +2188,9 @@ impl Store {
     /// it answers this workspace's exact query (older answers don't count).
     pub fn file_results_for(&self, tile_key: &str, query: &str) -> Option<&Vec<String>> {
         let result = self.file_results.as_ref()?;
-        if result.query == query && self.tile_ws_key(tile_key).as_deref() == Some(result.ws_key.as_str()) {
+        if result.query == query
+            && self.tile_ws_key(tile_key).as_deref() == Some(result.ws_key.as_str())
+        {
             Some(&result.paths)
         } else {
             None
@@ -1965,8 +2210,13 @@ impl Store {
     /// false when the workspace's server is down or has no `mcp` config, and
     /// the button renders dimmed. The settings master switch overrides.
     pub fn mcp_state(&self, tile_key: &str) -> (bool, bool) {
-        let Some(ws_key) = self.tile_ws_key(tile_key) else { return (false, false) };
-        let has = self.mcp_names.get(&ws_key).is_some_and(|names| !names.is_empty());
+        let Some(ws_key) = self.tile_ws_key(tile_key) else {
+            return (false, false);
+        };
+        let has = self
+            .mcp_names
+            .get(&ws_key)
+            .is_some_and(|names| !names.is_empty());
         let on = has && !self.settings.mcp_disabled && !self.mcp_disabled.contains(&ws_key);
         (has, on)
     }
@@ -1976,7 +2226,9 @@ impl Store {
     /// config file; the choice persists in ui.json and is re-asserted after
     /// every server (re)start. The settings master switch wins over it.
     pub fn toggle_mcp(&mut self, tile_key: &str, cx: &mut Context<Self>) {
-        let Some(ws_key) = self.tile_ws_key(tile_key) else { return };
+        let Some(ws_key) = self.tile_ws_key(tile_key) else {
+            return;
+        };
         if self.settings.mcp_disabled {
             self.announce("MCP is disabled for all workspaces in Settings.", true, cx);
             return;
@@ -2002,7 +2254,10 @@ impl Store {
         } else {
             self.mcp_disabled.remove(&ws_key);
         }
-        tracing::info!("mcp {} for {ws_key}", if disabling { "disabled" } else { "enabled" });
+        tracing::info!(
+            "mcp {} for {ws_key}",
+            if disabling { "disabled" } else { "enabled" }
+        );
         self.save_state();
         self.repaint(cx);
     }
@@ -2058,11 +2313,15 @@ impl Store {
     }
 
     pub fn focused_tile(&self) -> Option<&ChatTile> {
-        self.focused_tile.as_deref().and_then(|key| self.tile_by_key(key))
+        self.focused_tile
+            .as_deref()
+            .and_then(|key| self.tile_by_key(key))
     }
 
     pub fn tile_for_session(&self, session_id: &str) -> Option<&ChatTile> {
-        self.tile_by_session.get(session_id).and_then(|key| self.tile_by_key(key))
+        self.tile_by_session
+            .get(session_id)
+            .and_then(|key| self.tile_by_key(key))
     }
 
     pub fn has_runtime(&self, session_id: &str) -> bool {
@@ -2086,7 +2345,9 @@ impl Store {
     /// Gauge inputs over every running workspace; any reconnecting server
     /// outranks a merely unhealthy one (checked first at the call site).
     pub fn any_stream_reconnecting(&self) -> bool {
-        self.runtimes.values().any(|rt| matches!(rt.stream_status, oc::StreamStatus::Reconnecting { .. }))
+        self.runtimes
+            .values()
+            .any(|rt| matches!(rt.stream_status, oc::StreamStatus::Reconnecting { .. }))
     }
 
     pub fn any_stream_unhealthy(&self) -> bool {
@@ -2133,10 +2394,10 @@ impl Store {
         if let Some(path) = self.workspace_by_session.get(session_id) {
             return Some(path.clone());
         }
-        if let Some(sub) = self.subagent_by_session.get(session_id) {
-            if let Some(path) = self.workspace_by_session.get(&sub.parent_session_id) {
-                return Some(path.clone());
-            }
+        if let Some(sub) = self.subagent_by_session.get(session_id)
+            && let Some(path) = self.workspace_by_session.get(&sub.parent_session_id)
+        {
+            return Some(path.clone());
         }
         None
     }
@@ -2204,7 +2465,12 @@ impl Store {
         let folders: Vec<String> = self
             .workspaces
             .iter()
-            .filter(|ws| ws.state.sessions.iter().any(|sid| self.session_harness(sid) == HarnessKind::Dsh))
+            .filter(|ws| {
+                ws.state
+                    .sessions
+                    .iter()
+                    .any(|sid| self.session_harness(sid) == HarnessKind::Dsh)
+            })
             .map(|ws| ws.folder_path().to_string())
             .collect();
         for folder in folders {
@@ -2231,7 +2497,10 @@ impl Store {
     fn on_dsh_started(&mut self, cx: &mut Context<Self>) {
         self.runtimes.insert(
             DSH_SERVER_KEY.into(),
-            WorkspaceRuntime { stream_status: oc::StreamStatus::Connected, healthy: None },
+            WorkspaceRuntime {
+                stream_status: oc::StreamStatus::Connected,
+                healthy: None,
+            },
         );
         self.net.send(NetCommand::Request {
             ws_key: DSH_SERVER_KEY.into(),
@@ -2247,10 +2516,14 @@ impl Store {
             std::mem::take(&mut self.pending_dsh_drafts);
         for (tile_key, text, attachments, folder) in parked {
             self.pending_sends.push((tile_key, text, attachments));
-            self.pending_create_harness.push_back((folder.clone(), HarnessKind::Dsh));
+            self.pending_create_harness
+                .push_back((folder.clone(), HarnessKind::Dsh));
             self.net.send(NetCommand::Request {
                 ws_key: DSH_SERVER_KEY.into(),
-                request: ApiRequest::CreateDshSession { folder, title: DRAFT_TITLE.into() },
+                request: ApiRequest::CreateDshSession {
+                    folder,
+                    title: DRAFT_TITLE.into(),
+                },
             });
         }
         let pending_restores: Vec<(String, Vec<String>)> = self
@@ -2276,7 +2549,12 @@ impl Store {
 
     fn workspace_name_for(&self, session_id: &str) -> String {
         self.effective_workspace_path(session_id)
-            .and_then(|path| self.workspaces.iter().find(|w| w.folder_path() == path).map(|w| w.name.clone()))
+            .and_then(|path| {
+                self.workspaces
+                    .iter()
+                    .find(|w| w.folder_path() == path)
+                    .map(|w| w.name.clone())
+            })
             .unwrap_or_default()
     }
 
@@ -2318,17 +2596,25 @@ impl Store {
             self.announce(&format!("Folder does not exist: {normalized}"), true, cx);
             return;
         }
-        if self.workspaces.iter().any(|w| w.folder_path() == normalized) {
+        if self
+            .workspaces
+            .iter()
+            .any(|w| w.folder_path() == normalized)
+        {
             self.announce("That folder is already a workspace.", false, cx);
             return;
         }
-        let state = WorkspaceState { path: normalized.clone(), ..Default::default() };
+        let state = WorkspaceState {
+            path: normalized.clone(),
+            ..Default::default()
+        };
         self.ui.workspaces.push(state.clone());
         let item = WorkspaceItem::new(state);
         let path_key = item.folder_path().to_string();
         self.workspaces.push(item);
         sort_workspaces(&mut self.ui.workspaces);
-        self.workspaces.sort_by_key(|w| workspace_order_key(w.folder_path()));
+        self.workspaces
+            .sort_by_key(|w| workspace_order_key(w.folder_path()));
         self.save_state();
         self.select_workspace(&path_key, cx);
         self.ipc_push_status();
@@ -2347,7 +2633,9 @@ impl Store {
         let was_selected = self.selected_workspace.as_deref() == Some(path);
         if let Some(runtime) = self.runtimes.remove(path) {
             let _ = runtime;
-            self.net.send(NetCommand::StopServer { ws_key: path.into() });
+            self.net.send(NetCommand::StopServer {
+                ws_key: path.into(),
+            });
         }
         self.drop_subagent_rows(path);
         let session_ids: Vec<String> = self.workspaces[index].state.sessions.clone();
@@ -2407,7 +2695,11 @@ impl Store {
         self.net.send(NetCommand::StartServer {
             ws_key: folder,
             kind: HarnessKind::OpenCode,
-            executable: if executable.is_empty() { DEFAULT_EXECUTABLE.into() } else { executable },
+            executable: if executable.is_empty() {
+                DEFAULT_EXECUTABLE.into()
+            } else {
+                executable
+            },
             folder: path.into(),
         });
         let _ = cx;
@@ -2417,7 +2709,9 @@ impl Store {
         if !self.runtimes.contains_key(path) {
             return;
         }
-        self.net.send(NetCommand::StopServer { ws_key: path.into() });
+        self.net.send(NetCommand::StopServer {
+            ws_key: path.into(),
+        });
         self.teardown_runtime(path);
         let _ = cx;
     }
@@ -2481,9 +2775,18 @@ impl Store {
         self.workspace_generation += 1;
         if let Some(ws) = self.selected_workspace() {
             let path = ws.folder_path().to_string();
-            self.net.send(NetCommand::Request { ws_key: path.clone(), request: ApiRequest::ListSessions });
-            self.net.send(NetCommand::Request { ws_key: path.clone(), request: ApiRequest::ListModels });
-            self.net.send(NetCommand::Request { ws_key: path, request: ApiRequest::ListAgents });
+            self.net.send(NetCommand::Request {
+                ws_key: path.clone(),
+                request: ApiRequest::ListSessions,
+            });
+            self.net.send(NetCommand::Request {
+                ws_key: path.clone(),
+                request: ApiRequest::ListModels,
+            });
+            self.net.send(NetCommand::Request {
+                ws_key: path,
+                request: ApiRequest::ListAgents,
+            });
         }
         let _ = cx;
     }
@@ -2524,7 +2827,10 @@ impl Store {
                     // status starts Connected to match the pump's first attach
                     self.runtimes.insert(
                         ws_key.clone(),
-                        WorkspaceRuntime { stream_status: oc::StreamStatus::Connected, healthy: None },
+                        WorkspaceRuntime {
+                            stream_status: oc::StreamStatus::Connected,
+                            healthy: None,
+                        },
                     );
                     if let Some(ws) = self.workspace_by_path_mut(&ws_key) {
                         ws.is_running = true;
@@ -2533,24 +2839,43 @@ impl Store {
                     if is_selected {
                         self.is_server_running = true;
                     }
-                    self.net.send(NetCommand::Request { ws_key: ws_key.clone(), request: ApiRequest::ListSessions });
+                    self.net.send(NetCommand::Request {
+                        ws_key: ws_key.clone(),
+                        request: ApiRequest::ListSessions,
+                    });
                     // model/agent pickers feed off every running server
-                    self.net.send(NetCommand::Request { ws_key: ws_key.clone(), request: ApiRequest::ListModels });
-                    self.net.send(NetCommand::Request { ws_key: ws_key.clone(), request: ApiRequest::ListAgents });
+                    self.net.send(NetCommand::Request {
+                        ws_key: ws_key.clone(),
+                        request: ApiRequest::ListModels,
+                    });
+                    self.net.send(NetCommand::Request {
+                        ws_key: ws_key.clone(),
+                        request: ApiRequest::ListAgents,
+                    });
                     // the / suggestion menu serves this workspace's commands
-                    self.net.send(NetCommand::Request { ws_key: ws_key.clone(), request: ApiRequest::ListCommands });
+                    self.net.send(NetCommand::Request {
+                        ws_key: ws_key.clone(),
+                        request: ApiRequest::ListCommands,
+                    });
                     // the MCP toggle needs the workspace's configured server names
-                    self.net.send(NetCommand::Request { ws_key: ws_key.clone(), request: ApiRequest::ListMcpNames });
+                    self.net.send(NetCommand::Request {
+                        ws_key: ws_key.clone(),
+                        request: ApiRequest::ListMcpNames,
+                    });
                     // a plain connect never reopens saved chats — only the
                     // banner's Restore button and explicit chat clicks do
                     // restores and opens that were waiting on this server start
-                    let pending_restores: Vec<(String, Vec<String>)> =
-                        self.pending_restores.extract_if(.., |(path, _)| path == &ws_key).collect();
+                    let pending_restores: Vec<(String, Vec<String>)> = self
+                        .pending_restores
+                        .extract_if(.., |(path, _)| path == &ws_key)
+                        .collect();
                     for (_, wanted) in pending_restores {
                         self.restore_open_tiles(&ws_key, wanted, cx);
                     }
-                    let pending_opens: Vec<(String, String)> =
-                        self.pending_opens.extract_if(.., |(path, _)| path == &ws_key).collect();
+                    let pending_opens: Vec<(String, String)> = self
+                        .pending_opens
+                        .extract_if(.., |(path, _)| path == &ws_key)
+                        .collect();
                     for (_, session_id) in pending_opens {
                         self.net.send(NetCommand::Request {
                             ws_key: ws_key.clone(),
@@ -2584,7 +2909,7 @@ impl Store {
                     self.ipc_push_status();
                 }
             },
-            UiEvent::ServerStopped { .. } => {}
+            UiEvent::ServerStopped => {}
             UiEvent::ServerCrashed { ws_key } => {
                 // a user stop tore the workspace down meanwhile: stale report
                 if !self.runtimes.contains_key(&ws_key) {
@@ -2592,7 +2917,10 @@ impl Store {
                 }
                 let crashes = {
                     let now = Instant::now();
-                    let entry = self.crash_restarts.entry(ws_key.clone()).or_insert((0, now));
+                    let entry = self
+                        .crash_restarts
+                        .entry(ws_key.clone())
+                        .or_insert((0, now));
                     if now.duration_since(entry.1) >= CRASH_RESTART_RESET_AFTER {
                         entry.0 = 0; // the previous run was long ago: fresh ladder
                     }
@@ -2608,14 +2936,30 @@ impl Store {
                     .unwrap_or_else(|| ws_key.clone());
                 // StopServer first: it tears down the net-side entry (dead
                 // process handle, still-retrying pump) so StartServer can spawn
-                self.net.send(NetCommand::StopServer { ws_key: ws_key.clone() });
+                self.net.send(NetCommand::StopServer {
+                    ws_key: ws_key.clone(),
+                });
                 self.teardown_runtime(&ws_key);
                 if crashes > MAX_CRASH_RESTARTS {
-                    tracing::error!("server for {name} keeps crashing — giving up after {MAX_CRASH_RESTARTS} restarts");
-                    self.announce(&format!("{name}: server keeps crashing — stopped restarting."), true, cx);
+                    tracing::error!(
+                        "server for {name} keeps crashing — giving up after {MAX_CRASH_RESTARTS} restarts"
+                    );
+                    self.announce(
+                        &format!("{name}: server keeps crashing — stopped restarting."),
+                        true,
+                        cx,
+                    );
                 } else {
-                    tracing::warn!("server for {name} crashed — restarting ({crashes}/{MAX_CRASH_RESTARTS})");
-                    self.announce(&format!("{name}: server crashed — restarting ({crashes}/{MAX_CRASH_RESTARTS})…"), true, cx);
+                    tracing::warn!(
+                        "server for {name} crashed — restarting ({crashes}/{MAX_CRASH_RESTARTS})"
+                    );
+                    self.announce(
+                        &format!(
+                            "{name}: server crashed — restarting ({crashes}/{MAX_CRASH_RESTARTS})…"
+                        ),
+                        true,
+                        cx,
+                    );
                     self.start_server_for_key(&ws_key, cx);
                 }
                 self.ipc_push_status();
@@ -2630,7 +2974,10 @@ impl Store {
                 // rewrites the single combined note with its climbing count
                 if let Some(runtime) = self.runtimes.get_mut(&ws_key) {
                     let update = match (&runtime.stream_status, &status) {
-                        (oc::StreamStatus::Reconnecting { .. }, oc::StreamStatus::Reconnecting { .. }) => true,
+                        (
+                            oc::StreamStatus::Reconnecting { .. },
+                            oc::StreamStatus::Reconnecting { .. },
+                        ) => true,
                         (current, incoming) => current != incoming,
                     };
                     if update {
@@ -2642,14 +2989,20 @@ impl Store {
                                 if ws_key == DSH_SERVER_KEY {
                                     self.refresh_dsh_lists();
                                 } else {
-                                    self.net.send(NetCommand::Request { ws_key: ws_key.clone(), request: ApiRequest::ListSessions });
+                                    self.net.send(NetCommand::Request {
+                                        ws_key: ws_key.clone(),
+                                        request: ApiRequest::ListSessions,
+                                    });
                                 }
                                 self.settle_reconnect_note(&ws_key, cx);
                             }
                             oc::StreamStatus::Reconnecting { attempt } => {
                                 self.reconnect_note(
                                     &ws_key,
-                                    &format!("Connection lost — reconnecting… ({attempt}/{}).", oc::RECONNECT_MAX_ATTEMPTS),
+                                    &format!(
+                                        "Connection lost — reconnecting… ({attempt}/{}).",
+                                        oc::RECONNECT_MAX_ATTEMPTS
+                                    ),
                                     true,
                                     cx,
                                 );
@@ -2672,11 +3025,11 @@ impl Store {
                 }
             }
             UiEvent::HealthChanged { ws_key, healthy } => {
-                if let Some(runtime) = self.runtimes.get_mut(&ws_key) {
-                    if runtime.healthy != healthy {
-                        runtime.healthy = healthy;
-                        self.repaint(cx);
-                    }
+                if let Some(runtime) = self.runtimes.get_mut(&ws_key)
+                    && runtime.healthy != healthy
+                {
+                    runtime.healthy = healthy;
+                    self.repaint(cx);
                 }
             }
             UiEvent::SessionsLoaded { ws_key, result } => match result {
@@ -2689,7 +3042,11 @@ impl Store {
                 }
                 Err(err) => tracing::debug!("session list refresh failed: {err:#}"),
             },
-            UiEvent::MessagesLoaded { ws_key, session_id, result } => match result {
+            UiEvent::MessagesLoaded {
+                ws_key,
+                session_id,
+                result,
+            } => match result {
                 Ok(messages) => {
                     if self.tile_for_session(&session_id).is_some() {
                         return; // already opened meanwhile
@@ -2702,15 +3059,24 @@ impl Store {
                     // draft tile into open_tiles
                     let key = format!("t{}", self.next_tile_key);
                     self.next_tile_key += 1;
-                    let mut tile = ChatTile::new(key.clone(), self.seed_model(), self.seed_agent(), self.seed_variant());
+                    let mut tile = ChatTile::new(
+                        key.clone(),
+                        self.seed_model(),
+                        self.seed_agent(),
+                        self.seed_variant(),
+                    );
                     tile.harness = self.session_harness(&session_id);
                     // the chat reopens with the model/variant its last turn ran
                     // on; the seeds only stand until the transcript says otherwise
                     if let Some((model, variant)) = session_chat_settings(&messages) {
                         tile.selected_model = Some(model);
-                        tile.selected_variant = Some(variant.unwrap_or_else(|| DEFAULT_VARIANT_ENTRY.into()));
+                        tile.selected_variant =
+                            Some(variant.unwrap_or_else(|| DEFAULT_VARIANT_ENTRY.into()));
                     }
-                    tile.apply_variant_list(&self.variants_by_model, self.settings.default_variant_highest);
+                    tile.apply_variant_list(
+                        &self.variants_by_model,
+                        self.settings.default_variant_highest,
+                    );
                     tile.session_id = Some(session_id.clone());
                     tile.title = title;
                     // restore the unsent composer draft, if one was saved
@@ -2732,10 +3098,10 @@ impl Store {
                     self.pull_pending_questions(&ws_key, &session_id);
                     self.show_queued_for(&key);
                     // opening a chat sets it active on its workspace and focuses it
-                    if let Some(path) = self.workspace_by_session.get(&session_id).cloned() {
-                        if let Some(ws) = self.workspace_by_path_mut(&path) {
-                            ws.state.active_session = Some(session_id.clone());
-                        }
+                    if let Some(path) = self.workspace_by_session.get(&session_id).cloned()
+                        && let Some(ws) = self.workspace_by_path_mut(&path)
+                    {
+                        ws.state.active_session = Some(session_id.clone());
                     }
                     self.focus_tile(&key, cx);
                     self.repaint(cx);
@@ -2750,19 +3116,27 @@ impl Store {
                     // the draft tile that requested creation, tracked by pending_sends.
                     // FIFO: creates can be in flight from several drafts at once and
                     // replies carry no correlation id
-                    let Some((draft_key, text, attachments)) = self.pending_sends.first().cloned() else {
+                    let Some((draft_key, text, attachments)) = self.pending_sends.first().cloned()
+                    else {
                         return;
                     };
                     self.pending_sends.remove(0);
                     // the create's harness rides its own FIFO; a dsh session is
                     // remembered so every later route picks the shared server
-                    if self.pending_create_harness.front().is_some_and(|(folder, _)| folder == &ws_key) {
+                    if self
+                        .pending_create_harness
+                        .front()
+                        .is_some_and(|(folder, _)| folder == &ws_key)
+                    {
                         let (_, kind) = self.pending_create_harness.pop_front().unwrap();
                         self.ui.harness_by_session.insert(info.id.clone(), kind);
                     }
-                    self.workspace_by_session.insert(info.id.clone(), ws_key.clone());
-                    self.title_by_session.insert(info.id.clone(), info.title.clone());
-                    self.tile_by_session.insert(info.id.clone(), draft_key.clone());
+                    self.workspace_by_session
+                        .insert(info.id.clone(), ws_key.clone());
+                    self.title_by_session
+                        .insert(info.id.clone(), info.title.clone());
+                    self.tile_by_session
+                        .insert(info.id.clone(), draft_key.clone());
                     let title = info.title.clone();
                     if let Some(tile) = self.tile_by_key_mut(&draft_key) {
                         tile.session_id = Some(info.id.clone());
@@ -2815,7 +3189,11 @@ impl Store {
                     if !self.pending_sends.is_empty() {
                         self.pending_sends.remove(0);
                     }
-                    if self.pending_create_harness.front().is_some_and(|(folder, _)| folder == &ws_key) {
+                    if self
+                        .pending_create_harness
+                        .front()
+                        .is_some_and(|(folder, _)| folder == &ws_key)
+                    {
                         self.pending_create_harness.pop_front();
                     }
                     // a door run waiting on that draft fails with it (FIFO:
@@ -2829,7 +3207,9 @@ impl Store {
                             .collect();
                         for run in doomed {
                             if let Some(entry) = self.ipc_runs.remove(&run) {
-                                let _ = entry.reply.send(Err(format!("could not create a session: {err:#}")));
+                                let _ = entry
+                                    .reply
+                                    .send(Err(format!("could not create a session: {err:#}")));
                             }
                         }
                     }
@@ -2837,13 +3217,19 @@ impl Store {
                     self.repaint(cx);
                 }
             },
-            UiEvent::ForkSessionCreated { ws_key, context, result } => match result {
+            UiEvent::ForkSessionCreated {
+                ws_key,
+                context,
+                result,
+            } => match result {
                 Ok(info) => {
                     // wire the new session in like SessionCreated does, minus the
                     // pending_send continuation — a fork never auto-sends, and the
                     // correlated event means no FIFO adoption of draft sends
-                    self.workspace_by_session.insert(info.id.clone(), ws_key.clone());
-                    self.title_by_session.insert(info.id.clone(), info.title.clone());
+                    self.workspace_by_session
+                        .insert(info.id.clone(), ws_key.clone());
+                    self.title_by_session
+                        .insert(info.id.clone(), info.title.clone());
                     // mint a key directly — create_tile() would push a phantom
                     // draft tile into open_tiles (same as MessagesLoaded)
                     // the fork rode the create FIFO; a dsh fork is remembered
@@ -2860,9 +3246,17 @@ impl Store {
                     };
                     let key = format!("t{}", self.next_tile_key);
                     self.next_tile_key += 1;
-                    let mut tile = ChatTile::new(key.clone(), self.seed_model(), self.seed_agent(), self.seed_variant());
+                    let mut tile = ChatTile::new(
+                        key.clone(),
+                        self.seed_model(),
+                        self.seed_agent(),
+                        self.seed_variant(),
+                    );
                     tile.harness = fork_harness;
-                    tile.apply_variant_list(&self.variants_by_model, self.settings.default_variant_highest);
+                    tile.apply_variant_list(
+                        &self.variants_by_model,
+                        self.settings.default_variant_highest,
+                    );
                     tile.session_id = Some(info.id.clone());
                     tile.title = info.title.clone();
                     tile.auto_title_pending = false; // the fork-point title stands
@@ -2899,10 +3293,17 @@ impl Store {
                     self.repaint(cx);
                 }
             },
-            UiEvent::SessionRenamed { session_id, result, .. } => match result {
+            UiEvent::SessionRenamed {
+                session_id, result, ..
+            } => match result {
                 Ok(info) => {
-                    let final_title = if info.title.is_empty() { String::new() } else { info.title.clone() };
-                    self.title_by_session.insert(session_id.clone(), final_title.clone());
+                    let final_title = if info.title.is_empty() {
+                        String::new()
+                    } else {
+                        info.title.clone()
+                    };
+                    self.title_by_session
+                        .insert(session_id.clone(), final_title.clone());
                     if let Some(tile) = self.tile_for_session_mut(&session_id) {
                         tile.title = final_title.clone();
                     }
@@ -2920,7 +3321,9 @@ impl Store {
                     self.announce(&format!("Rename failed: {err:#}"), true, cx);
                 }
             },
-            UiEvent::SessionDeleted { session_id, result, .. } => {
+            UiEvent::SessionDeleted {
+                session_id, result, ..
+            } => {
                 if let Err(err) = result {
                     tracing::warn!("delete failed: {err:#}");
                     self.announce(&format!("Delete failed: {err:#}"), true, cx);
@@ -2950,12 +3353,21 @@ impl Store {
                 }
                 self.repaint(cx);
             }
-            UiEvent::PermissionReplied { permission_id, response, is_auto, result } => {
+            UiEvent::PermissionReplied {
+                permission_id,
+                response,
+                is_auto,
+                result,
+            } => {
                 let label = match result {
                     Err(err) => Some(format!("reply failed: {err:#}")),
                     Ok(()) => match response.as_str() {
                         "once" => Some("allowed (once)".into()),
-                        "always" => Some(if is_auto { "auto-allowed (always)".into() } else { "always allowed".into() }),
+                        "always" => Some(if is_auto {
+                            "auto-allowed (always)".into()
+                        } else {
+                            "always allowed".into()
+                        }),
                         _ => Some("denied".into()),
                     },
                 };
@@ -2964,7 +3376,11 @@ impl Store {
                 }
                 self.repaint(cx);
             }
-            UiEvent::QuestionsPulled { for_session, result, .. } => {
+            UiEvent::QuestionsPulled {
+                for_session,
+                result,
+                ..
+            } => {
                 if let Ok(pending) = result {
                     if for_session.is_empty() {
                         return;
@@ -2986,7 +3402,11 @@ impl Store {
                                 if tile.items.iter().any(|i| matches!(i.as_ref(), ChatItem::Question(q) if q.id == request.id)) {
                                     continue;
                                 }
-                                tile.items.push(Arc::new(ChatItem::Question(build_question_item(&request, &mut next_key))));
+                                tile.items
+                                    .push(Arc::new(ChatItem::Question(build_question_item(
+                                        &request,
+                                        &mut next_key,
+                                    ))));
                             }
                         }
                         self.next_key = next_key;
@@ -2994,7 +3414,11 @@ impl Store {
                 }
                 self.repaint(cx);
             }
-            UiEvent::QuestionReplied { request_id, summary, result } => {
+            UiEvent::QuestionReplied {
+                request_id,
+                summary,
+                result,
+            } => {
                 let resolution = match result {
                     Err(err) => format!("reply failed: {err:#}"),
                     Ok(()) => summary,
@@ -3008,14 +3432,21 @@ impl Store {
                     let restore: Vec<(String, Option<String>, Option<String>)> = self
                         .open_tiles
                         .iter()
-                        .map(|t| (t.key.clone(), t.selected_model.clone(), t.selected_variant.clone()))
+                        .map(|t| {
+                            (
+                                t.key.clone(),
+                                t.selected_model.clone(),
+                                t.selected_variant.clone(),
+                            )
+                        })
                         .collect();
                     // merge-dedup through a set: the model list runs to
                     // hundreds of entries and a Vec scan per model is O(n²)
                     let mut known: HashSet<String> = self.models.iter().cloned().collect();
                     for m in models {
                         self.variants_by_model.insert(m.key.clone(), m.variants);
-                        self.context_limit_by_model.insert(m.key.clone(), m.context_limit);
+                        self.context_limit_by_model
+                            .insert(m.key.clone(), m.context_limit);
                         if known.insert(m.key.clone()) {
                             self.models.push(m.key);
                         }
@@ -3050,7 +3481,9 @@ impl Store {
                             if let Some(saved_variant) = variant {
                                 // a saved "(default)" counts as unset: the
                                 // highest-default above already handled it
-                                if saved_variant != DEFAULT_VARIANT_ENTRY && tile.variants.contains(&saved_variant) {
+                                if saved_variant != DEFAULT_VARIANT_ENTRY
+                                    && tile.variants.contains(&saved_variant)
+                                {
                                     tile.selected_variant = Some(saved_variant);
                                 }
                             }
@@ -3066,8 +3499,11 @@ impl Store {
             }
             UiEvent::AgentsLoaded { result, .. } => {
                 if let Ok(agents) = result {
-                    let restore: Vec<(String, Option<String>)> =
-                        self.open_tiles.iter().map(|t| (t.key.clone(), t.selected_agent.clone())).collect();
+                    let restore: Vec<(String, Option<String>)> = self
+                        .open_tiles
+                        .iter()
+                        .map(|t| (t.key.clone(), t.selected_agent.clone()))
+                        .collect();
                     for agent in agents {
                         if agent.hidden || !matches!(agent.mode.as_str(), "primary" | "all") {
                             continue;
@@ -3112,13 +3548,23 @@ impl Store {
                 }
                 Err(err) => tracing::debug!("mcp list refresh failed for {ws_key}: {err:#}"),
             },
-            UiEvent::FilesFound { ws_key, query, result } => {
+            UiEvent::FilesFound {
+                ws_key,
+                query,
+                result,
+            } => {
                 if let Ok(paths) = result {
-                    self.file_results = Some(FileSuggest { ws_key, query, paths });
+                    self.file_results = Some(FileSuggest {
+                        ws_key,
+                        query,
+                        paths,
+                    });
                     self.repaint(cx);
                 }
             }
-            UiEvent::MessageSendFailed { session_id, error, .. } => {
+            UiEvent::MessageSendFailed {
+                session_id, error, ..
+            } => {
                 self.post_note_for_session(&session_id, &format!("Message failed: {error}"), true);
                 self.repaint(cx);
             }
@@ -3133,7 +3579,12 @@ impl Store {
     fn create_tile(&mut self, cx: &mut Context<Self>) -> &mut ChatTile {
         let key = format!("t{}", self.next_tile_key);
         self.next_tile_key += 1;
-        let mut tile = ChatTile::new(key.clone(), self.seed_model(), self.seed_agent(), self.seed_variant());
+        let mut tile = ChatTile::new(
+            key.clone(),
+            self.seed_model(),
+            self.seed_agent(),
+            self.seed_variant(),
+        );
         tile.harness = self.settings.default_harness;
         if tile.harness == HarnessKind::Dsh {
             // the seed names an opencode model ("provider/model" of the
@@ -3144,7 +3595,10 @@ impl Store {
             tile.selected_variant = None;
             self.ensure_dsh(cx);
         }
-        tile.apply_variant_list(&self.variants_by_model, self.settings.default_variant_highest);
+        tile.apply_variant_list(
+            &self.variants_by_model,
+            self.settings.default_variant_highest,
+        );
         tile.rev = Some(cx.new(|_| ()));
         self.open_tiles.push(tile);
         self.tile_by_key_mut(&key).unwrap()
@@ -3152,11 +3606,17 @@ impl Store {
 
     /// New chat: focus the trailing untouched draft or open a new tile, then connect.
     pub fn new_chat(&mut self, cx: &mut Context<Self>) {
-        let Some(ws_path) = self.selected_workspace.clone() else { return };
+        let Some(ws_path) = self.selected_workspace.clone() else {
+            return;
+        };
         if let Some(ws) = self.workspace_by_path_mut(&ws_path) {
             ws.set_expanded(true); // the new chat belongs in a visible sidebar section
         }
-        let untouched_last = self.open_tiles.last().map(|t| t.is_untouched()).unwrap_or(false);
+        let untouched_last = self
+            .open_tiles
+            .last()
+            .map(|t| t.is_untouched())
+            .unwrap_or(false);
         self.show_restore_prompt = false; // a tile is about to be on screen
         if untouched_last {
             let key = self.open_tiles.last().unwrap().key.clone();
@@ -3177,7 +3637,12 @@ impl Store {
 
     /// Switches a draft's harness. Only drafts: a chat with a session is
     /// bound to the server it was created on.
-    pub fn set_tile_harness(&mut self, tile_key: &str, harness: HarnessKind, cx: &mut Context<Self>) {
+    pub fn set_tile_harness(
+        &mut self,
+        tile_key: &str,
+        harness: HarnessKind,
+        cx: &mut Context<Self>,
+    ) {
         if let Some(tile) = self.tile_by_key_mut(tile_key)
             && tile.session_id.is_none()
             && tile.harness != harness
@@ -3242,7 +3707,11 @@ impl Store {
     }
 
     fn detach_tile(&mut self, key: &str, cx: &mut Context<Self>) {
-        let session = self.open_tiles.iter().find(|t| t.key == key).and_then(|t| t.session_id.clone());
+        let session = self
+            .open_tiles
+            .iter()
+            .find(|t| t.key == key)
+            .and_then(|t| t.session_id.clone());
         if let Some(sid) = session {
             self.tile_by_session.remove(&sid);
             self.forget_saved_tile(&sid);
@@ -3260,7 +3729,9 @@ impl Store {
     }
 
     fn forget_saved_tile(&mut self, session_id: &str) {
-        let Some(path) = self.workspace_by_session.get(session_id).cloned() else { return };
+        let Some(path) = self.workspace_by_session.get(session_id).cloned() else {
+            return;
+        };
         if let Some(ws) = self.workspace_by_path_mut(&path) {
             ws.state.open_sessions.retain(|id| id != session_id);
             if ws.state.active_session.as_deref() == Some(session_id) {
@@ -3274,7 +3745,12 @@ impl Store {
         if self.tile_by_session.is_empty() {
             return;
         }
-        let untouched: Vec<String> = self.open_tiles.iter().filter(|t| t.is_untouched()).map(|t| t.key.clone()).collect();
+        let untouched: Vec<String> = self
+            .open_tiles
+            .iter()
+            .filter(|t| t.is_untouched())
+            .map(|t| t.key.clone())
+            .collect();
         for key in untouched {
             if self.open_tiles.len() == 1 {
                 break;
@@ -3288,8 +3764,18 @@ impl Store {
     }
 
     fn show_queued_for(&mut self, tile_key: &str) {
-        let Some(session_id) = self.tile_by_key(tile_key).and_then(|t| t.session_id.clone()) else { return };
-        let keys: Vec<usize> = self.queue.iter().filter(|e| e.session_id == session_id).map(|e| e.key).collect();
+        let Some(session_id) = self
+            .tile_by_key(tile_key)
+            .and_then(|t| t.session_id.clone())
+        else {
+            return;
+        };
+        let keys: Vec<usize> = self
+            .queue
+            .iter()
+            .filter(|e| e.session_id == session_id)
+            .map(|e| e.key)
+            .collect();
         if let Some(tile) = self.tile_by_key_mut(tile_key) {
             for key in keys {
                 if !tile.queue_rows.contains(&key) {
@@ -3303,7 +3789,9 @@ impl Store {
 
     pub fn send_from_tile(&mut self, tile_key: &str, cx: &mut Context<Self>) {
         let (text, attachment_count) = {
-            let Some(tile) = self.tile_by_key(tile_key) else { return };
+            let Some(tile) = self.tile_by_key(tile_key) else {
+                return;
+            };
             (tile.input.trim().to_string(), tile.attachments.len())
         };
         if text.is_empty() && attachment_count == 0 {
@@ -3312,20 +3800,34 @@ impl Store {
         // a leading `/name` stays as typed; send_core routes it to the
         // server's /command endpoint, which does the template expansion
         // an existing chat talks to its own workspace's server; a draft to the selected one
-        let Some(tile) = self.tile_by_key(tile_key) else { return };
+        let Some(tile) = self.tile_by_key(tile_key) else {
+            return;
+        };
         if let Some(session_id) = &tile.session_id {
             if !self.has_runtime(session_id) {
-                self.tile_note(tile_key, "This chat's workspace server is stopped — start it to continue.", true, cx);
+                self.tile_note(
+                    tile_key,
+                    "This chat's workspace server is stopped — start it to continue.",
+                    true,
+                    cx,
+                );
                 return;
             }
         } else if tile.harness == HarnessKind::Dsh {
             // a dsh draft needs the shared dsh server, not the workspace's
             if !self.runtimes.contains_key(DSH_SERVER_KEY) {
                 let folder = self.selected_workspace.clone().unwrap_or_default();
-                let attachments = std::mem::take(&mut self.tile_by_key_mut(tile_key).unwrap().attachments);
-                self.pending_dsh_drafts
-                    .push((tile_key.to_string(), text.clone(), attachments, folder));
-                let Some(tile) = self.tile_by_key_mut(tile_key) else { return };
+                let attachments =
+                    std::mem::take(&mut self.tile_by_key_mut(tile_key).unwrap().attachments);
+                self.pending_dsh_drafts.push((
+                    tile_key.to_string(),
+                    text.clone(),
+                    attachments,
+                    folder,
+                ));
+                let Some(tile) = self.tile_by_key_mut(tile_key) else {
+                    return;
+                };
                 tile.input.clear();
                 tile.history_index = 0;
                 self.record_prompt(&text);
@@ -3337,14 +3839,17 @@ impl Store {
             return;
         }
 
-        let attachments: Vec<AttachmentItem> = std::mem::take(&mut self.tile_by_key_mut(tile_key).unwrap().attachments);
+        let attachments: Vec<AttachmentItem> =
+            std::mem::take(&mut self.tile_by_key_mut(tile_key).unwrap().attachments);
         let tile = self.tile_by_key_mut(tile_key).unwrap();
         let text_to_record = text.clone();
         tile.input.clear();
         tile.history_index = 0;
         self.record_prompt(&text_to_record);
 
-        let Some(tile) = self.tile_by_key(tile_key) else { return };
+        let Some(tile) = self.tile_by_key(tile_key) else {
+            return;
+        };
         let is_busy = tile.is_busy(self);
         let session_id = tile.session_id.clone();
         if let Some(sid) = &session_id {
@@ -3377,18 +3882,29 @@ impl Store {
                 .tile_by_key(tile_key)
                 .map(|tile| tile.harness)
                 .unwrap_or_default();
-            self.pending_sends.push((tile_key.to_string(), text, attachments));
+            self.pending_sends
+                .push((tile_key.to_string(), text, attachments));
             match harness {
                 HarnessKind::Dsh => {
-                    self.pending_create_harness.push_back((ws_key.clone(), HarnessKind::Dsh));
+                    self.pending_create_harness
+                        .push_back((ws_key.clone(), HarnessKind::Dsh));
                     self.net.send(NetCommand::Request {
                         ws_key: DSH_SERVER_KEY.into(),
-                        request: ApiRequest::CreateDshSession { folder: ws_key, title: DRAFT_TITLE.into() },
+                        request: ApiRequest::CreateDshSession {
+                            folder: ws_key,
+                            title: DRAFT_TITLE.into(),
+                        },
                     });
                 }
                 HarnessKind::OpenCode => {
-                    self.pending_create_harness.push_back((ws_key.clone(), HarnessKind::OpenCode));
-                    self.net.send(NetCommand::Request { ws_key, request: ApiRequest::CreateSession { title: DRAFT_TITLE.into() } });
+                    self.pending_create_harness
+                        .push_back((ws_key.clone(), HarnessKind::OpenCode));
+                    self.net.send(NetCommand::Request {
+                        ws_key,
+                        request: ApiRequest::CreateSession {
+                            title: DRAFT_TITLE.into(),
+                        },
+                    });
                 }
             }
             return;
@@ -3396,7 +3912,13 @@ impl Store {
         self.send_core(&session_id.unwrap(), text, attachments, cx);
     }
 
-    fn send_core(&mut self, session_id: &str, text: String, attachments: Vec<AttachmentItem>, cx: &mut Context<Self>) {
+    fn send_core(
+        &mut self,
+        session_id: &str,
+        text: String,
+        attachments: Vec<AttachmentItem>,
+        cx: &mut Context<Self>,
+    ) {
         let tile_key = self.tile_by_session.get(session_id).cloned();
         let tile = tile_key.as_deref().and_then(|key| self.tile_by_key(key));
         let model = tile
@@ -3405,7 +3927,9 @@ impl Store {
         let variant = tile
             .and_then(|t| t.selected_variant.clone())
             .filter(|v| v != DEFAULT_VARIANT_ENTRY);
-        let agent = tile.and_then(|t| t.selected_agent.clone()).filter(|a| a != DEFAULT_AGENT_ENTRY);
+        let agent = tile
+            .and_then(|t| t.selected_agent.clone())
+            .filter(|a| a != DEFAULT_AGENT_ENTRY);
         // a leading `/name args` matching a server command/skill goes to the
         // /command route: the server expands the template and honors the
         // command's own agent/model config (subtask skills included). dsh
@@ -3417,7 +3941,15 @@ impl Store {
             .and_then(|commands| parse_slash_command(&text, commands));
         self.dispatch_send(
             session_id,
-            PromptPayload { text, attachments, model, variant, agent, command, attempts: 0 },
+            PromptPayload {
+                text,
+                attachments,
+                model,
+                variant,
+                agent,
+                command,
+                attempts: 0,
+            },
             cx,
         );
     }
@@ -3426,10 +3958,13 @@ impl Store {
     /// auto title, then the net command. The auto-retry path replays a stored
     /// [`PromptPayload`] through here unchanged.
     fn dispatch_send(&mut self, session_id: &str, payload: PromptPayload, cx: &mut Context<Self>) {
-        let Some(ws_key) = self.net_key_for_session(session_id) else { return };
+        let Some(ws_key) = self.net_key_for_session(session_id) else {
+            return;
+        };
         let tile_key = self.tile_by_session.get(session_id).cloned();
         // verbatim copy for the auto-retry path (attachment bytes are Arc'd)
-        self.last_prompt_by_session.insert(session_id.to_string(), payload.clone());
+        self.last_prompt_by_session
+            .insert(session_id.to_string(), payload.clone());
         let sent_at = Instant::now();
         if let Some(tile_key) = &tile_key {
             let mut items: Vec<Arc<ChatItem>> = Vec::new();
@@ -3463,11 +3998,16 @@ impl Store {
             }
         }
         self.set_running(Some(session_id), true);
-        self.turn_start_by_session.insert(session_id.to_string(), sent_at);
+        self.turn_start_by_session
+            .insert(session_id.to_string(), sent_at);
         let title_seed = if !payload.text.is_empty() {
             payload.text.clone()
         } else {
-            payload.attachments.first().map(|a| a.file_name.clone()).unwrap_or_else(|| DRAFT_TITLE.into())
+            payload
+                .attachments
+                .first()
+                .map(|a| a.file_name.clone())
+                .unwrap_or_else(|| DRAFT_TITLE.into())
         };
         self.auto_title(session_id, &title_seed);
         self.net.send(NetCommand::SendMessage {
@@ -3489,9 +4029,13 @@ impl Store {
 
     /// Steer: jump the queue and interrupt the running turn so this prompt runs next.
     pub fn steer_queued(&mut self, queue_key: usize, cx: &mut Context<Self>) {
-        let Some(index) = self.queue.iter().position(|e| e.key == queue_key) else { return };
+        let Some(index) = self.queue.iter().position(|e| e.key == queue_key) else {
+            return;
+        };
         let entry = self.queue[index].clone();
-        let Some(tile_key) = self.tile_by_session.get(&entry.session_id).cloned() else { return };
+        let Some(tile_key) = self.tile_by_session.get(&entry.session_id).cloned() else {
+            return;
+        };
         if !self.is_busy(&entry.session_id) {
             // nothing running anymore: dispatch it right away
             self.queue.remove(index);
@@ -3511,15 +4055,17 @@ impl Store {
 
     /// Edit: pull a queued prompt back into the composer, dropping it from the queue.
     pub fn edit_queued(&mut self, queue_key: usize, cx: &mut Context<Self>) {
-        let Some(index) = self.queue.iter().position(|e| e.key == queue_key) else { return };
+        let Some(index) = self.queue.iter().position(|e| e.key == queue_key) else {
+            return;
+        };
         let entry = self.queue.remove(index);
-        if let Some(tile_key) = self.tile_by_session.get(&entry.session_id).cloned() {
-            if let Some(tile) = self.tile_by_key_mut(&tile_key) {
-                tile.queue_rows.retain(|k| *k != queue_key);
-                tile.set_input_direct(entry.text.clone());
-                for attachment in entry.attachments {
-                    tile.attachments.push(attachment);
-                }
+        if let Some(tile_key) = self.tile_by_session.get(&entry.session_id).cloned()
+            && let Some(tile) = self.tile_by_key_mut(&tile_key)
+        {
+            tile.queue_rows.retain(|k| *k != queue_key);
+            tile.set_input_direct(entry.text.clone());
+            for attachment in entry.attachments {
+                tile.attachments.push(attachment);
             }
         }
         self.repaint(cx);
@@ -3557,12 +4103,14 @@ impl Store {
         if !self.has_runtime(session_id) || self.is_busy(session_id) {
             return; // busy: a steered prompt already took over; the rest stay queued
         }
-        let Some(index) = self.queue.iter().position(|e| e.session_id == session_id) else { return };
+        let Some(index) = self.queue.iter().position(|e| e.session_id == session_id) else {
+            return;
+        };
         let entry = self.queue.remove(index);
-        if let Some(tile_key) = self.tile_by_session.get(session_id).cloned() {
-            if let Some(tile) = self.tile_by_key_mut(&tile_key) {
-                tile.queue_rows.retain(|k| *k != entry.key);
-            }
+        if let Some(tile_key) = self.tile_by_session.get(session_id).cloned()
+            && let Some(tile) = self.tile_by_key_mut(&tile_key)
+        {
+            tile.queue_rows.retain(|k| *k != entry.key);
         }
         self.send_core(session_id, entry.text, entry.attachments, cx);
     }
@@ -3591,33 +4139,57 @@ impl Store {
             return;
         }
         if !self.has_runtime(session_id) {
-            self.post_note_for_session(session_id, "Auto-retry cancelled — this chat's workspace server is stopped.", true);
+            self.post_note_for_session(
+                session_id,
+                "Auto-retry cancelled — this chat's workspace server is stopped.",
+                true,
+            );
             return;
         }
-        let Some(payload) = self.last_prompt_by_session.get(session_id).cloned() else { return };
+        let Some(payload) = self.last_prompt_by_session.get(session_id).cloned() else {
+            return;
+        };
         self.dispatch_send(session_id, payload, cx);
     }
 
     pub fn abort_tile(&mut self, tile_key: &str, cx: &mut Context<Self>) {
-        let Some(tile) = self.tile_by_key(tile_key) else { return };
-        let Some(session_id) = tile.session_id.clone() else { return };
+        let Some(tile) = self.tile_by_key(tile_key) else {
+            return;
+        };
+        let Some(session_id) = tile.session_id.clone() else {
+            return;
+        };
         if !self.is_busy(&session_id) || !self.has_runtime(&session_id) {
             return;
         }
         let ws_key = self.net_key_for_session(&session_id).unwrap();
-        self.net.send(NetCommand::Request { ws_key, request: ApiRequest::Abort { session_id: session_id.clone() } });
+        self.net.send(NetCommand::Request {
+            ws_key,
+            request: ApiRequest::Abort {
+                session_id: session_id.clone(),
+            },
+        });
         let _ = cx;
     }
 
     pub fn stop_running(&mut self, session_id: &str, cx: &mut Context<Self>) {
-        let Some(ws_key) = self.net_key_for_session(session_id) else { return };
+        let Some(ws_key) = self.net_key_for_session(session_id) else {
+            return;
+        };
         self.retry_due_by_session.remove(session_id);
-        self.net.send(NetCommand::Request { ws_key, request: ApiRequest::Abort { session_id: session_id.to_string() } });
+        self.net.send(NetCommand::Request {
+            ws_key,
+            request: ApiRequest::Abort {
+                session_id: session_id.to_string(),
+            },
+        });
         self.repaint(cx);
     }
 
     fn auto_title(&mut self, session_id: &str, text: &str) {
-        let Some(tile) = self.tile_for_session(session_id) else { return };
+        let Some(tile) = self.tile_for_session(session_id) else {
+            return;
+        };
         if !tile.auto_title_pending {
             return;
         }
@@ -3625,10 +4197,15 @@ impl Store {
             tile.auto_title_pending = false;
         }
         let title = derive_title(text);
-        let Some(ws_key) = self.net_key_for_session(session_id) else { return };
+        let Some(ws_key) = self.net_key_for_session(session_id) else {
+            return;
+        };
         self.net.send(NetCommand::Request {
             ws_key,
-            request: ApiRequest::RenameSession { session_id: session_id.to_string(), title },
+            request: ApiRequest::RenameSession {
+                session_id: session_id.to_string(),
+                title,
+            },
         });
     }
 
@@ -3657,7 +4234,10 @@ impl Store {
     /// Cycle depth for a tile: its own sent messages when it has any, else the
     /// global history so a fresh draft still recalls something.
     fn history_count_for(&self, tile_key: &str) -> usize {
-        let own = self.tile_by_key(tile_key).map(|t| t.sent_prompt_count()).unwrap_or(0);
+        let own = self
+            .tile_by_key(tile_key)
+            .map(|t| t.sent_prompt_count())
+            .unwrap_or(0);
         if own > 0 {
             own
         } else {
@@ -3683,8 +4263,14 @@ impl Store {
     pub fn cycle_prompt_history(&mut self, tile_key: &str, up: bool) -> bool {
         let count = self.history_count_for(tile_key);
         let (current_index, current_input, current_draft) = {
-            let Some(tile) = self.tile_by_key(tile_key) else { return false };
-            (tile.history_index, tile.input.clone(), tile.history_draft.clone())
+            let Some(tile) = self.tile_by_key(tile_key) else {
+                return false;
+            };
+            (
+                tile.history_index,
+                tile.input.clone(),
+                tile.history_draft.clone(),
+            )
         };
         let mut new_index = current_index;
         let text;
@@ -3743,11 +4329,22 @@ impl Store {
     /// API has no parts-append endpoint — its only message POST starts a model
     /// turn — so the seed waits in the composer for the user to send manually.
     pub fn fork_from_message(&mut self, tile_key: &str, stop_key: usize, cx: &mut Context<Self>) {
-        let Some(tile) = self.tile_by_key(tile_key) else { return };
-        let Some(session_id) = tile.session_id.clone() else { return };
-        let Some(ws_key) = self.net_key_for_session(&session_id) else { return };
+        let Some(tile) = self.tile_by_key(tile_key) else {
+            return;
+        };
+        let Some(session_id) = tile.session_id.clone() else {
+            return;
+        };
+        let Some(ws_key) = self.net_key_for_session(&session_id) else {
+            return;
+        };
         if !self.runtimes.contains_key(&ws_key) {
-            self.tile_note(tile_key, "This chat's workspace server is stopped — start it to fork.", true, cx);
+            self.tile_note(
+                tile_key,
+                "This chat's workspace server is stopped — start it to fork.",
+                true,
+                cx,
+            );
             return;
         }
         let stop_text = tile.peek_sent_prompt_key(stop_key);
@@ -3756,11 +4353,18 @@ impl Store {
         }
         let title = derive_title(&stop_text);
         let context = fork_transcript(tile, stop_key, &self.title_for(&session_id));
-        let folder = self.effective_workspace_path(&session_id).unwrap_or_default();
+        let folder = self
+            .effective_workspace_path(&session_id)
+            .unwrap_or_default();
         let harness = self.session_harness(&session_id);
-        self.pending_create_harness.push_back((folder.clone(), harness));
+        self.pending_create_harness
+            .push_back((folder.clone(), harness));
         let request = match harness {
-            HarnessKind::Dsh => ApiRequest::CreateDshForkSession { folder, title, context },
+            HarnessKind::Dsh => ApiRequest::CreateDshForkSession {
+                folder,
+                title,
+                context,
+            },
             HarnessKind::OpenCode => ApiRequest::CreateForkSession { title, context },
         };
         self.net.send(NetCommand::Request { ws_key, request });
@@ -3773,7 +4377,9 @@ impl Store {
         if !self.has_agents() {
             return;
         }
-        let current = self.tile_by_key(tile_key).and_then(|t| t.selected_agent.clone());
+        let current = self
+            .tile_by_key(tile_key)
+            .and_then(|t| t.selected_agent.clone());
         let index = current
             .as_ref()
             .and_then(|name| self.agents.iter().position(|a| a == name))
@@ -3820,7 +4426,9 @@ impl Store {
                     .collect()
             };
             for s in &sessions {
-                self.ui.harness_by_session.insert(s.id.clone(), HarnessKind::Dsh);
+                self.ui
+                    .harness_by_session
+                    .insert(s.id.clone(), HarnessKind::Dsh);
             }
             if !unknown.is_empty() {
                 if let Some(ws) = self.workspace_by_path_mut(ws_key) {
@@ -3829,7 +4437,8 @@ impl Store {
                     }
                 }
                 for s in &unknown {
-                    self.workspace_by_session.insert(s.id.clone(), ws_key.to_string());
+                    self.workspace_by_session
+                        .insert(s.id.clone(), ws_key.to_string());
                     self.title_by_session.insert(s.id.clone(), s.title.clone());
                 }
             }
@@ -3857,7 +4466,10 @@ impl Store {
                 .map(|r| (r.session_id.clone(), self.title_for(&r.session_id)))
                 .collect();
             for running in &mut self.running_agents {
-                if let Some((_, title)) = fresh_labels.iter().find(|(sid, _)| sid == &running.session_id) {
+                if let Some((_, title)) = fresh_labels
+                    .iter()
+                    .find(|(sid, _)| sid == &running.session_id)
+                {
                     running.title = title.clone();
                 }
             }
@@ -3906,7 +4518,14 @@ impl Store {
             self.repaint(cx);
             return;
         }
-        let Some(state) = self.workspaces.iter().find(|w| w.folder_path() == ws_key).map(|w| w.state.clone()) else { return };
+        let Some(state) = self
+            .workspaces
+            .iter()
+            .find(|w| w.folder_path() == ws_key)
+            .map(|w| w.state.clone())
+        else {
+            return;
+        };
         let pins = self.ui.pins.clone();
         let mut mine: Vec<SessionInfo> = sessions
             .into_iter()
@@ -4014,7 +4633,9 @@ impl Store {
     }
 
     fn sync_workspace_chats(&mut self, cx: &mut Context<Self>) {
-        let Some(path) = self.selected_workspace.clone() else { return };
+        let Some(path) = self.selected_workspace.clone() else {
+            return;
+        };
         let chats = self.sessions.clone();
         if let Some(ws) = self.workspace_by_path_mut(&path) {
             ws.chats = chats;
@@ -4085,7 +4706,9 @@ impl Store {
             .flat_map(|w| w.chats.iter())
             .find(|c| c.id == session_id)
             .map(|c| (c.draft_title.trim().to_string(), c.title.clone()));
-        let Some((title, current)) = draft else { return };
+        let Some((title, current)) = draft else {
+            return;
+        };
         for ws in &mut self.workspaces {
             if let Some(chat) = ws.chats.iter_mut().find(|c| c.id == session_id) {
                 chat.is_editing = false;
@@ -4094,10 +4717,15 @@ impl Store {
         if title.is_empty() || title == current {
             return;
         }
-        let Some(ws_key) = self.net_key_for_session(session_id) else { return };
+        let Some(ws_key) = self.net_key_for_session(session_id) else {
+            return;
+        };
         self.net.send(NetCommand::Request {
             ws_key,
-            request: ApiRequest::RenameSession { session_id: session_id.to_string(), title },
+            request: ApiRequest::RenameSession {
+                session_id: session_id.to_string(),
+                title,
+            },
         });
         self.repaint(cx);
     }
@@ -4107,10 +4735,14 @@ impl Store {
             self.announce("Stop the running turn before deleting this chat.", true, cx);
             return;
         }
-        let Some(ws_key) = self.net_key_for_session(session_id) else { return };
+        let Some(ws_key) = self.net_key_for_session(session_id) else {
+            return;
+        };
         self.net.send(NetCommand::Request {
             ws_key,
-            request: ApiRequest::DeleteSession { session_id: session_id.to_string() },
+            request: ApiRequest::DeleteSession {
+                session_id: session_id.to_string(),
+            },
         });
     }
 
@@ -4188,18 +4820,27 @@ impl Store {
         self.show_restore_prompt = false;
         let mut added = 0;
         for id in wanted {
-            let known = self.workspaces.iter().find(|w| w.folder_path() == ws_key).map(|w| w.state.sessions.contains(&id)).unwrap_or(false);
+            let known = self
+                .workspaces
+                .iter()
+                .find(|w| w.folder_path() == ws_key)
+                .map(|w| w.state.sessions.contains(&id))
+                .unwrap_or(false);
             if !known || self.tile_by_session.contains_key(&id) {
                 continue;
             }
-            let route = self.net_key_for_session(&id).unwrap_or_else(|| ws_key.to_string());
+            let route = self
+                .net_key_for_session(&id)
+                .unwrap_or_else(|| ws_key.to_string());
             if route == DSH_SERVER_KEY && !self.runtimes.contains_key(DSH_SERVER_KEY) {
                 self.ensure_dsh(cx);
                 self.pending_opens.push((DSH_SERVER_KEY.into(), id.clone()));
             } else {
                 self.net.send(NetCommand::Request {
                     ws_key: route,
-                    request: ApiRequest::GetMessages { session_id: id.clone() },
+                    request: ApiRequest::GetMessages {
+                        session_id: id.clone(),
+                    },
                 });
             }
             added += 1;
@@ -4232,7 +4873,10 @@ impl Store {
     fn flush_pending_permissions(&mut self, session_id: &str, cx: &mut Context<Self>) {
         if let Some(pending) = self.pending_by_session.remove(session_id) {
             // snapshot remaining countdowns first (items move under a &mut self borrow)
-            let lefts: Vec<Option<i64>> = pending.iter().map(|i| self.countdowns.get(&i.id).copied()).collect();
+            let lefts: Vec<Option<i64>> = pending
+                .iter()
+                .map(|i| self.countdowns.get(&i.id).copied())
+                .collect();
             if let Some(tile) = self.tile_for_session_mut(session_id) {
                 for (mut item, left) in pending.into_iter().zip(lefts) {
                     // the countdown ran while the card was parked — show what's left
@@ -4252,7 +4896,10 @@ impl Store {
             if let Some(tile) = self.tile_for_session_mut(session_id) {
                 for item in pending {
                     if item.is_pending()
-                        && !tile.items.iter().any(|i| matches!(i.as_ref(), ChatItem::Question(q) if q.id == item.id))
+                        && !tile
+                            .items
+                            .iter()
+                            .any(|i| matches!(i.as_ref(), ChatItem::Question(q) if q.id == item.id))
                     {
                         tile.items.push(Arc::new(ChatItem::Question(item)));
                     }
@@ -4266,7 +4913,9 @@ impl Store {
     fn pull_pending_questions(&mut self, ws_key: &str, session_id: &str) {
         self.net.send(NetCommand::Request {
             ws_key: ws_key.to_string(),
-            request: ApiRequest::GetQuestions { for_session: session_id.to_string() },
+            request: ApiRequest::GetQuestions {
+                for_session: session_id.to_string(),
+            },
         });
     }
 
@@ -4276,7 +4925,11 @@ impl Store {
             .running_agents
             .iter()
             .position(|r| r.session_id == session_id)
-            .or_else(|| self.running_agents.iter().position(|r| r.parent_session_id.as_deref() == Some(session_id)));
+            .or_else(|| {
+                self.running_agents
+                    .iter()
+                    .position(|r| r.parent_session_id.as_deref() == Some(session_id))
+            });
         if let Some(index) = index {
             self.running_agents[index].needs_attention = attention;
         }
@@ -4297,7 +4950,10 @@ impl Store {
         if !changed {
             return;
         }
-        let existing_index = self.running_agents.iter().position(|r| r.session_id == session_id);
+        let existing_index = self
+            .running_agents
+            .iter()
+            .position(|r| r.session_id == session_id);
         if running {
             if existing_index.is_none() {
                 self.running_agents.push(RunningAgentItem {
@@ -4335,8 +4991,15 @@ impl Store {
     /// Returns whether running-agent-visible state changed: `session.updated`
     /// fires at token rate for every (subagent) session, and an unchanged
     /// snapshot must not rebuild the tiles' agent lists.
-    fn track_session_info(&mut self, session_id: Option<&str>, parent_id: Option<&str>, agent: Option<&str>) -> bool {
-        let Some(session_id) = session_id else { return false };
+    fn track_session_info(
+        &mut self,
+        session_id: Option<&str>,
+        parent_id: Option<&str>,
+        agent: Option<&str>,
+    ) -> bool {
+        let Some(session_id) = session_id else {
+            return false;
+        };
         match parent_id {
             None if parent_id.is_none() || parent_id == Some(session_id) => {
                 if self.subagent_by_session.remove(session_id).is_some() {
@@ -4361,18 +5024,24 @@ impl Store {
                     parent_session_id: parent_id.to_string(),
                     agent: agent_label.clone(),
                 };
-                let prior = self.subagent_by_session.insert(session_id.to_string(), info);
-                let info_changed = prior.is_none_or(|p| p.parent_session_id != parent_id || p.agent != agent_label);
+                let prior = self
+                    .subagent_by_session
+                    .insert(session_id.to_string(), info);
+                let info_changed = prior
+                    .is_none_or(|p| p.parent_session_id != parent_id || p.agent != agent_label);
                 // a running row's label follows the parent's title; compute it
                 // only for sessions that actually have a row
                 let mut label_changed = false;
                 if self.running_subagents.contains(session_id) {
                     let fresh_label = format!("{} → {}", agent_label, self.title_for(parent_id));
-                    if let Some(row) = self.running_agents.iter_mut().find(|r| r.session_id == session_id) {
-                        if row.title != fresh_label {
-                            row.title = fresh_label;
-                            label_changed = true;
-                        }
+                    if let Some(row) = self
+                        .running_agents
+                        .iter_mut()
+                        .find(|r| r.session_id == session_id)
+                        && row.title != fresh_label
+                    {
+                        row.title = fresh_label;
+                        label_changed = true;
                     }
                 }
                 info_changed || label_changed
@@ -4393,11 +5062,18 @@ impl Store {
         if !changed {
             return;
         }
-        let existing_index = self.running_agents.iter().position(|r| r.session_id == child_id);
+        let existing_index = self
+            .running_agents
+            .iter()
+            .position(|r| r.session_id == child_id);
         if running {
             if existing_index.is_none() {
                 let info = self.subagent_by_session.get(child_id).unwrap();
-                let title = format!("{} → {}", info.agent, self.title_for(&info.parent_session_id));
+                let title = format!(
+                    "{} → {}",
+                    info.agent,
+                    self.title_for(&info.parent_session_id)
+                );
                 self.running_agents.push(RunningAgentItem {
                     session_id: child_id.to_string(),
                     parent_session_id: Some(info.parent_session_id.clone()),
@@ -4452,7 +5128,9 @@ impl Store {
             .get(session_id)
             .map(|s| s.parent_session_id.clone())
             .unwrap_or_else(|| session_id.to_string());
-        let Some(path) = self.workspace_by_session.get(&target).cloned() else { return };
+        let Some(path) = self.workspace_by_session.get(&target).cloned() else {
+            return;
+        };
         self.open_session_into_grid(&path, &target, cx);
     }
 
@@ -4463,7 +5141,9 @@ impl Store {
             self.focus_tile(&tile_key, cx);
             return;
         }
-        let Some(path) = self.effective_workspace_path(session_id) else { return };
+        let Some(path) = self.effective_workspace_path(session_id) else {
+            return;
+        };
         self.open_session_into_grid(&path, session_id, cx);
     }
 
@@ -4472,59 +5152,95 @@ impl Store {
     /// workspace, so chats of different workspaces share one grid.
     pub fn select_session(&mut self, session_id: &str, cx: &mut Context<Self>) {
         tracing::info!("select_session {}", session_id);
-        if self.focused_tile.as_deref().and_then(|k| self.tile_by_key(k)).and_then(|t| t.session_id.clone()).as_deref() == Some(session_id) {
+        if self
+            .focused_tile
+            .as_deref()
+            .and_then(|k| self.tile_by_key(k))
+            .and_then(|t| t.session_id.clone())
+            .as_deref()
+            == Some(session_id)
+        {
             return;
         }
         if let Some(tile_key) = self.tile_by_session.get(session_id).cloned() {
             self.focus_tile(&tile_key, cx);
             return;
         }
-        let Some(path) = self.workspace_by_session.get(session_id).cloned() else { return };
+        let Some(path) = self.workspace_by_session.get(session_id).cloned() else {
+            return;
+        };
         self.open_session_into_grid(&path, session_id, cx);
     }
 
     /// Loads a chat into a grid tile through its own workspace's server, starting
     /// that server if needed; the selected workspace is left alone.
-    pub fn open_session_into_grid(&mut self, ws_path: &str, session_id: &str, cx: &mut Context<Self>) {
+    pub fn open_session_into_grid(
+        &mut self,
+        ws_path: &str,
+        session_id: &str,
+        cx: &mut Context<Self>,
+    ) {
         if let Some(ws) = self.workspace_by_path_mut(ws_path) {
             ws.set_expanded(true); // the opened chat's row belongs in a visible sidebar section
         }
         if self.session_harness(session_id) == HarnessKind::Dsh {
             if !self.runtimes.contains_key(DSH_SERVER_KEY) {
                 self.ensure_dsh(cx);
-                self.pending_opens.push((DSH_SERVER_KEY.into(), session_id.to_string()));
+                self.pending_opens
+                    .push((DSH_SERVER_KEY.into(), session_id.to_string()));
                 self.repaint(cx);
                 return;
             }
             self.net.send(NetCommand::Request {
                 ws_key: DSH_SERVER_KEY.into(),
-                request: ApiRequest::GetMessages { session_id: session_id.to_string() },
+                request: ApiRequest::GetMessages {
+                    session_id: session_id.to_string(),
+                },
             });
             self.repaint(cx);
             return;
         }
         if !self.runtimes.contains_key(ws_path) {
             self.start_workspace(ws_path, cx);
-            self.pending_opens.push((ws_path.to_string(), session_id.to_string()));
+            self.pending_opens
+                .push((ws_path.to_string(), session_id.to_string()));
             self.repaint(cx);
             return;
         }
         self.net.send(NetCommand::Request {
             ws_key: ws_path.to_string(),
-            request: ApiRequest::GetMessages { session_id: session_id.to_string() },
+            request: ApiRequest::GetMessages {
+                session_id: session_id.to_string(),
+            },
         });
         self.repaint(cx);
     }
 
     // ---- stream events (HandleEvent port) ----
 
-    fn handle_stream_event(&mut self, ws_key: &str, evt: &serde_json::Value, cx: &mut Context<Self>) {
-        let type_ = evt.get("type").and_then(serde_json::Value::as_str).unwrap_or("");
+    fn handle_stream_event(
+        &mut self,
+        ws_key: &str,
+        evt: &serde_json::Value,
+        cx: &mut Context<Self>,
+    ) {
+        let type_ = evt
+            .get("type")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("");
         let data = evt.get("properties").unwrap_or(evt);
         match type_ {
             "server.connected" => {
-                let harness = if ws_key == DSH_SERVER_KEY { "dsh" } else { "opencode" };
-                self.announce_for_key(ws_key, &format!("Connected to the {harness} event stream."), cx);
+                let harness = if ws_key == DSH_SERVER_KEY {
+                    "dsh"
+                } else {
+                    "opencode"
+                };
+                self.announce_for_key(
+                    ws_key,
+                    &format!("Connected to the {harness} event stream."),
+                    cx,
+                );
             }
             "session.created" | "session.updated" => {
                 if let Some(info) = data.get("info") {
@@ -4544,7 +5260,9 @@ impl Store {
             }
             "message.updated" => {
                 if let Some(tile_key) = self.tile_from_data(data, ws_key) {
-                    self.with_tile(&tile_key, |tile, store, _| tile.on_message_updated(data, store));
+                    self.with_tile(&tile_key, |tile, store, _| {
+                        tile.on_message_updated(data, store)
+                    });
                     self.mark_stream_dirty(tile_key, cx);
                 }
                 return;
@@ -4590,9 +5308,15 @@ impl Store {
                         self.refresh_dsh_lists();
                     } else if let Some(idle_path) = self.workspace_by_session.get(sid).cloned() {
                         if self.selected_workspace.as_deref() == Some(idle_path.as_str()) {
-                            self.net.send(NetCommand::Request { ws_key: idle_path.clone(), request: ApiRequest::ListSessions });
+                            self.net.send(NetCommand::Request {
+                                ws_key: idle_path.clone(),
+                                request: ApiRequest::ListSessions,
+                            });
                         } else if self.runtimes.contains_key(&idle_path) {
-                            self.net.send(NetCommand::Request { ws_key: idle_path, request: ApiRequest::ListSessions });
+                            self.net.send(NetCommand::Request {
+                                ws_key: idle_path,
+                                request: ApiRequest::ListSessions,
+                            });
                         }
                     }
                     let sid = sid.to_string();
@@ -4614,7 +5338,10 @@ impl Store {
                         // the turn died retryable: re-send the stored prompt
                         // after a pause; the queue drains on the retry's idle
                         let delay = retry_backoff(
-                            self.last_prompt_by_session.get(&sid).map(|p| p.attempts).unwrap_or(1),
+                            self.last_prompt_by_session
+                                .get(&sid)
+                                .map(|p| p.attempts)
+                                .unwrap_or(1),
                         );
                         cx.spawn(async move |store, cx| {
                             cx.background_executor().timer(delay).await;
@@ -4645,7 +5372,11 @@ impl Store {
                 let (message, retryable) = read_error_info(data);
                 let error_session = read_session_id(data);
                 if let Some(sid) = error_session {
-                    let attempt = if retryable { self.arm_auto_retry(sid) } else { None };
+                    let attempt = if retryable {
+                        self.arm_auto_retry(sid)
+                    } else {
+                        None
+                    };
                     // door runs on this chat: a retry keeps them waiting, a
                     // dead turn answers with the error
                     let watched: Vec<u64> = self
@@ -4737,9 +5468,17 @@ impl Store {
             return self.tile_by_session.get(id).cloned();
         }
         // events without a session id belong to a tile of the same workspace
-        let focused = self.focused_tile.as_deref().and_then(|key| self.tile_by_key(key))?;
+        let focused = self
+            .focused_tile
+            .as_deref()
+            .and_then(|key| self.tile_by_key(key))?;
         let focused_session = focused.session_id.as_ref()?;
-        if self.workspace_by_session.get(focused_session).map(|p| p == ws_key).unwrap_or(false) {
+        if self
+            .workspace_by_session
+            .get(focused_session)
+            .map(|p| p == ws_key)
+            .unwrap_or(false)
+        {
             Some(focused.key.clone())
         } else {
             None
@@ -4750,14 +5489,26 @@ impl Store {
     /// A user-aborted turn says "stopped in" instead — it didn't finish.
     fn note_turn_duration(&mut self, session_id: &str, cx: &mut Context<Self>) {
         let stopped = self.user_stopped_by_session.remove(session_id);
-        let Some(start) = self.turn_start_by_session.remove(session_id) else { return };
-        let Some(tile_key) = self.tile_by_session.get(session_id).cloned() else { return };
+        let Some(start) = self.turn_start_by_session.remove(session_id) else {
+            return;
+        };
+        let Some(tile_key) = self.tile_by_session.get(session_id).cloned() else {
+            return;
+        };
         let duration = format_duration(start.elapsed());
-        let text = format!("{} in {}", if stopped { "stopped" } else { "done" }, duration);
+        let text = format!(
+            "{} in {}",
+            if stopped { "stopped" } else { "done" },
+            duration
+        );
         let note_key = self.next_key;
         self.next_key += 1;
         if let Some(tile) = self.tile_by_key_mut(&tile_key) {
-            tile.items.push(Arc::new(ChatItem::SystemNote { key: note_key, text, is_error: false }));
+            tile.items.push(Arc::new(ChatItem::SystemNote {
+                key: note_key,
+                text,
+                is_error: false,
+            }));
         }
         let _ = cx;
     }
@@ -4776,7 +5527,11 @@ impl Store {
         let mut detail;
         let mut diff = None;
         if v2 {
-            kind = data.get("action").and_then(serde_json::Value::as_str).unwrap_or("permission").to_string();
+            kind = data
+                .get("action")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("permission")
+                .to_string();
             detail = data
                 .get("resources")
                 .and_then(serde_json::Value::as_array)
@@ -4789,18 +5544,22 @@ impl Store {
                 })
                 .unwrap_or_default();
         } else {
-            kind = data.get("permission").and_then(serde_json::Value::as_str).unwrap_or("permission").to_string();
+            kind = data
+                .get("permission")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("permission")
+                .to_string();
             detail = String::new();
             if let Some(md) = data.get("metadata").and_then(serde_json::Value::as_object) {
-                if let Some(command) = md.get("command").and_then(serde_json::Value::as_str) {
-                    if !command.is_empty() {
-                        detail = command.to_string();
-                    }
+                if let Some(command) = md.get("command").and_then(serde_json::Value::as_str)
+                    && !command.is_empty()
+                {
+                    detail = command.to_string();
                 }
-                if let Some(d) = md.get("diff").and_then(serde_json::Value::as_str) {
-                    if !d.is_empty() {
-                        diff = Some(d.to_string());
-                    }
+                if let Some(d) = md.get("diff").and_then(serde_json::Value::as_str)
+                    && !d.is_empty()
+                {
+                    diff = Some(d.to_string());
                 }
             }
             if detail.is_empty() {
@@ -4876,7 +5635,10 @@ impl Store {
         let (min, max) = if away {
             (s.auto_allow_away_min_seconds, s.auto_allow_away_max_seconds)
         } else {
-            (s.auto_allow_default_min_seconds, s.auto_allow_default_max_seconds)
+            (
+                s.auto_allow_default_min_seconds,
+                s.auto_allow_default_max_seconds,
+            )
         };
         let min = min.max(0);
         (min, max.max(min))
@@ -4899,7 +5661,12 @@ impl Store {
         }
         for id in due {
             // only still-pending items fire
-            if self.find_permission(&id).map(|p| p.is_pending()).unwrap_or(false) && self.auto_allow {
+            if self
+                .find_permission(&id)
+                .map(|p| p.is_pending())
+                .unwrap_or(false)
+                && self.auto_allow
+            {
                 self.respond_permission(&id, "always", true, cx);
             }
         }
@@ -4935,10 +5702,10 @@ impl Store {
     fn find_permission(&self, permission_id: &str) -> Option<&PermissionItem> {
         for tile in &self.open_tiles {
             for item in &tile.items {
-                if let ChatItem::Permission(p) = item.as_ref() {
-                    if p.id == permission_id {
-                        return Some(p);
-                    }
+                if let ChatItem::Permission(p) = item.as_ref()
+                    && p.id == permission_id
+                {
+                    return Some(p);
                 }
             }
         }
@@ -4952,27 +5719,42 @@ impl Store {
         None
     }
 
-    pub fn respond_permission(&mut self, permission_id: &str, response: &str, is_auto: bool, cx: &mut Context<Self>) {
+    pub fn respond_permission(
+        &mut self,
+        permission_id: &str,
+        response: &str,
+        is_auto: bool,
+        cx: &mut Context<Self>,
+    ) {
         // close the buttons immediately so a slow reply cannot be clicked twice
         let mut session_id = None;
         let mut is_v2 = false;
         for tile in &mut self.open_tiles {
             for item in &mut tile.items {
-                if let ChatItem::Permission(p) = Arc::make_mut(item) {
-                    if p.id == permission_id && p.is_pending() {
-                        p.answer = Some(if is_auto { "auto-allowing…".into() } else { "sending…".into() });
-                        p.was_auto_answered = is_auto;
-                        p.auto_countdown = None;
-                        session_id = Some(p.session_id.clone());
-                        is_v2 = p.is_v2;
-                    }
+                if let ChatItem::Permission(p) = Arc::make_mut(item)
+                    && p.id == permission_id
+                    && p.is_pending()
+                {
+                    p.answer = Some(if is_auto {
+                        "auto-allowing…".into()
+                    } else {
+                        "sending…".into()
+                    });
+                    p.was_auto_answered = is_auto;
+                    p.auto_countdown = None;
+                    session_id = Some(p.session_id.clone());
+                    is_v2 = p.is_v2;
                 }
             }
         }
         for pending in self.pending_by_session.values_mut() {
             for item in pending {
                 if item.id == permission_id && item.is_pending() {
-                    item.answer = Some(if is_auto { "auto-allowing…".into() } else { "sending…".into() });
+                    item.answer = Some(if is_auto {
+                        "auto-allowing…".into()
+                    } else {
+                        "sending…".into()
+                    });
                     item.was_auto_answered = is_auto;
                     item.auto_countdown = None;
                     session_id = Some(item.session_id.clone());
@@ -4993,7 +5775,10 @@ impl Store {
         }
         let response = response.to_string();
         let request = if is_v2 {
-            ApiRequest::ReplyV2 { request_id: permission_id.to_string(), response }
+            ApiRequest::ReplyV2 {
+                request_id: permission_id.to_string(),
+                response,
+            }
         } else {
             ApiRequest::RespondPermission {
                 session_id: session_id.clone(),
@@ -5009,12 +5794,13 @@ impl Store {
     fn resolve_permission(&mut self, permission_id: &str, label: String, is_auto: bool) {
         for tile in &mut self.open_tiles {
             for item in &mut tile.items {
-                if let ChatItem::Permission(p) = Arc::make_mut(item) {
-                    if p.id == permission_id && p.is_pending() {
-                        p.answer = Some(label.clone());
-                        p.was_auto_answered = is_auto;
-                        p.auto_countdown = None;
-                    }
+                if let ChatItem::Permission(p) = Arc::make_mut(item)
+                    && p.id == permission_id
+                    && p.is_pending()
+                {
+                    p.answer = Some(label.clone());
+                    p.was_auto_answered = is_auto;
+                    p.auto_countdown = None;
                 }
             }
         }
@@ -5030,7 +5816,9 @@ impl Store {
     }
 
     fn on_permission_replied(&mut self, data: &serde_json::Value) {
-        let Some(request_id) = data.get("requestID").and_then(serde_json::Value::as_str) else { return };
+        let Some(request_id) = data.get("requestID").and_then(serde_json::Value::as_str) else {
+            return;
+        };
         self.resolve_permission(request_id, "answered elsewhere".into(), false);
     }
 
@@ -5038,7 +5826,9 @@ impl Store {
     // The agent's `question` tool parks the turn until the user answers; never auto-answered.
 
     fn on_question_asked(&mut self, data: &serde_json::Value, cx: &mut Context<Self>) {
-        let Some(request) = oc::read_question_request(data) else { return };
+        let Some(request) = oc::read_question_request(data) else {
+            return;
+        };
         if request.questions.is_empty() {
             return;
         }
@@ -5052,10 +5842,13 @@ impl Store {
         let built = build_question_item(&request, &mut next_key);
         self.next_key = next_key;
         if let Some(tile_key) = self.tile_by_session.get(&owner).cloned() {
-            if let Some(tile) = self.tile_by_key_mut(&tile_key) {
-                if !tile.items.iter().any(|i| matches!(i.as_ref(), ChatItem::Question(q) if q.id == built.id)) {
-                    tile.items.push(Arc::new(ChatItem::Question(built)));
-                }
+            if let Some(tile) = self.tile_by_key_mut(&tile_key)
+                && !tile
+                    .items
+                    .iter()
+                    .any(|i| matches!(i.as_ref(), ChatItem::Question(q) if q.id == built.id))
+            {
+                tile.items.push(Arc::new(ChatItem::Question(built)));
             }
             self.repaint(cx);
             return;
@@ -5069,7 +5862,9 @@ impl Store {
     }
 
     fn on_question_resolved(&mut self, data: &serde_json::Value) {
-        let Some(request_id) = data.get("requestID").and_then(serde_json::Value::as_str) else { return };
+        let Some(request_id) = data.get("requestID").and_then(serde_json::Value::as_str) else {
+            return;
+        };
         let mut summary = "dismissed".to_string();
         if let Some(answers) = data.get("answers").and_then(serde_json::Value::as_array) {
             let answers: Vec<String> = answers
@@ -5097,12 +5892,13 @@ impl Store {
     fn resolve_question(&mut self, request_id: &str, summary: &str) {
         for tile in &mut self.open_tiles {
             for item in &mut tile.items {
-                if let ChatItem::Question(q) = Arc::make_mut(item) {
-                    if q.id == request_id && q.is_pending() {
-                        q.resolution = Some(summary.to_string());
-                        for question in &mut q.questions {
-                            question.locked = true;
-                        }
+                if let ChatItem::Question(q) = Arc::make_mut(item)
+                    && q.id == request_id
+                    && q.is_pending()
+                {
+                    q.resolution = Some(summary.to_string());
+                    for question in &mut q.questions {
+                        question.locked = true;
                     }
                 }
             }
@@ -5124,26 +5920,46 @@ impl Store {
         let mut session_id = None;
         for tile in &mut self.open_tiles {
             for item in &mut tile.items {
-                if let ChatItem::Question(q) = Arc::make_mut(item) {
-                    if q.id == question_id && q.is_pending() && q.can_submit() {
-                        answers = Some(q.questions.iter().map(|e| e.answer()).collect());
-                        q.resolution = Some(format!("sending {}…", answers.as_ref().unwrap().iter().map(|a| if a.is_empty() { "(empty)".to_string() } else { a.join(", ") }).collect::<Vec<_>>().join(" · ")));
-                        for question in &mut q.questions {
-                            question.locked = true;
-                        }
-                        session_id = Some(q.session_id.clone());
+                if let ChatItem::Question(q) = Arc::make_mut(item)
+                    && q.id == question_id
+                    && q.is_pending()
+                    && q.can_submit()
+                {
+                    answers = Some(q.questions.iter().map(|e| e.answer()).collect());
+                    q.resolution = Some(format!(
+                        "sending {}…",
+                        answers
+                            .as_ref()
+                            .unwrap()
+                            .iter()
+                            .map(|a| if a.is_empty() {
+                                "(empty)".to_string()
+                            } else {
+                                a.join(", ")
+                            })
+                            .collect::<Vec<_>>()
+                            .join(" · ")
+                    ));
+                    for question in &mut q.questions {
+                        question.locked = true;
                     }
+                    session_id = Some(q.session_id.clone());
                 }
             }
         }
-        let (Some(answers), Some(session_id)) = (answers, session_id) else { return };
+        let (Some(answers), Some(session_id)) = (answers, session_id) else {
+            return;
+        };
         let Some(ws_key) = self.net_key_for_session(&session_id) else {
             self.resolve_question(question_id, "server unavailable");
             return;
         };
         self.net.send(NetCommand::Request {
             ws_key,
-            request: ApiRequest::ReplyQuestion { request_id: question_id.to_string(), answers },
+            request: ApiRequest::ReplyQuestion {
+                request_id: question_id.to_string(),
+                answers,
+            },
         });
         self.repaint(cx);
     }
@@ -5152,14 +5968,15 @@ impl Store {
         let mut session_id = None;
         for tile in &mut self.open_tiles {
             for item in &mut tile.items {
-                if let ChatItem::Question(q) = Arc::make_mut(item) {
-                    if q.id == question_id && q.is_pending() {
-                        q.resolution = Some("dismissing…".into());
-                        for question in &mut q.questions {
-                            question.locked = true;
-                        }
-                        session_id = Some(q.session_id.clone());
+                if let ChatItem::Question(q) = Arc::make_mut(item)
+                    && q.id == question_id
+                    && q.is_pending()
+                {
+                    q.resolution = Some("dismissing…".into());
+                    for question in &mut q.questions {
+                        question.locked = true;
                     }
+                    session_id = Some(q.session_id.clone());
                 }
             }
         }
@@ -5170,7 +5987,9 @@ impl Store {
         };
         self.net.send(NetCommand::Request {
             ws_key,
-            request: ApiRequest::RejectQuestion { request_id: question_id.to_string() },
+            request: ApiRequest::RejectQuestion {
+                request_id: question_id.to_string(),
+            },
         });
         self.repaint(cx);
     }
@@ -5192,7 +6011,8 @@ impl Store {
     /// server's connect/status notes must not surface in a chat that runs on
     /// another server (a dsh draft must not greet with opencode's note).
     fn announce_for_key(&mut self, ws_key: &str, text: &str, cx: &mut Context<Self>) {
-        let matches_key = |this: &Self, key: &str| this.tile_net_key_or(key).as_deref() == Some(ws_key);
+        let matches_key =
+            |this: &Self, key: &str| this.tile_net_key_or(key).as_deref() == Some(ws_key);
         let target = self
             .focused_tile
             .clone()
@@ -5212,7 +6032,11 @@ impl Store {
         let note_key = self.next_key;
         self.next_key += 1;
         if let Some(tile) = self.tile_by_key_mut(tile_key) {
-            tile.items.push(Arc::new(ChatItem::SystemNote { key: note_key, text: text.into(), is_error: error }));
+            tile.items.push(Arc::new(ChatItem::SystemNote {
+                key: note_key,
+                text: text.into(),
+                is_error: error,
+            }));
         }
         self.repaint(cx);
     }
@@ -5238,12 +6062,19 @@ impl Store {
             let note_key = self.next_key;
             self.next_key += 1;
             if let Some(tile) = self.tile_by_key_mut(&tile_key) {
-                tile.items.push(Arc::new(ChatItem::SystemNote { key: note_key, text: text.into(), is_error: error }));
+                tile.items.push(Arc::new(ChatItem::SystemNote {
+                    key: note_key,
+                    text: text.into(),
+                    is_error: error,
+                }));
             }
-            self.reconnect_notes.insert(ws_key.to_string(), (tile_key.clone(), note_key, now));
+            self.reconnect_notes
+                .insert(ws_key.to_string(), (tile_key.clone(), note_key, now));
             self.touch_tile(&tile_key, cx);
         } else {
-            let Some((tile_key, note_key, last)) = self.reconnect_notes.get_mut(ws_key) else { return };
+            let Some((tile_key, note_key, last)) = self.reconnect_notes.get_mut(ws_key) else {
+                return;
+            };
             *last = now;
             let (tile_key, note_key) = (tile_key.clone(), *note_key);
             self.rewrite_note(&tile_key, note_key, text, error);
@@ -5255,7 +6086,11 @@ impl Store {
     /// text. Only a series with a prior "connection lost" answers: the pump
     /// reports Connected on every attach, including the quiet first one.
     fn settle_reconnect_note(&mut self, ws_key: &str, cx: &mut Context<Self>) {
-        let Some((tile_key, note_key)) = self.reconnect_notes.get(ws_key).map(|(t, n, _)| (t.clone(), *n)) else {
+        let Some((tile_key, note_key)) = self
+            .reconnect_notes
+            .get(ws_key)
+            .map(|(t, n, _)| (t.clone(), *n))
+        else {
             return;
         };
         self.reconnect_notes.get_mut(ws_key).unwrap().2 = Instant::now();
@@ -5268,7 +6103,12 @@ impl Store {
         if let Some(tile) = self.tile_by_key_mut(tile_key) {
             for item in &mut tile.items {
                 if matches!(item.as_ref(), ChatItem::SystemNote { key, .. } if *key == note_key) {
-                    if let ChatItem::SystemNote { text: t, is_error: e, .. } = Arc::make_mut(item) {
+                    if let ChatItem::SystemNote {
+                        text: t,
+                        is_error: e,
+                        ..
+                    } = Arc::make_mut(item)
+                    {
                         *t = text.into();
                         *e = error;
                     }
@@ -5281,25 +6121,29 @@ impl Store {
     fn post_note_for_session(&mut self, session_id: &str, text: &str, error: bool) {
         let note_key = self.next_key;
         self.next_key += 1;
-        if let Some(tile_key) = self.tile_by_session.get(session_id).cloned() {
-            if let Some(tile) = self.tile_by_key_mut(&tile_key) {
-                tile.items.push(Arc::new(ChatItem::SystemNote { key: note_key, text: text.into(), is_error: error }));
-                return;
-            }
+        if let Some(tile_key) = self.tile_by_session.get(session_id).cloned()
+            && let Some(tile) = self.tile_by_key_mut(&tile_key)
+        {
+            tile.items.push(Arc::new(ChatItem::SystemNote {
+                key: note_key,
+                text: text.into(),
+                is_error: error,
+            }));
+            return;
         }
         let title = self.title_for(session_id);
         let target = self
             .focused_tile
             .clone()
             .or_else(|| self.open_tiles.first().map(|t| t.key.clone()));
-        if let Some(target) = target {
-            if let Some(tile) = self.tile_by_key_mut(&target) {
-                tile.items.push(Arc::new(ChatItem::SystemNote {
-                    key: note_key,
-                    text: format!("{title}: {text}"),
-                    is_error: error,
-                }));
-            }
+        if let Some(target) = target
+            && let Some(tile) = self.tile_by_key_mut(&target)
+        {
+            tile.items.push(Arc::new(ChatItem::SystemNote {
+                key: note_key,
+                text: format!("{title}: {text}"),
+                is_error: error,
+            }));
         }
     }
 
@@ -5315,13 +6159,17 @@ impl Store {
         multiple: bool,
         cx: &mut Context<Self>,
     ) {
-        let Some(tile) = self.tile_by_key_mut(tile_key) else { return };
+        let Some(tile) = self.tile_by_key_mut(tile_key) else {
+            return;
+        };
         for item in &mut tile.items {
             if let ChatItem::Question(q) = Arc::make_mut(item) {
                 if q.id != question_id {
                     continue;
                 }
-                let Some(entry) = q.questions.get_mut(qi) else { return };
+                let Some(entry) = q.questions.get_mut(qi) else {
+                    return;
+                };
                 for (i, option) in entry.options.iter_mut().enumerate() {
                     if multiple && i == oi {
                         option.is_selected = !option.is_selected;
@@ -5339,8 +6187,16 @@ impl Store {
     /// repaint the window) and the leaf nudges the tile only when the
     /// answer's filled state flips, since that is the only visible
     /// consequence outside the field (the Answer button's can_submit).
-    pub fn set_question_custom(&mut self, tile_key: &str, question_id: &str, qi: usize, text: String) {
-        let Some(tile) = self.tile_by_key_mut(tile_key) else { return };
+    pub fn set_question_custom(
+        &mut self,
+        tile_key: &str,
+        question_id: &str,
+        qi: usize,
+        text: String,
+    ) {
+        let Some(tile) = self.tile_by_key_mut(tile_key) else {
+            return;
+        };
         // make_mut only the one question item: a blind per-item make_mut
         // deep-copies the whole transcript on every keystroke
         let Some(index) = tile
@@ -5350,10 +6206,10 @@ impl Store {
         else {
             return;
         };
-        if let ChatItem::Question(q) = Arc::make_mut(&mut tile.items[index]) {
-            if let Some(entry) = q.questions.get_mut(qi) {
-                entry.custom_text = text;
-            }
+        if let ChatItem::Question(q) = Arc::make_mut(&mut tile.items[index])
+            && let Some(entry) = q.questions.get_mut(qi)
+        {
+            entry.custom_text = text;
         }
     }
 
@@ -5377,13 +6233,23 @@ impl Store {
         let akey = self.next_key;
         self.next_key += 1;
         if let Some(tile) = self.tile_by_key_mut(tile_key) {
-            tile.attachments.push(AttachmentItem { file_name, mime, data: Arc::new(data), key: akey });
+            tile.attachments.push(AttachmentItem {
+                file_name,
+                mime,
+                data: Arc::new(data),
+                key: akey,
+            });
         }
     }
 
     /// Files dragged onto the composer from the file manager; mirrors the
     /// picker path (directories skipped, over-512 KB announced and skipped).
-    pub fn attach_paths(&mut self, tile_key: &str, paths: &[std::path::PathBuf], cx: &mut Context<Self>) {
+    pub fn attach_paths(
+        &mut self,
+        tile_key: &str,
+        paths: &[std::path::PathBuf],
+        cx: &mut Context<Self>,
+    ) {
         for path in paths {
             if path.is_dir() {
                 continue;
@@ -5393,11 +6259,21 @@ impl Store {
                 .map(|n| n.to_string_lossy().to_string())
                 .unwrap_or_else(|| path.display().to_string());
             let Ok(data) = std::fs::read(path) else {
-                self.tile_note(tile_key, &format!("{name} could not be read — skipped."), true, cx);
+                self.tile_note(
+                    tile_key,
+                    &format!("{name} could not be read — skipped."),
+                    true,
+                    cx,
+                );
                 continue;
             };
             if data.len() > 512 * 1024 {
-                self.tile_note(tile_key, &format!("{name} is over 512 KB — skipped."), true, cx);
+                self.tile_note(
+                    tile_key,
+                    &format!("{name} is over 512 KB — skipped."),
+                    true,
+                    cx,
+                );
                 continue;
             }
             let mime = crate::ui::mime_for_path(&name);
@@ -5406,7 +6282,12 @@ impl Store {
         self.repaint(cx);
     }
 
-    pub fn remove_attachment(&mut self, tile_key: &str, attachment_key: usize, cx: &mut Context<Self>) {
+    pub fn remove_attachment(
+        &mut self,
+        tile_key: &str,
+        attachment_key: usize,
+        cx: &mut Context<Self>,
+    ) {
         if let Some(tile) = self.tile_by_key_mut(tile_key) {
             tile.attachments.retain(|a| a.key != attachment_key);
         }
@@ -5418,11 +6299,16 @@ impl Store {
     pub fn set_tile_model(&mut self, tile_key: &str, model: Option<String>) {
         let variants_by_model = self.variants_by_model.clone();
         let highest = if self.settings.default_variant_highest {
-            model.as_ref().and_then(|m| variants_by_model.get(m)).and_then(|vs| highest_variant(vs))
+            model
+                .as_ref()
+                .and_then(|m| variants_by_model.get(m))
+                .and_then(|vs| highest_variant(vs))
         } else {
             None
         };
-        let Some(tile) = self.tile_by_key_mut(tile_key) else { return };
+        let Some(tile) = self.tile_by_key_mut(tile_key) else {
+            return;
+        };
         tile.selected_model = model;
         tile.variants = variant_list_for(&variants_by_model, &tile.selected_model);
         tile.selected_variant = highest.or_else(|| Some(DEFAULT_VARIANT_ENTRY.into()));
@@ -5467,8 +6353,10 @@ impl Store {
             self.auto_allow = allowed;
         }
         self.ui.auto_allow_always = Some(self.auto_allow);
-        self.fonts = theme::font_tokens(self.settings.font_scale.as_deref(), self.system_font_factor);
-        self.accent = AccentColors::for_preset(theme::normalize_accent(self.settings.accent.as_deref()));
+        self.fonts =
+            theme::font_tokens(self.settings.font_scale.as_deref(), self.system_font_factor);
+        self.accent =
+            AccentColors::for_preset(theme::normalize_accent(self.settings.accent.as_deref()));
         // re-map the kit theme so input selection/ring/primary follow the preset
         // (Theme::update refreshes every window)
         theme::apply_kit_theme(self.accent, &self.fonts, cx);
@@ -5509,11 +6397,17 @@ impl Store {
     /// Checks a tile out of the grid, runs `f` with shared store access, then puts it back.
     /// The checkout dummy is recycled across calls: message/part events hit
     /// this at token rate.
-    pub fn with_tile<R>(&mut self, key: &str, f: impl FnOnce(&mut ChatTile, &Store, &mut usize) -> R) -> Option<R> {
+    pub fn with_tile<R>(
+        &mut self,
+        key: &str,
+        f: impl FnOnce(&mut ChatTile, &Store, &mut usize) -> R,
+    ) -> Option<R> {
         let index = self.open_tiles.iter().position(|t| t.key == key)?;
         let mut tile = std::mem::replace(
             &mut self.open_tiles[index],
-            self.tile_placeholder.take().unwrap_or_else(Self::placeholder_tile),
+            self.tile_placeholder
+                .take()
+                .unwrap_or_else(Self::placeholder_tile),
         );
         let mut next_key = self.next_key;
         let result = f(&mut tile, self, &mut next_key);
@@ -5552,23 +6446,27 @@ fn read_error_info(data: &serde_json::Value) -> (String, bool) {
 
 fn read_error(data: &serde_json::Value) -> String {
     if let Some(error) = data.get("error").filter(|e| e.is_object()) {
-        let name = error.get("name").and_then(serde_json::Value::as_str).unwrap_or("");
+        let name = error
+            .get("name")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("");
         if name.to_lowercase().contains("abort") {
             return "Turn stopped.".into();
         }
         // API errors carry the human message nested in data; everything else is transport noise
         let mut message = String::new();
-        if let Some(inner) = error.pointer("/data/message").and_then(serde_json::Value::as_str) {
-            if !inner.is_empty() {
-                message = inner.to_string();
-            }
+        if let Some(inner) = error
+            .pointer("/data/message")
+            .and_then(serde_json::Value::as_str)
+            && !inner.is_empty()
+        {
+            message = inner.to_string();
         }
-        if message.is_empty() {
-            if let Some(outer) = error.get("message").and_then(serde_json::Value::as_str) {
-                if !outer.is_empty() {
-                    message = outer.to_string();
-                }
-            }
+        if message.is_empty()
+            && let Some(outer) = error.get("message").and_then(serde_json::Value::as_str)
+            && !outer.is_empty()
+        {
+            message = outer.to_string();
         }
         if message.is_empty() && !name.is_empty() {
             message = name.to_string();
@@ -5611,7 +6509,11 @@ fn build_question_item(request: &oc::QuestionRequestInfo, next_key: &mut usize) 
                 options: q
                     .options
                     .into_iter()
-                    .map(|o| QuestionOptionItem { label: o.label, description: o.description, is_selected: false })
+                    .map(|o| QuestionOptionItem {
+                        label: o.label,
+                        description: o.description,
+                        is_selected: false,
+                    })
                     .collect(),
                 custom_text: String::new(),
                 locked: false,
@@ -5624,7 +6526,11 @@ fn build_question_item(request: &oc::QuestionRequestInfo, next_key: &mut usize) 
 fn normalize_dir(path: &str) -> String {
     let trimmed = path.trim();
     let full = std::fs::canonicalize(trimmed)
-        .map(|full| crate::services::plain_path(&full).to_string_lossy().into_owned())
+        .map(|full| {
+            crate::services::plain_path(&full)
+                .to_string_lossy()
+                .into_owned()
+        })
         .unwrap_or_else(|_| trimmed.to_string());
     #[cfg(windows)]
     let full = full.trim_end_matches(|c| c == '/' || c == '\\').to_string();
@@ -5658,16 +6564,30 @@ mod suggest_tests {
     use serde_json::json;
 
     fn cmd(name: &str) -> CommandInfo {
-        CommandInfo { name_lower: name.to_lowercase(), name: name.into(), description: "".into(), source: "command".into() }
+        CommandInfo {
+            name_lower: name.to_lowercase(),
+            name: name.into(),
+            description: "".into(),
+            source: "command".into(),
+        }
     }
 
     fn stored(id: &str, role: &str, info: serde_json::Value) -> StoredMessage {
-        StoredMessage { id: id.into(), role: role.into(), created_ms: 0, info, parts: Vec::new() }
+        StoredMessage {
+            id: id.into(),
+            role: role.into(),
+            created_ms: 0,
+            info,
+            parts: Vec::new(),
+        }
     }
 
     #[test]
     fn at_token_positions() {
-        assert_eq!(at_token_start("hello @src/ma"), Some(("hello ".len(), "src/ma".into())));
+        assert_eq!(
+            at_token_start("hello @src/ma"),
+            Some(("hello ".len(), "src/ma".into()))
+        );
         assert_eq!(at_token_start("@"), Some((0, "".into())));
         assert_eq!(at_token_start("mail me a@b.com"), None);
         assert_eq!(at_token_start("done @a b"), None);
@@ -5677,10 +6597,19 @@ mod suggest_tests {
     #[test]
     fn slash_parsing() {
         let commands = vec![cmd("init"), cmd("review")];
-        assert_eq!(parse_slash_command("/init", &commands), Some(("init".into(), "".into())));
+        assert_eq!(
+            parse_slash_command("/init", &commands),
+            Some(("init".into(), "".into()))
+        );
         // args ride along, whitespace-normalized
-        assert_eq!(parse_slash_command("/init fast", &commands), Some(("init".into(), "fast".into())));
-        assert_eq!(parse_slash_command("/review  the   diff ", &commands), Some(("review".into(), "the   diff".into())));
+        assert_eq!(
+            parse_slash_command("/init fast", &commands),
+            Some(("init".into(), "fast".into()))
+        );
+        assert_eq!(
+            parse_slash_command("/review  the   diff ", &commands),
+            Some(("review".into(), "the   diff".into()))
+        );
         // unknown command and non-slash text are plain prompts
         assert_eq!(parse_slash_command("/nope", &commands), None);
         assert_eq!(parse_slash_command("plain text", &commands), None);
@@ -5690,21 +6619,43 @@ mod suggest_tests {
     fn session_settings_come_from_last_assistant() {
         // the last assistant turn wins, even with later user messages
         let messages = vec![
-            stored("m1", "assistant", json!({"providerID": "a", "modelID": "old", "variant": "low"})),
+            stored(
+                "m1",
+                "assistant",
+                json!({"providerID": "a", "modelID": "old", "variant": "low"}),
+            ),
             stored("m2", "user", json!({})),
-            stored("m3", "assistant", json!({"providerID": "a", "modelID": "new", "variant": "max"})),
+            stored(
+                "m3",
+                "assistant",
+                json!({"providerID": "a", "modelID": "new", "variant": "max"}),
+            ),
             stored("m4", "user", json!({})),
         ];
-        assert_eq!(session_chat_settings(&messages), Some(("a/new".into(), Some("max".into()))));
+        assert_eq!(
+            session_chat_settings(&messages),
+            Some(("a/new".into(), Some("max".into())))
+        );
         // a model without a variant pick reads as the "(default)" sentinel case
-        let messages = vec![stored("m1", "assistant", json!({"providerID": "a", "modelID": "new"}))];
-        assert_eq!(session_chat_settings(&messages), Some(("a/new".into(), None)));
+        let messages = vec![stored(
+            "m1",
+            "assistant",
+            json!({"providerID": "a", "modelID": "new"}),
+        )];
+        assert_eq!(
+            session_chat_settings(&messages),
+            Some(("a/new".into(), None))
+        );
         // no assistant reply yet → keep the global seeds
         let messages = vec![stored("m1", "user", json!({}))];
         assert_eq!(session_chat_settings(&messages), None);
         assert_eq!(session_chat_settings(&[]), None);
         // malformed model fields fall back to the seeds too
-        let messages = vec![stored("m1", "assistant", json!({"providerID": "", "modelID": "new"}))];
+        let messages = vec![stored(
+            "m1",
+            "assistant",
+            json!({"providerID": "", "modelID": "new"}),
+        )];
         assert_eq!(session_chat_settings(&messages), None);
     }
 
@@ -5724,13 +6675,16 @@ mod suggest_tests {
         });
         assert_eq!(
             read_error_info(&connection),
-            ("Error: Cannot connect to API: ECONNREFUSED: Unable to connect.".into(), true)
+            (
+                "Error: Cannot connect to API: ECONNREFUSED: Unable to connect.".into(),
+                true
+            )
         );
         // hard errors never retry, with or without the flag
         let quota = json!({"error": {"name": "APIError", "data": {"message": "quota exceeded", "isRetryable": false}}});
-        assert_eq!(read_error_info(&quota).1, false);
+        assert!(!read_error_info(&quota).1);
         let auth = json!({"error": {"name": "ProviderAuthError", "message": "invalid api key"}});
-        assert_eq!(read_error_info(&auth).1, false);
-        assert_eq!(read_error_info(&json!({})).1, false);
+        assert!(!read_error_info(&auth).1);
+        assert!(!read_error_info(&json!({})).1);
     }
 }

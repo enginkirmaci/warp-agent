@@ -7,7 +7,7 @@ use gpui_kit::base::text::TextView;
 use gpui_kit::base::{TextSelection, TextSelectionLayer};
 use gpui_kit::gpui::prelude::*;
 use gpui_kit::gpui::{
-    div, point, px, MouseButton, Modifiers, Pixels, Point, ScrollHandle, TestAppContext, Window,
+    Modifiers, MouseButton, Pixels, Point, ScrollHandle, TestAppContext, Window, div, point, px,
 };
 
 fn tall_text() -> String {
@@ -59,7 +59,11 @@ impl Probe {
 }
 
 impl Render for Probe {
-    fn render(&mut self, _: &mut Window, _: &mut gpui_kit::gpui::Context<Self>) -> impl IntoElement {
+    fn render(
+        &mut self,
+        _: &mut Window,
+        _: &mut gpui_kit::gpui::Context<Self>,
+    ) -> impl IntoElement {
         let mut root = div()
             .size_full()
             .flex()
@@ -97,13 +101,7 @@ impl Render for Probe {
                     .selectable(true)
                     .into_any_element()
                 };
-                transcript = transcript.child(
-                    div()
-                        .id(("message", m))
-                        .flex()
-                        .flex_col()
-                        .child(el),
-                );
+                transcript = transcript.child(div().id(("message", m)).flex().flex_col().child(el));
             }
             root = root.child(transcript);
         }
@@ -130,9 +128,13 @@ fn selection_works_in_single_scrolled_tile(cx: &mut TestAppContext) {
     cx.run_until_parked();
     cx.update(|window, cx| drop(window.draw(cx)));
 
-    drag(cx, Point::new(px(20.), px(300.)), Point::new(px(380.), px(330.)));
+    drag(
+        cx,
+        Point::new(px(20.), px(300.)),
+        Point::new(px(380.), px(330.)),
+    );
 
-    let selected = cx.update(|window, cx| TextSelection::selected_text(window, cx));
+    let selected = cx.update(TextSelection::selected_text);
     assert!(
         !selected.trim().is_empty(),
         "expected a selection, got none"
@@ -167,7 +169,7 @@ fn duplicate_markdown_ids_break_selection(cx: &mut TestAppContext) {
             ("cross-msg0-to-msg1", 100., 1600.),
         ] {
             drag(cx, Point::new(px(60.), px(y0)), Point::new(px(70.), px(y1)));
-            let win = cx.update(|window, cx| TextSelection::selected_text(window, cx));
+            let win = cx.update(TextSelection::selected_text);
             println!("{label}/{drag_label}: window-len={}", win.trim().len());
         }
     }
@@ -207,8 +209,12 @@ fn selection_works_in_second_of_two_tiles(cx: &mut TestAppContext) {
         ("right-msg0", "20 line", 60., 260.),
         ("right-cross", "line", 60., 690.),
     ] {
-        drag(cx, Point::new(x_mid, px(y0)), Point::new(x_mid + px(10.), px(y1)));
-        let win = cx.update(|window, cx| TextSelection::selected_text(window, cx));
+        drag(
+            cx,
+            Point::new(x_mid, px(y0)),
+            Point::new(x_mid + px(10.), px(y1)),
+        );
+        let win = cx.update(TextSelection::selected_text);
         assert!(
             win.contains(needle),
             "{label}: expected readout containing {needle}, got {win:?}"

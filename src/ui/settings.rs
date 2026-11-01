@@ -27,20 +27,11 @@ pub struct SettingsBuffers {
     pub lunch_end: String,
     pub off_hours_start: String,
     pub workday_start: String,
-    pub text_compact: bool,
-    pub text_normal: bool,
-    pub text_large: bool,
     pub accent_key: String,
 }
 
 impl SettingsBuffers {
     pub fn from_settings(s: &crate::settings::AppSettings) -> Self {
-        let (text_compact, text_normal, text_large) =
-            match theme::normalize_font_scale(s.font_scale.as_deref()) {
-                theme::FONT_COMPACT => (true, false, false),
-                theme::FONT_LARGE => (false, false, true),
-                _ => (false, true, false),
-            };
         Self {
             open_code_executable: s.open_code_executable.clone(),
             dsh_executable: s.dsh_executable.clone(),
@@ -62,9 +53,6 @@ impl SettingsBuffers {
             lunch_end: s.lunch_end_hour.to_string(),
             off_hours_start: s.off_hours_start_hour.to_string(),
             workday_start: s.workday_start_hour.to_string(),
-            text_compact,
-            text_normal,
-            text_large,
             accent_key: theme::normalize_accent(s.accent.as_deref()).key.to_string(),
         }
     }
@@ -137,16 +125,6 @@ impl SettingsBuffers {
                 Self::parse_int(&self.off_hours_start, set.off_hours_start_hour, 18);
             set.workday_start_hour =
                 Self::parse_int(&self.workday_start, set.workday_start_hour, 8);
-            set.font_scale = Some(
-                (if self.text_compact {
-                    theme::FONT_COMPACT
-                } else if self.text_large {
-                    theme::FONT_LARGE
-                } else {
-                    theme::FONT_NORMAL
-                })
-                .to_string(),
-            );
             set.accent = Some(self.accent_key.clone());
             s.apply_saved_settings(cx);
         });

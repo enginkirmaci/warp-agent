@@ -1,12 +1,11 @@
-//! The WarpAgent palette: the family palette and fonts from warpui-kit-core,
-//! re-exported under the app's `theme::` paths, plus the accent-preset swap
-//! and the app-only sidebar metrics. Surfaces step canvas < titlebar < card
-//! < popup < field; font/icon size tokens ride one factor so the settings
-//! text-size variant rescales the whole UI.
+//! The WarpAgent palette: the family palette, type and scale from
+//! warpui-kit-core, re-exported under the app's `theme::` paths, plus the
+//! accent-preset swap and the app-only sidebar metrics. Surfaces step chrome <
+//! canvas < card < popup < chip; font/icon size tokens ride one factor so the
+//! shared text size rescales the whole UI.
 
 pub use warpui_kit_core::fonts::{
-    FONT_COMPACT, FONT_LARGE, FONT_NORMAL, FontTokens, code_font, font_tokens,
-    normalize_font_scale, ui_font,
+    FontTokens, active_tokens, code_font, field_size, field_size_at, font_brand, ui_font,
 };
 // every shared color const stays reachable as `theme::X`
 pub use warpui_kit_core::palette::*;

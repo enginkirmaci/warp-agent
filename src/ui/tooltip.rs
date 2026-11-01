@@ -22,30 +22,30 @@ use crate::theme;
 pub struct TooltipHost {
     pub overlay: Entity<TooltipOverlay>,
     pub enabled: bool,
-    pub font_xsmall: f32,
+    pub font_meta: f32,
 }
 
 impl Global for TooltipHost {}
 
 /// Installs the overlay; the caller renders the returned entity as the
 /// window's last child so tooltips paint above everything.
-pub fn install(cx: &mut App, font_xsmall: f32) -> Entity<TooltipOverlay> {
+pub fn install(cx: &mut App, font_meta: f32) -> Entity<TooltipOverlay> {
     let overlay = cx.new(|_| TooltipOverlay::new());
     cx.set_global(TooltipHost {
         overlay: overlay.clone(),
         enabled: true,
-        font_xsmall,
+        font_meta,
     });
     overlay
 }
 
 /// Pushes the settings-page toggle and text-size changes into the host; a
 /// no-op before the window exists.
-pub fn sync_settings(cx: &mut App, enabled: bool, font_xsmall: f32) {
+pub fn sync_settings(cx: &mut App, enabled: bool, font_meta: f32) {
     if cx.has_global::<TooltipHost>() {
         let host = cx.global_mut::<TooltipHost>();
         host.enabled = enabled;
-        host.font_xsmall = font_xsmall;
+        host.font_meta = font_meta;
     }
 }
 
@@ -58,7 +58,7 @@ impl Render for Tip {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let size = cx
             .try_global::<TooltipHost>()
-            .map(|h| h.font_xsmall)
+            .map(|h| h.font_meta)
             .unwrap_or(11.0);
         div()
             .px_2()

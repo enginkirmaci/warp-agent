@@ -1723,7 +1723,6 @@ pub struct Store {
     pub ui: UiState,
     pub accent: AccentColors,
     pub fonts: FontTokens,
-    pub system_font_factor: f32,
     pub tool_tips_visible: bool,
 
     pub workspaces: Vec<WorkspaceItem>,
@@ -1858,9 +1857,8 @@ impl Store {
         if settings.auto_allow_always.is_none() && ui.auto_allow_always.is_some() {
             // keep reading from ui state like the C# fallback until settings has it
         }
-        let system_font_factor = 1.0;
         let accent_preset = theme::normalize_accent(settings.accent.as_deref());
-        let fonts = theme::font_tokens(settings.font_scale.as_deref(), system_font_factor);
+        let fonts = theme::active_tokens();
         let auto_allow = ui.auto_allow_always.unwrap_or(true);
 
         if ui.workspaces.is_empty()
@@ -1908,7 +1906,6 @@ impl Store {
             ui: ui.clone(),
             accent: AccentColors::for_preset(accent_preset),
             fonts,
-            system_font_factor,
             tool_tips_visible: settings.show_tool_tips,
             workspaces: Vec::new(),
             selected_workspace: None,
@@ -2592,9 +2589,13 @@ impl Store {
             .find(|ws| ws.folder_path() == path)
             .map(|ws| ws.name.clone())
             .unwrap_or_else(|| path.to_string());
-        tracing::info!("stopping the {name} server ({} min idle)", self.settings.server_idle_stop_min);
-        self.net
-            .send(NetCommand::StopServer { ws_key: path.into() });
+        tracing::info!(
+            "stopping the {name} server ({} min idle)",
+            self.settings.server_idle_stop_min
+        );
+        self.net.send(NetCommand::StopServer {
+            ws_key: path.into(),
+        });
         self.runtimes.remove(path);
         self.crash_restarts.remove(path);
         self.reconnect_notes.remove(path);
@@ -6603,21 +6604,29 @@ impl Store {
         self.ui.save();
     }
 
+    /// The text size or the desktop text scaling moved: re-reads the ladder
+    /// and re-maps the kit, which sizes its own text in rem off the theme's
+    /// font_size.
+    pub fn rescale_fonts(&mut self, cx: &mut Context<Self>) {
+        self.fonts = theme::active_tokens();
+        theme::apply_kit_theme(self.accent, &self.fonts, cx);
+        crate::ui::tooltip::sync_settings(cx, self.tool_tips_visible, self.fonts.font_meta);
+        cx.notify();
+    }
+
     /// Settings page applied: pushes persisted values back into live state.
     pub fn apply_saved_settings(&mut self, cx: &mut Context<Self>) {
         if let Some(allowed) = self.settings.auto_allow_always {
             self.auto_allow = allowed;
         }
         self.ui.auto_allow_always = Some(self.auto_allow);
-        self.fonts =
-            theme::font_tokens(self.settings.font_scale.as_deref(), self.system_font_factor);
         self.accent =
             AccentColors::for_preset(theme::normalize_accent(self.settings.accent.as_deref()));
         // re-map the kit theme so input selection/ring/primary follow the preset
         // (Theme::update refreshes every window)
         theme::apply_kit_theme(self.accent, &self.fonts, cx);
         self.tool_tips_visible = self.settings.show_tool_tips;
-        crate::ui::tooltip::sync_settings(cx, self.tool_tips_visible, self.fonts.font_xsmall);
+        crate::ui::tooltip::sync_settings(cx, self.tool_tips_visible, self.fonts.font_meta);
         // push the MCP master switch into running servers right away: disable
         // severs every configured server, re-enabling reconnects all but the
         // ones the user individually toggled off (best-effort, ignores 404)

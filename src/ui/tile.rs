@@ -22,6 +22,7 @@ use gpui::{
     AccessibleAction, App, Context, Entity, Focusable, ImageFormat, MouseButton, Pixels, Render,
     Role, ScrollHandle, SharedString, Toggled, Window, actions, canvas, div, img, px, relative,
 };
+use gpui_kit::component::Sizable as _;
 use gpui_kit::component::input::{
     Enter, Escape, Input, InputEvent, InputState, MoveDown, MoveUp, Position, Textarea,
     TextareaState,
@@ -613,7 +614,7 @@ impl TileView {
                                 // selectable TextView (not plain div text) so
                                 // the user's own message can be mouse-selected
                                 div()
-                                    .text_size(px(fonts.font_body_large))
+                                    .text_size(px(fonts.font_brand))
                                     .text_color(theme::TEXT)
                                     .child(
                                         gpui_kit::base::text::TextView::markdown(
@@ -668,7 +669,7 @@ impl TileView {
                                     .child(div().flex_1())
                                     .child(
                                         div()
-                                            .text_size(px(fonts.font_micro))
+                                            .text_size(px(fonts.font_control))
                                             .text_color(theme::TEXT_FAINT)
                                             .child(time),
                                     ),
@@ -763,13 +764,13 @@ impl TileView {
                                     .child(div().flex_1())
                                     .child(
                                         div()
-                                            .text_size(px(fonts.font_micro))
+                                            .text_size(px(fonts.font_control))
                                             .text_color(theme::TEXT_FAINT)
                                             .child(meta),
                                     )
                                     .child(
                                         div()
-                                            .text_size(px(fonts.font_micro))
+                                            .text_size(px(fonts.font_control))
                                             .text_color(theme::TEXT_FAINT)
                                             .child(time),
                                     ),
@@ -791,7 +792,7 @@ impl TileView {
                                 "fold-thinking".into(),
                                 TileView::hash(item_id),
                             ))
-                            .text_size(px(fonts.font_detail))
+                            .text_size(px(fonts.font_meta))
                             .text_color(theme::TEXT_DIM)
                             .child(
                                 gpui_kit::base::text::TextView::markdown(
@@ -862,13 +863,13 @@ impl TileView {
                                     .gap_2()
                                     .child(
                                         div()
-                                            .text_size(px(fonts.font_xsmall))
+                                            .text_size(px(fonts.font_meta))
                                             .text_color(theme::TEXT_DIM)
                                             .child(SharedString::from(file_name.clone())),
                                     )
                                     .child(
                                         div()
-                                            .text_size(px(fonts.font_micro))
+                                            .text_size(px(fonts.font_control))
                                             .text_color(theme::TEXT_FAINT)
                                             .child(time),
                                     ),
@@ -905,7 +906,7 @@ impl TileView {
                                         .child(div().size(px(7.)).rounded_full().bg(theme::DANGER))
                                         .child(
                                             div()
-                                                .text_size(px(fonts.font_small))
+                                                .text_size(px(fonts.font_body))
                                                 .text_color(theme::DANGER)
                                                 .child(
                                                     self.selectable_text(item_id, text, "errnote"),
@@ -918,7 +919,7 @@ impl TileView {
                     div()
                         .w_full()
                         .text_align(gpui::TextAlign::Center)
-                        .text_size(px(fonts.font_detail))
+                        .text_size(px(fonts.font_meta))
                         .text_color(theme::TEXT_MUTED)
                         .italic()
                         .py_0p5()
@@ -958,7 +959,7 @@ impl TileView {
                             .px_1p5()
                             .py_0p5()
                             .bg(theme::CHIP)
-                            .text_size(px(fonts.font_xsmall))
+                            .text_size(px(fonts.font_meta))
                             .font_family(theme::code_font())
                             .text_color(theme::TEXT)
                             .child(SharedString::from(tool.tool.clone())),
@@ -967,7 +968,7 @@ impl TileView {
                         div()
                             .flex_1()
                             .min_w_0()
-                            .text_size(px(fonts.font_body))
+                            .text_size(px(fonts.font_heading))
                             .text_color(theme::TEXT_DIM)
                             .truncate()
                             .child(
@@ -981,7 +982,7 @@ impl TileView {
                     )
                     .child(
                         div()
-                            .text_size(px(fonts.font_xsmall))
+                            .text_size(px(fonts.font_meta))
                             .text_color(theme::TEXT_FAINT)
                             .child(SharedString::from(tool.status.clone())),
                     ),
@@ -990,7 +991,7 @@ impl TileView {
                 d.child(
                     div()
                         .max_w(px(520.))
-                        .text_size(px(fonts.font_detail))
+                        .text_size(px(fonts.font_meta))
                         .text_color(theme::DANGER)
                         .truncate()
                         .child(SharedString::from(tool.error_preview.clone())),
@@ -1017,7 +1018,7 @@ impl TileView {
                         .child(render_diff(
                             tool.diff.as_deref().unwrap_or(""),
                             Some(&tool.file_path),
-                            fonts.font_detail,
+                            fonts.font_meta,
                             window,
                             cx,
                         )),
@@ -1108,7 +1109,7 @@ impl TileView {
             .gap_1()
             .child(
                 div()
-                    .text_size(px(fonts.font_xsmall))
+                    .text_size(px(fonts.font_meta))
                     .text_color(theme::TEXT_FAINT)
                     .child(SharedString::from(label.to_string())),
             )
@@ -1117,7 +1118,7 @@ impl TileView {
                     text,
                     Some(lang),
                     color,
-                    fonts.font_detail,
+                    fonts.font_meta,
                     window,
                     cx,
                 )),
@@ -1125,7 +1126,7 @@ impl TileView {
                     .rounded_md()
                     .bg(theme::CHIP)
                     .p_2()
-                    .text_size(px(fonts.font_detail))
+                    .text_size(px(fonts.font_meta))
                     .font_family(theme::code_font())
                     .text_color(color)
                     .child(self.selectable_text(cache_key, text, "tooldetails")),
@@ -1256,12 +1257,12 @@ impl TileView {
                 } else {
                     "icons/chevron-right.svg"
                 },
-                px(fonts.icon_xsmall),
+                px(fonts.icon_small),
                 theme::TEXT_MUTED,
             ))
             .child(
                 div()
-                    .text_size(px(fonts.font_xsmall))
+                    .text_size(px(fonts.font_meta))
                     .text_color(theme::TEXT_FAINT)
                     .child(label),
             )
@@ -1270,14 +1271,14 @@ impl TileView {
                     d.child(
                         div().flex().gap_1().child(
                             div()
-                                .text_size(px(fonts.font_xsmall))
+                                .text_size(px(fonts.font_meta))
                                 .text_color(theme::ADD)
                                 .child(format!("{adds}")),
                         ),
                     )
                     .child(
                         div()
-                            .text_size(px(fonts.font_xsmall))
+                            .text_size(px(fonts.font_meta))
                             .text_color(theme::DEL)
                             .child(format!("{dels}")),
                     )
@@ -1325,12 +1326,12 @@ impl TileView {
                                     .gap_2()
                                     .child(crate::ui::icon(
                                         "icons/shield.svg",
-                                        px(fonts.icon_body),
+                                        px(fonts.icon_medium),
                                         theme::WARN,
                                     ))
                                     .child(
                                         div()
-                                            .text_size(px(fonts.font_body))
+                                            .text_size(px(fonts.font_heading))
                                             .font_weight(gpui::FontWeight::SEMIBOLD)
                                             .text_color(theme::WARN)
                                             .child(SharedString::from(perm.kind.clone())),
@@ -1338,7 +1339,7 @@ impl TileView {
                             )
                             .child(
                                 div()
-                                    .text_size(px(fonts.font_detail))
+                                    .text_size(px(fonts.font_meta))
                                     .font_family(theme::code_font())
                                     .text_color(theme::TEXT_DIM)
                                     .child(SharedString::from(perm.detail.clone())),
@@ -1364,7 +1365,7 @@ impl TileView {
                                             "Allow",
                                             BtnKind::Primary(on_accent),
                                             accent,
-                                            fonts.font_body,
+                                            fonts.font_heading,
                                             true,
                                             {
                                                 let store = store.clone();
@@ -1384,7 +1385,7 @@ impl TileView {
                                             "Always",
                                             BtnKind::Chip,
                                             accent,
-                                            fonts.font_body,
+                                            fonts.font_heading,
                                             true,
                                             {
                                                 let store = store.clone();
@@ -1406,7 +1407,7 @@ impl TileView {
                                             "Deny",
                                             BtnKind::Chip,
                                             accent,
-                                            fonts.font_body,
+                                            fonts.font_heading,
                                             true,
                                             {
                                                 let store = store.clone();
@@ -1424,7 +1425,7 @@ impl TileView {
                                             d.child(
                                                 div()
                                                     .italic()
-                                                    .text_size(px(fonts.font_xsmall))
+                                                    .text_size(px(fonts.font_meta))
                                                     .text_color(theme::TEXT_FAINT)
                                                     .child(auto_text),
                                             )
@@ -1435,7 +1436,7 @@ impl TileView {
                                 d.child(
                                     div()
                                         .italic()
-                                        .text_size(px(fonts.font_detail))
+                                        .text_size(px(fonts.font_meta))
                                         .text_color(theme::TEXT_DIM)
                                         .child(SharedString::from(
                                             perm.answer.clone().unwrap_or_default(),
@@ -1461,7 +1462,7 @@ impl TileView {
                                             render_diff(
                                                 perm.diff.as_deref().unwrap_or(""),
                                                 None,
-                                                fonts.font_detail,
+                                                fonts.font_meta,
                                                 window,
                                                 cx,
                                             ),
@@ -1495,14 +1496,14 @@ impl TileView {
                     .child(div().size(px(7.)).rounded_full().bg(accent))
                     .child(
                         div()
-                            .text_size(px(fonts.font_body))
+                            .text_size(px(fonts.font_heading))
                             .font_weight(gpui::FontWeight::SEMIBOLD)
                             .text_color(theme::TEXT)
                             .child("question"),
                     )
                     .child(
                         div()
-                            .text_size(px(fonts.font_xsmall))
+                            .text_size(px(fonts.font_meta))
                             .text_color(theme::TEXT_FAINT)
                             .child("pick an answer for each question"),
                     ),
@@ -1536,7 +1537,7 @@ impl TileView {
                         "Answer",
                         BtnKind::Primary(on_accent),
                         accent,
-                        fonts.font_body,
+                        fonts.font_heading,
                         can_submit,
                         {
                             let store = store.clone();
@@ -1578,7 +1579,7 @@ impl TileView {
             card = card.child(
                 div()
                     .italic()
-                    .text_size(px(fonts.font_small))
+                    .text_size(px(fonts.font_body))
                     .text_color(theme::TEXT_FAINT)
                     .child(self.selectable_text(&format!("{item_id}:res"), resolution, "qres")),
             );
@@ -1672,7 +1673,7 @@ impl TileView {
             .when(!entry.header.is_empty(), |d| {
                 d.child(
                     div()
-                        .text_size(px(fonts.font_xsmall))
+                        .text_size(px(fonts.font_meta))
                         .font_weight(gpui::FontWeight::SEMIBOLD)
                         .text_color(theme::TEXT_FAINT)
                         .child(SharedString::from(entry.header.clone())),
@@ -1680,7 +1681,7 @@ impl TileView {
             })
             .child(
                 div()
-                    .text_size(px(fonts.font_body))
+                    .text_size(px(fonts.font_heading))
                     .text_color(theme::TEXT)
                     .child(self.selectable_text(
                         &format!("{item_id}#{qi}"),
@@ -1797,7 +1798,7 @@ impl TileView {
                             .min_w_0()
                             .child(
                                 div()
-                                    .text_size(px(fonts.font_body))
+                                    .text_size(px(fonts.font_heading))
                                     .font_weight(gpui::FontWeight::SEMIBOLD)
                                     .text_color(theme::TEXT)
                                     .child(SharedString::from(label)),
@@ -1805,7 +1806,7 @@ impl TileView {
                             .when(!description.is_empty(), |d| {
                                 d.child(
                                     div()
-                                        .text_size(px(fonts.font_detail))
+                                        .text_size(px(fonts.font_meta))
                                         .text_color(theme::TEXT_FAINT)
                                         .child(SharedString::from(description)),
                                 )
@@ -1833,6 +1834,7 @@ impl TileView {
 struct TileSnap {
     fonts: theme::FontTokens,
     accent: gpui::Rgba,
+    accent_text: gpui::Rgba,
     input: String,
     is_busy: bool,
     is_connected: bool,
@@ -1908,7 +1910,7 @@ impl TileView {
                 )
                 .child(
                     div()
-                        .text_size(px(fonts.font_small))
+                        .text_size(px(fonts.font_body))
                         .text_color(theme::WARN)
                         .child("reconnecting"),
                 ),
@@ -1931,7 +1933,7 @@ impl TileView {
                 .child(
                     div()
                         .max_w(px(160.))
-                        .text_size(px(fonts.font_micro))
+                        .text_size(px(fonts.font_control))
                         .text_color(theme::TEXT_FAINT)
                         .truncate()
                         .child(SharedString::from(snap.ctx.clone())),
@@ -1998,7 +2000,7 @@ impl TileView {
                 )
                 .child(crate::ui::icon(
                     "icons/close.svg",
-                    px(fonts.icon_xsmall),
+                    px(fonts.icon_small),
                     theme::TEXT_MUTED,
                 )),
             )
@@ -2017,7 +2019,7 @@ impl TileView {
                     .ml_2()
                     .flex_1()
                     .min_w_0()
-                    .text_size(px(fonts.font_body))
+                    .text_size(px(fonts.font_heading))
                     .font_weight(gpui::FontWeight::SEMIBOLD)
                     .text_color(theme::TEXT)
                     .truncate()
@@ -2059,14 +2061,14 @@ impl TileView {
                                 .gap_0p5()
                                 .child(
                                     div()
-                                        .text_size(px(fonts.font_body_large))
+                                        .text_size(px(fonts.font_brand))
                                         .text_color(theme::TEXT)
                                         .child(SharedString::from(text)),
                                 )
                                 .when(count > 0, |d| {
                                     d.child(
                                         div()
-                                            .text_size(px(fonts.font_xsmall))
+                                            .text_size(px(fonts.font_meta))
                                             .text_color(theme::TEXT_FAINT)
                                             .child(format!("{count} attachment(s)")),
                                     )
@@ -2090,7 +2092,7 @@ impl TileView {
                                     .bg(theme::CHIP)
                                     .hover(|s| s.bg(theme::QUEUED_BORDER))
                                     .cursor_pointer()
-                                    .text_size(px(fonts.font_xsmall))
+                                    .text_size(px(fonts.font_meta))
                                     .text_color(theme::TEXT)
                                     .flex()
                                     .items_center()
@@ -2136,7 +2138,7 @@ impl TileView {
                             })
                             .child(crate::ui::icon(
                                 "icons/edit.svg",
-                                px(fonts.icon_xsmall),
+                                px(fonts.icon_small),
                                 theme::TEXT_MUTED,
                             )),
                         )
@@ -2166,7 +2168,7 @@ impl TileView {
                             })
                             .child(crate::ui::icon(
                                 "icons/close.svg",
-                                px(fonts.icon_xsmall),
+                                px(fonts.icon_small),
                                 theme::TEXT_MUTED,
                             )),
                         ),
@@ -2225,7 +2227,7 @@ impl TileView {
                         })
                         .child(crate::ui::icon(
                             "icons/close.svg",
-                            px(fonts.icon_xsmall),
+                            px(fonts.icon_small),
                             theme::TEXT_MUTED,
                         )),
                 );
@@ -2239,7 +2241,7 @@ impl TileView {
     /// The chrome-less selector pills: agent, model and variant.
     fn render_pills(&mut self, snap: &TileSnap, cx: &mut Context<Self>) -> gpui::AnyElement {
         let fonts = snap.fonts;
-        let accent = snap.accent;
+        let accent_text = snap.accent_text;
         let mut pills = div().flex().items_center().gap_1();
         // harness pill: click toggles opencode ↔ dsh on a draft; a chat that
         // already has a session is bound to the server it was created on
@@ -2266,7 +2268,7 @@ impl TileView {
                     .cursor_pointer()
                     .text_color(theme::TEXT_MUTED)
                     .when(!snap.harness_locked, |d| {
-                        d.hover(|s| s.bg(theme::HOVER).text_color(accent))
+                        d.hover(|s| s.bg(theme::HOVER).text_color(accent_text))
                     })
                     .when(snap.harness_locked, |d| d.opacity(0.4)),
                 if snap.harness_locked {
@@ -2282,7 +2284,7 @@ impl TileView {
             )
             .child(
                 div()
-                    .text_size(px(fonts.font_small))
+                    .text_size(px(fonts.font_body))
                     .child(SharedString::from(snap.harness_label)),
             )
             .child(crate::ui::icon(
@@ -2312,7 +2314,7 @@ impl TileView {
                         .rounded_lg()
                         .cursor_pointer()
                         .text_color(theme::TEXT_MUTED)
-                        .hover(|s| s.bg(theme::HOVER).text_color(accent)),
+                        .hover(|s| s.bg(theme::HOVER).text_color(accent_text)),
                     "Agent",
                 )
                 .on_click(cx.listener(|this, _, window, cx| this.toggle_agent_picker(window, cx)))
@@ -2322,7 +2324,7 @@ impl TileView {
                 )
                 .child(
                     div()
-                        .text_size(px(fonts.font_small))
+                        .text_size(px(fonts.font_body))
                         .child(SharedString::from(if snap.selected_agent.is_empty() {
                             crate::store::DEFAULT_AGENT_ENTRY.to_string()
                         } else {
@@ -2359,7 +2361,7 @@ impl TileView {
                         .rounded_lg()
                         .cursor_pointer()
                         .text_color(theme::TEXT_MUTED)
-                        .hover(|s| s.bg(theme::HOVER).text_color(accent)),
+                        .hover(|s| s.bg(theme::HOVER).text_color(accent_text)),
                     "Model",
                 )
                 .on_click(cx.listener(|this, _, window, cx| this.toggle_model_picker(window, cx)))
@@ -2369,7 +2371,7 @@ impl TileView {
                 )
                 .child(
                     div()
-                        .text_size(px(fonts.font_small))
+                        .text_size(px(fonts.font_body))
                         .child(SharedString::from(
                             if snap.selected_model_short.is_empty() {
                                 crate::store::DEFAULT_MODEL_ENTRY.to_string()
@@ -2401,7 +2403,7 @@ impl TileView {
                         .cursor_pointer()
                         .when(snap.has_variants, |d| {
                             d.text_color(theme::TEXT_MUTED)
-                                .hover(|s| s.bg(theme::HOVER).text_color(accent))
+                                .hover(|s| s.bg(theme::HOVER).text_color(accent_text))
                         })
                         .when(!snap.has_variants, |d| d.opacity(0.4)),
                     "Response variant",
@@ -2413,12 +2415,12 @@ impl TileView {
                 )
                 .child(crate::ui::icon(
                     "icons/gauge.svg",
-                    px(fonts.icon_body),
+                    px(fonts.icon_medium),
                     theme::TEXT_MUTED,
                 ))
                 .child(
                     div()
-                        .text_size(px(fonts.font_small))
+                        .text_size(px(fonts.font_body))
                         .child(SharedString::from(snap.selected_variant.clone())),
                 )
                 .child(crate::ui::icon(
@@ -2515,7 +2517,7 @@ impl TileView {
     /// while the workspace is disconnected).
     fn render_send_button(&self, snap: &TileSnap) -> gpui::AnyElement {
         let fonts = snap.fonts;
-        let accent = snap.accent;
+        let accent_text = snap.accent_text;
         if snap.is_busy {
             let store = self.store.clone();
             let key = self.key.clone();
@@ -2570,7 +2572,7 @@ impl TileView {
                     .cursor_pointer()
                     .when(snap.is_connected, |d| {
                         d.text_color(theme::TEXT_MUTED)
-                            .hover(|s| s.bg(theme::HOVER).text_color(accent))
+                            .hover(|s| s.bg(theme::HOVER).text_color(accent_text))
                     })
                     .when(!snap.is_connected, |d| d.opacity(0.4))
                     .on_click(move |_, _, cx| {
@@ -2611,14 +2613,14 @@ impl TileView {
                             .items_center()
                             .child(
                                 div()
-                                    .text_size(px(fonts.font_body_large))
+                                    .text_size(px(fonts.font_brand))
                                     .font_weight(gpui::FontWeight::SEMIBOLD)
                                     .text_color(theme::TEXT)
                                     .child("Progress"),
                             )
                             .child(
                                 div()
-                                    .text_size(px(fonts.font_detail))
+                                    .text_size(px(fonts.font_meta))
                                     .text_color(theme::TEXT_FAINT)
                                     .child(SharedString::from(snap.tasks_progress.clone())),
                             ),
@@ -2632,7 +2634,7 @@ impl TileView {
                                 (
                                     crate::ui::icon(
                                         "icons/circle-check.svg",
-                                        px(fonts.icon_body),
+                                        px(fonts.icon_medium),
                                         theme::TEXT_MUTED,
                                     ),
                                     theme::TEXT_MUTED,
@@ -2641,7 +2643,7 @@ impl TileView {
                                 (
                                     crate::ui::icon(
                                         "icons/play.svg",
-                                        px(fonts.icon_body),
+                                        px(fonts.icon_medium),
                                         theme::TEXT_DIM,
                                     ),
                                     theme::TEXT,
@@ -2650,7 +2652,7 @@ impl TileView {
                                 (
                                     crate::ui::icon(
                                         "icons/dash.svg",
-                                        px(fonts.icon_body),
+                                        px(fonts.icon_medium),
                                         theme::TEXT_FAINT,
                                     ),
                                     theme::TEXT_FAINT,
@@ -2659,7 +2661,7 @@ impl TileView {
                                 (
                                     crate::ui::icon(
                                         "icons/circle.svg",
-                                        px(fonts.icon_body),
+                                        px(fonts.icon_medium),
                                         theme::TEXT_FAINT,
                                     ),
                                     theme::TEXT_DIM,
@@ -2668,7 +2670,7 @@ impl TileView {
                             list = list.child(
                                 div().flex().items_start().gap_2().py_1().child(icon).child(
                                     div()
-                                        .text_size(px(fonts.font_body))
+                                        .text_size(px(fonts.font_heading))
                                         .text_color(text)
                                         .child(SharedString::from(task.content.clone())),
                                 ),
@@ -2689,14 +2691,14 @@ impl TileView {
                             .items_center()
                             .child(
                                 div()
-                                    .text_size(px(fonts.font_body_large))
+                                    .text_size(px(fonts.font_brand))
                                     .font_weight(gpui::FontWeight::SEMIBOLD)
                                     .text_color(theme::TEXT)
                                     .child("Agents"),
                             )
                             .child(
                                 div()
-                                    .text_size(px(fonts.font_detail))
+                                    .text_size(px(fonts.font_meta))
                                     .text_color(theme::TEXT_FAINT)
                                     .child(SharedString::from(snap.agents_summary.clone())),
                             ),
@@ -2751,7 +2753,7 @@ impl TileView {
                                     .when(agent.needs_attention, |d| {
                                         d.child(crate::ui::icon(
                                             "icons/warn.svg",
-                                            px(fonts.icon_body),
+                                            px(fonts.icon_medium),
                                             theme::WARN,
                                         ))
                                     })
@@ -2762,7 +2764,7 @@ impl TileView {
                                             .child(
                                                 div()
                                                     .max_w(px(220.))
-                                                    .text_size(px(fonts.font_body))
+                                                    .text_size(px(fonts.font_heading))
                                                     .text_color(theme::TEXT)
                                                     .truncate()
                                                     .child(SharedString::from(agent.title.clone())),
@@ -2770,7 +2772,7 @@ impl TileView {
                                             .when(snap.multiple_workspaces, |d| {
                                                 d.child(
                                                     div()
-                                                        .text_size(px(fonts.font_micro))
+                                                        .text_size(px(fonts.font_control))
                                                         .text_color(theme::TEXT_FAINT)
                                                         .child(SharedString::from(
                                                             agent.workspace.clone(),
@@ -2810,7 +2812,7 @@ impl TileView {
                                             })
                                             .child(crate::ui::icon(
                                                 "icons/stop.svg",
-                                                px(fonts.icon_xsmall),
+                                                px(fonts.icon_small),
                                                 theme::TEXT_MUTED,
                                             )),
                                     ),
@@ -2957,7 +2959,7 @@ impl TileView {
                                 .px_2()
                                 .py_1()
                                 .rounded_md()
-                                .text_size(px(fonts.font_small))
+                                .text_size(px(fonts.font_body))
                                 .text_color(theme::TEXT)
                                 .cursor_pointer()
                                 .hover(|s| s.bg(theme::HOVER))
@@ -3065,7 +3067,7 @@ impl TileView {
                     gpui::ElementId::NamedInteger("menu-row".into(), ix as u64),
                     label,
                     false,
-                    fonts.font_small,
+                    fonts.font_body,
                     move |_, window, cx| {
                         match &item {
                             ContextMenu::Copy(text) => {
@@ -3158,6 +3160,7 @@ impl TileView {
     ) -> gpui::AnyElement {
         let fonts = snap.fonts;
         let accent = snap.accent;
+        let accent_text = snap.accent_text;
         let attachments_el = self.render_attachments(snap);
         let pills = self.render_pills(snap, cx);
         let composer_focus_is = self.composer_focused;
@@ -3180,7 +3183,7 @@ impl TileView {
                                 .p_1()
                                 .rounded_md()
                                 .text_color(theme::TEXT_MUTED)
-                                .hover(|s| s.text_color(accent))
+                                .hover(|s| s.text_color(accent_text))
                                 .on_click(cx.listener(|this, _, window, cx| {
                                     this.pick_files(window, cx);
                                 })),
@@ -3439,6 +3442,7 @@ impl Render for TileView {
             TileSnap {
                 fonts: store.fonts,
                 accent: store.accent.accent,
+                accent_text: store.accent.text,
                 input: tile.input.clone(),
                 is_busy: tile.is_busy(store),
                 is_connected: tile
@@ -3658,7 +3662,7 @@ impl Render for TileView {
                         ))
                         .child(
                             div()
-                                .text_size(px(fonts.font_small))
+                                .text_size(px(fonts.font_body))
                                 .italic()
                                 .text_color(theme::TEXT_FAINT)
                                 .child(
@@ -4044,9 +4048,9 @@ impl Render for SuggestMenu {
         if !self.open {
             return div().into_any_element();
         }
-        let (fonts, accent) = {
+        let (fonts, accent_text) = {
             let store = self.store.read(cx);
-            (store.fonts, store.accent.accent)
+            (store.fonts, store.accent.text)
         };
         // reading the composer value here is the point: the leaf re-renders
         // on every keystroke and the filter follows
@@ -4055,7 +4059,7 @@ impl Render for SuggestMenu {
             div()
                 .px_2()
                 .py_1()
-                .text_size(px(fonts.font_xsmall))
+                .text_size(px(fonts.font_meta))
                 .italic()
                 .text_color(theme::TEXT_FAINT)
                 .child(label)
@@ -4113,16 +4117,16 @@ impl Render for SuggestMenu {
                             .child(
                                 div()
                                     .flex_shrink_0()
-                                    .text_size(px(fonts.font_small))
+                                    .text_size(px(fonts.font_body))
                                     .font_weight(gpui::FontWeight::SEMIBOLD)
-                                    .text_color(accent)
+                                    .text_color(accent_text)
                                     .child(SharedString::from(format!("/{}", cmd.name))),
                             )
                             .child(
                                 div()
                                     .flex_1()
                                     .min_w_0()
-                                    .text_size(px(fonts.font_xsmall))
+                                    .text_size(px(fonts.font_meta))
                                     .text_color(theme::TEXT_MUTED)
                                     .truncate()
                                     .child({
@@ -4138,7 +4142,7 @@ impl Render for SuggestMenu {
                             .child(
                                 div()
                                     .flex_shrink_0()
-                                    .text_size(px(fonts.font_micro))
+                                    .text_size(px(fonts.font_control))
                                     .text_color(theme::TEXT_FAINT)
                                     .child(if cmd.source == "skill" {
                                         "skill"
@@ -4203,7 +4207,7 @@ impl Render for SuggestMenu {
                                         div()
                                             .flex_1()
                                             .min_w_0()
-                                            .text_size(px(fonts.font_xsmall))
+                                            .text_size(px(fonts.font_meta))
                                             .font_family(theme::code_font())
                                             .text_color(theme::TEXT_DIM)
                                             .truncate()
@@ -4264,7 +4268,7 @@ impl Render for QuestionField {
             .track_focus(&focus)
             .aria_label("Custom answer")
             .aria_placeholder("custom answer…")
-            .child(Input::new(&self.state))
+            .child(Input::new(&self.state).with_size(theme::field_size()))
     }
 }
 
@@ -4312,6 +4316,7 @@ impl Render for ComposerField {
             .w_full()
             .child(
                 Textarea::new(&self.state)
+                    .with_size(theme::field_size_at(theme::font_brand()))
                     .appearance(false)
                     .bordered(false)
                     .on_paste(move |item: &gpui::ClipboardItem, _, cx| {

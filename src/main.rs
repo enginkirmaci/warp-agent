@@ -98,6 +98,10 @@ fn main() {
                 .detach();
             }
 
+            // the shared text size, seeded once from this app's old setting
+            warpui_kit_core::adopt_text_size(store.read(cx).settings.font_scale.as_deref());
+            store.update(cx, |s, _| s.fonts = theme::active_tokens());
+
             // kit theme after the store so the saved accent preset (not the
             // blue default) drives input selection/ring/primary from launch
             let (accent, fonts) = {
@@ -190,9 +194,6 @@ fn main() {
                 if let Some(store) = shutdown_store.upgrade() {
                     store.update(cx, |s, _| s.shutdown());
                 }
-                // the services own OS children (the gsettings monitor) the
-                // store doesn't know about
-                services::shutdown();
                 cx.quit();
             })
             .detach();

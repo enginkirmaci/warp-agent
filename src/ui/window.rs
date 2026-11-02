@@ -1884,7 +1884,6 @@ impl WarpWindow {
                         .child(
                             div()
                                 .text_size(px(fonts.font_body))
-                                .italic()
                                 .text_color(theme::TEXT_FAINT)
                                 .child(hint),
                         ),

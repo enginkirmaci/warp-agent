@@ -3885,7 +3885,6 @@ impl Render for TileView {
                 .child(
                     div()
                         .text_size(px(fonts.font_body))
-                        .italic()
                         .text_color(theme::TEXT_FAINT)
                         .child("Nothing here yet — say hello, or / for commands · @ for files"),
                 )

@@ -33,14 +33,17 @@ integration surface.
 
 ## Package
 
-- Linux: `packaging/linux/install.sh` installs the desktop entry + hicolor
-  icons so the launcher shows the app; `Exec` points at
-  `target/debug/warp-agent`.
+Packaging is driven by the suite, not from this directory:
+
+- Linux: `scripts/build.sh --app warp-agent` stages the binary, the desktop
+  entry and hicolor icons; `scripts/deploy.sh --local` installs them.
 - Windows (build on a Windows box — GPUI has no Linux→Windows cross build):
-  `packaging/windows/build.ps1` produces a portable zip under
-  `packaging/windows/out`; `-Installer` also compiles the Inno Setup setup.exe.
-  The app icon is embedded into the exe by `build.rs` from
+  `scripts/build.ps1 -App warp-agent` writes the portable zip and the Inno
+  Setup installer. The app icon is embedded into the exe by `build.rs` from
   `packaging/windows/warp-agent.ico`.
+
+This directory only carries the assets: `packaging/linux/{*.desktop,icons}`,
+`packaging/windows/{*.ico,*.iss}`.
 
 ## Features
 

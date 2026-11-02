@@ -9,6 +9,15 @@
 #define MyAppName "Warp Agent"
 #define MyAppExeName "warp-agent.exe"
 
+; build.ps1 passes the staging dir and the dist output dir; the fallbacks keep
+; a manual `iscc warp-agent.iss` working against packaging\windows\out.
+#ifndef MySourceDir
+#define MySourceDir "out"
+#endif
+#ifndef MyOutputDir
+#define MyOutputDir "out"
+#endif
+
 [Setup]
 AppId={{9E6B4C7A-3D2F-4E18-A7C5-1F0B9D8E6A32}
 AppName={#MyAppName}
@@ -16,8 +25,8 @@ AppVersion={#MyAppVersion}
 DefaultDirName={autopf}\{#MyAppName}
 DefaultGroupName={#MyAppName}
 PrivilegesRequired=lowest
-ArchitecturesInstallIn64BitMode=x64
-OutputDir=out
+ArchitecturesInstallIn64BitMode=x64compatible
+OutputDir={#MyOutputDir}
 OutputBaseFilename=warp-agent-{#MyAppVersion}-setup-x64
 SetupIconFile=warp-agent.ico
 UninstallDisplayIcon={app}\{#MyAppExeName}
@@ -29,7 +38,7 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; \
     GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
 
 [Files]
-Source: "..\..\target\release\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#MySourceDir}\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
 Name: "{autoprograms}\{#MyAppName}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"

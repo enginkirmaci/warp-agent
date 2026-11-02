@@ -620,8 +620,9 @@ impl WarpWindow {
                     .bg(theme::brand_bg())
                     .border_1()
                     .border_color(theme::BRAND_BORDER)
+                    // the app's own mark, in the family's currentColor glyph
                     .child(crate::ui::icon(
-                        "icons/spark.svg",
+                        "icons/logo.svg",
                         px(fonts.icon_small),
                         theme::accent_ink(),
                     )),
@@ -2438,9 +2439,12 @@ struct InputLeaf {
 
 impl Render for InputLeaf {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        Input::new(&self.state)
-            .with_size(theme::field_size())
-            .disabled(self.disabled)
+        warpui_kit_core::shell::field(
+            "input-leaf",
+            Input::new(&self.state)
+                .with_size(theme::field_size())
+                .disabled(self.disabled),
+        )
     }
 }
 

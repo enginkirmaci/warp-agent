@@ -4507,7 +4507,10 @@ impl Render for QuestionField {
             .track_focus(&focus)
             .aria_label("Custom answer")
             .aria_placeholder("custom answer…")
-            .child(Input::new(&self.state).with_size(theme::field_size()))
+            .child(warpui_kit_core::shell::field(
+                "field-state",
+                Input::new(&self.state).with_size(theme::field_size()),
+            ))
     }
 }
 

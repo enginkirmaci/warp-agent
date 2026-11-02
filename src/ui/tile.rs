@@ -12,6 +12,43 @@ use warpui_kit_picker::{
     model_provider,
 };
 
+/// The tile head, one row of the shell's rhythm.
+const TILE_HEAD_HEIGHT: f32 = 44.;
+/// A message's measure: a tile can be far wider than a line should read.
+const MESSAGE_WIDTH: f32 = 760.;
+const CARD_WIDTH: f32 = 640.;
+const PILL_HEIGHT: f32 = 28.;
+const SEND_SIZE: f32 = 30.;
+
+/// How much of the tile's chrome fits its width. The window sets it: tiles are
+/// cached views, and a paint-time measure could not re-render them.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TileDensity {
+    #[default]
+    Full,
+    /// Under 560: the locked harness keeps its icon, the context its numbers.
+    Compact,
+    /// Under 440: the variant keeps its gauge, and Running its dot.
+    Tight,
+}
+
+impl TileDensity {
+    pub const COMPACT_WIDTH: f32 = 560.;
+    pub const TIGHT_WIDTH: f32 = 440.;
+
+    /// `scale` is the text size against the base ladder: larger text needs the
+    /// same room in fewer words.
+    pub fn for_width(width: f32, scale: f32) -> Self {
+        if width < Self::TIGHT_WIDTH * scale {
+            Self::Tight
+        } else if width < Self::COMPACT_WIDTH * scale {
+            Self::Compact
+        } else {
+            Self::Full
+        }
+    }
+}
+
 /// A model pick from the composer pill: applies through the store/tile.
 type ModelPick = Box<dyn Fn(&str, &mut App)>;
 use crate::ui::controls;
@@ -29,6 +66,7 @@ use gpui_kit::component::input::{
 };
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use warpui_kit_core::{motion, shell};
 use warpui_kit_diff::{render_code, render_diff, sniff_lang};
 
 // composer-only key overrides, bound in the "Input" context after
@@ -127,6 +165,7 @@ pub struct TileView {
     /// (see SuggestMenu below)
     suggest: Entity<SuggestMenu>,
     flyout_open: bool,
+    density: TileDensity,
     last_spring_seen: bool,
     /// item id whose copy button is flashing its "copied" state right now
     copied_flash: Option<String>,
@@ -259,11 +298,11 @@ fn context_ring(frac: f32) -> gpui::AnyElement {
     } else if frac >= 0.6 {
         theme::WARN
     } else {
-        theme::WORKING
+        theme::TEXT_DIM
     };
-    let track_color = theme::TEXT_MUTED;
+    let track_color = theme::LINE_STRONG;
     let dot = 2.6_f32;
-    let ring_size = 13.0_f32;
+    let ring_size = 16.0_f32;
     let radius = (ring_size - dot) / 2.;
     let segments = 28;
     let mut ring = div().relative().flex_shrink_0().size(px(ring_size));
@@ -289,7 +328,25 @@ fn context_ring(frac: f32) -> gpui::AnyElement {
     ring.into_any_element()
 }
 
+/// The word a tile's head shows while its chat waits on a person. The newest
+/// open card speaks for the chat.
+fn waiting_word<'a>(items: impl DoubleEndedIterator<Item = &'a ChatItem>) -> Option<&'static str> {
+    items.rev().find_map(|item| match item {
+        ChatItem::Permission(perm) if perm.is_pending() => Some("Needs approval"),
+        ChatItem::Question(question) if question.is_pending() => Some("Has a question"),
+        _ => None,
+    })
+}
+
 impl TileView {
+    /// The window's measure of this tile. Only a real change repaints it.
+    pub fn set_density(&mut self, density: TileDensity, cx: &mut Context<Self>) {
+        if self.density != density {
+            self.density = density;
+            cx.notify();
+        }
+    }
+
     pub fn new(
         store: Entity<Store>,
         key: String,
@@ -452,6 +509,7 @@ impl TileView {
             last_composer_text: String::new(),
             suggest,
             flyout_open: false,
+            density: TileDensity::default(),
             last_spring_seen: false,
             copied_flash: None,
             md_cache: HashMap::new(),
@@ -584,8 +642,9 @@ impl TileView {
                     .child(
                         div()
                             .group("umsg")
-                            .max_w(px(560.))
-                            .rounded_lg()
+                            .min_w_0()
+                            .max_w(px(MESSAGE_WIDTH))
+                            .rounded(px(8.))
                             .bg(theme::BUBBLE_USER)
                             .p_2()
                             .px_3()
@@ -614,7 +673,7 @@ impl TileView {
                                 // selectable TextView (not plain div text) so
                                 // the user's own message can be mouse-selected
                                 div()
-                                    .text_size(px(fonts.font_brand))
+                                    .text_size(px(fonts.font_body))
                                     .text_color(theme::TEXT)
                                     .child(
                                         gpui_kit::base::text::TextView::markdown(
@@ -669,8 +728,8 @@ impl TileView {
                                     .child(div().flex_1())
                                     .child(
                                         div()
-                                            .text_size(px(fonts.font_control))
-                                            .text_color(theme::TEXT_FAINT)
+                                            .text_size(px(fonts.font_micro))
+                                            .text_color(theme::TEXT_MUTED)
                                             .child(time),
                                     ),
                             ),
@@ -711,17 +770,17 @@ impl TileView {
                     .justify_start()
                     .child(
                         div()
-                            .max_w(px(640.))
+                            .min_w_0()
+                            .max_w(px(MESSAGE_WIDTH))
                             .group("amsg")
-                            .rounded_lg()
+                            .rounded(px(8.))
                             .bg(theme::BUBBLE_ASSISTANT)
-                            .border_1()
-                            .border_color(theme::HAIRLINE)
                             .p_2()
                             .px_3()
                             .flex()
                             .flex_col()
                             .gap_1()
+                            .text_size(px(fonts.font_body))
                             .child(markdown)
                             .child(
                                 // copy button shares the meta line: pinned left,
@@ -764,14 +823,14 @@ impl TileView {
                                     .child(div().flex_1())
                                     .child(
                                         div()
-                                            .text_size(px(fonts.font_control))
-                                            .text_color(theme::TEXT_FAINT)
+                                            .text_size(px(fonts.font_micro))
+                                            .text_color(theme::TEXT_MUTED)
                                             .child(meta),
                                     )
                                     .child(
                                         div()
-                                            .text_size(px(fonts.font_control))
-                                            .text_color(theme::TEXT_FAINT)
+                                            .text_size(px(fonts.font_micro))
+                                            .text_color(theme::TEXT_MUTED)
                                             .child(time),
                                     ),
                             ),
@@ -869,8 +928,8 @@ impl TileView {
                                     )
                                     .child(
                                         div()
-                                            .text_size(px(fonts.font_control))
-                                            .text_color(theme::TEXT_FAINT)
+                                            .text_size(px(fonts.font_micro))
+                                            .text_color(theme::TEXT_MUTED)
                                             .child(time),
                                     ),
                             ),
@@ -890,20 +949,22 @@ impl TileView {
                         .flex()
                         .child(
                             div()
-                                .max_w(px(640.))
-                                .rounded_lg()
+                                .min_w_0()
+                                .max_w(px(MESSAGE_WIDTH))
+                                .rounded(px(8.))
+                                .border_1()
+                                .border_color(theme::DANGER)
                                 .bg(theme::tint(theme::DANGER))
                                 .flex()
                                 .overflow_hidden()
-                                .child(div().w(px(3.)).my_2().mx_2().rounded_sm().bg(theme::DANGER))
                                 .child(
                                     div()
+                                        .min_w_0()
                                         .flex()
                                         .items_center()
                                         .gap_2()
                                         .py_2()
-                                        .pr_3()
-                                        .child(div().size(px(7.)).rounded_full().bg(theme::DANGER))
+                                        .px_3()
                                         .child(
                                             div()
                                                 .text_size(px(fonts.font_body))
@@ -952,14 +1013,14 @@ impl TileView {
                     .flex()
                     .items_center()
                     .gap_2()
-                    .mr_11()
+                    .min_w_0()
                     .child(
                         div()
-                            .rounded_md()
+                            .flex_shrink_0()
+                            .rounded(px(4.))
                             .px_1p5()
-                            .py_0p5()
-                            .bg(theme::CHIP)
-                            .text_size(px(fonts.font_meta))
+                            .bg(theme::RAISED)
+                            .text_size(px(fonts.font_mono_meta))
                             .font_family(theme::code_font())
                             .text_color(theme::TEXT)
                             .child(SharedString::from(tool.tool.clone())),
@@ -968,7 +1029,7 @@ impl TileView {
                         div()
                             .flex_1()
                             .min_w_0()
-                            .text_size(px(fonts.font_heading))
+                            .text_size(px(fonts.font_body))
                             .text_color(theme::TEXT_DIM)
                             .truncate()
                             .child(
@@ -982,15 +1043,20 @@ impl TileView {
                     )
                     .child(
                         div()
+                            .flex_shrink_0()
                             .text_size(px(fonts.font_meta))
-                            .text_color(theme::TEXT_FAINT)
+                            .text_color(if tool.is_error {
+                                theme::DANGER
+                            } else {
+                                theme::TEXT_MUTED
+                            })
                             .child(SharedString::from(tool.status.clone())),
                     ),
             )
             .when(tool.is_error && !tool.error_preview.is_empty(), |d| {
                 d.child(
                     div()
-                        .max_w(px(520.))
+                        .min_w_0()
                         .text_size(px(fonts.font_meta))
                         .text_color(theme::DANGER)
                         .truncate()
@@ -1234,11 +1300,11 @@ impl TileView {
             .aria_expanded(open)
             .flex()
             .items_center()
-            .gap_2()
-            .px_2()
-            .py_1()
-            .rounded_lg()
-            .hover(|s| s.bg(theme::HOVER))
+            .gap_1p5()
+            .px_1()
+            .py_0p5()
+            .rounded(px(6.))
+            .hover(|s| s.bg(theme::RAISED))
             .cursor_pointer()
             .on_click(cx.listener(move |this, _, _, cx| {
                 if this.expanded.contains(&key) {
@@ -1257,30 +1323,30 @@ impl TileView {
                 } else {
                     "icons/chevron-right.svg"
                 },
-                px(fonts.icon_small),
+                px(fonts.icon_tiny),
                 theme::TEXT_MUTED,
             ))
             .child(
                 div()
                     .text_size(px(fonts.font_meta))
-                    .text_color(theme::TEXT_FAINT)
+                    .text_color(theme::TEXT_DIM)
                     .child(label),
             )
             .when_some(numstat, |d, (adds, dels)| {
                 d.when(adds > 0 || dels > 0, |d| {
                     d.child(
-                        div().flex().gap_1().child(
-                            div()
-                                .text_size(px(fonts.font_meta))
-                                .text_color(theme::ADD)
-                                .child(format!("{adds}")),
-                        ),
+                        div()
+                            .font_family(theme::code_font())
+                            .text_size(px(fonts.font_mono_meta))
+                            .text_color(theme::ADD)
+                            .child(format!("+{adds}")),
                     )
                     .child(
                         div()
-                            .text_size(px(fonts.font_meta))
+                            .font_family(theme::code_font())
+                            .text_size(px(fonts.font_mono_meta))
                             .text_color(theme::DEL)
-                            .child(format!("{dels}")),
+                            .child(format!("−{dels}")),
                     )
                 })
             })
@@ -1303,20 +1369,22 @@ impl TileView {
             .flex()
             .child(
                 div()
-                    .max_w(px(640.))
-                    .rounded_lg()
-                    .bg(theme::tint(theme::WARN))
-                    .mr_10()
+                    .debug_selector(|| "permission-card".into())
+                    .min_w_0()
+                    .max_w(px(CARD_WIDTH))
+                    .rounded(px(8.))
+                    .border_1()
+                    .border_color(theme::CHANGES)
+                    .bg(theme::SURFACE)
                     .overflow_hidden()
                     .flex()
-                    .child(div().w(px(3.)).my_2().mx_1p5().rounded_sm().bg(theme::WARN))
                     .child(
                         div()
                             .flex()
                             .flex_col()
-                            .gap_1()
-                            .py_2()
-                            .pr_3()
+                            .gap_1p5()
+                            .py_3()
+                            .px_3p5()
                             .flex_1()
                             .min_w_0()
                             .child(
@@ -1326,123 +1394,24 @@ impl TileView {
                                     .gap_2()
                                     .child(crate::ui::icon(
                                         "icons/shield.svg",
-                                        px(fonts.icon_medium),
-                                        theme::WARN,
+                                        px(fonts.icon_small),
+                                        theme::CHANGES,
                                     ))
                                     .child(
                                         div()
-                                            .text_size(px(fonts.font_heading))
+                                            .text_size(px(fonts.font_body))
                                             .font_weight(gpui::FontWeight::SEMIBOLD)
-                                            .text_color(theme::WARN)
+                                            .text_color(theme::CHANGES)
                                             .child(SharedString::from(perm.kind.clone())),
                                     ),
                             )
                             .child(
                                 div()
-                                    .text_size(px(fonts.font_meta))
+                                    .text_size(px(fonts.font_mono_meta))
                                     .font_family(theme::code_font())
                                     .text_color(theme::TEXT_DIM)
                                     .child(SharedString::from(perm.detail.clone())),
                             )
-                            .when(perm.is_pending(), |d| {
-                                let id = perm.id.clone();
-                                let store = self.store.clone();
-                                let auto_text = if perm.has_auto_countdown() {
-                                    perm.auto_countdown_text()
-                                } else {
-                                    Default::default()
-                                };
-                                d.child(
-                                    div()
-                                        .flex()
-                                        .items_center()
-                                        .gap_2()
-                                        .child(controls::button(
-                                            gpui::ElementId::NamedInteger(
-                                                "pill".into(),
-                                                Self::hash("Allow"),
-                                            ),
-                                            "Allow",
-                                            BtnKind::Primary(on_accent),
-                                            accent,
-                                            fonts.font_heading,
-                                            true,
-                                            {
-                                                let store = store.clone();
-                                                let id = id.clone();
-                                                move |_, _, cx| {
-                                                    store.update(cx, |s, cx| {
-                                                        s.respond_permission(&id, "once", false, cx)
-                                                    });
-                                                }
-                                            },
-                                        ))
-                                        .child(controls::button(
-                                            gpui::ElementId::NamedInteger(
-                                                "pill".into(),
-                                                Self::hash("Always"),
-                                            ),
-                                            "Always",
-                                            BtnKind::Chip,
-                                            accent,
-                                            fonts.font_heading,
-                                            true,
-                                            {
-                                                let store = store.clone();
-                                                let id = id.clone();
-                                                move |_, _, cx| {
-                                                    store.update(cx, |s, cx| {
-                                                        s.respond_permission(
-                                                            &id, "always", false, cx,
-                                                        )
-                                                    });
-                                                }
-                                            },
-                                        ))
-                                        .child(controls::button(
-                                            gpui::ElementId::NamedInteger(
-                                                "pill".into(),
-                                                Self::hash("Deny"),
-                                            ),
-                                            "Deny",
-                                            BtnKind::Chip,
-                                            accent,
-                                            fonts.font_heading,
-                                            true,
-                                            {
-                                                let store = store.clone();
-                                                let id = id.clone();
-                                                move |_, _, cx| {
-                                                    store.update(cx, |s, cx| {
-                                                        s.respond_permission(
-                                                            &id, "reject", false, cx,
-                                                        )
-                                                    });
-                                                }
-                                            },
-                                        ))
-                                        .when(!auto_text.is_empty(), |d| {
-                                            d.child(
-                                                div()
-                                                    .italic()
-                                                    .text_size(px(fonts.font_meta))
-                                                    .text_color(theme::TEXT_FAINT)
-                                                    .child(auto_text),
-                                            )
-                                        }),
-                                )
-                            })
-                            .when(!perm.is_pending(), |d| {
-                                d.child(
-                                    div()
-                                        .italic()
-                                        .text_size(px(fonts.font_meta))
-                                        .text_color(theme::TEXT_DIM)
-                                        .child(SharedString::from(
-                                            perm.answer.clone().unwrap_or_default(),
-                                        )),
-                                )
-                            })
                             .when(perm.has_diff(), |d| {
                                 d.child(self.fold_header(
                                     &format!("{item_id}:diff"),
@@ -1469,6 +1438,106 @@ impl TileView {
                                         ),
                                     )
                                 })
+                            })
+                            .when(perm.is_pending(), |d| {
+                                let id = perm.id.clone();
+                                let store = self.store.clone();
+                                let auto_text = if perm.has_auto_countdown() {
+                                    perm.auto_countdown_text()
+                                } else {
+                                    Default::default()
+                                };
+                                d.child(
+                                    div()
+                                        .flex()
+                                        .flex_wrap()
+                                        .items_center()
+                                        .gap_2()
+                                        .pt_1()
+                                        .child(controls::button(
+                                            gpui::ElementId::NamedInteger(
+                                                "pill".into(),
+                                                Self::hash("Allow"),
+                                            ),
+                                            "Allow",
+                                            BtnKind::Primary(on_accent),
+                                            accent,
+                                            fonts.font_control,
+                                            true,
+                                            {
+                                                let store = store.clone();
+                                                let id = id.clone();
+                                                move |_, _, cx| {
+                                                    store.update(cx, |s, cx| {
+                                                        s.respond_permission(&id, "once", false, cx)
+                                                    });
+                                                }
+                                            },
+                                        ))
+                                        .child(controls::button(
+                                            gpui::ElementId::NamedInteger(
+                                                "pill".into(),
+                                                Self::hash("Always"),
+                                            ),
+                                            "Always",
+                                            BtnKind::Chip,
+                                            accent,
+                                            fonts.font_control,
+                                            true,
+                                            {
+                                                let store = store.clone();
+                                                let id = id.clone();
+                                                move |_, _, cx| {
+                                                    store.update(cx, |s, cx| {
+                                                        s.respond_permission(
+                                                            &id, "always", false, cx,
+                                                        )
+                                                    });
+                                                }
+                                            },
+                                        ))
+                                        .child(controls::button(
+                                            gpui::ElementId::NamedInteger(
+                                                "pill".into(),
+                                                Self::hash("Deny"),
+                                            ),
+                                            "Deny",
+                                            BtnKind::Chip,
+                                            accent,
+                                            fonts.font_control,
+                                            true,
+                                            {
+                                                let store = store.clone();
+                                                let id = id.clone();
+                                                move |_, _, cx| {
+                                                    store.update(cx, |s, cx| {
+                                                        s.respond_permission(
+                                                            &id, "reject", false, cx,
+                                                        )
+                                                    });
+                                                }
+                                            },
+                                        ))
+                                        .when(!auto_text.is_empty(), |d| {
+                                            d.child(
+                                                div()
+                                                    .text_size(px(fonts.font_meta))
+                                                    .text_color(theme::TEXT_MUTED)
+                                                    .child(auto_text),
+                                            )
+                                        }),
+                                )
+                            })
+                            .when(!perm.is_pending(), |d| {
+                                d.child(
+                                    div()
+                                        .italic()
+                                        .text_size(px(fonts.font_meta))
+                                        .text_color(theme::TEXT_DIM)
+                                        .child(SharedString::from(
+                                            perm.answer.clone().unwrap_or_default(),
+                                        )),
+                                )
                             }),
                     ),
             )
@@ -1486,26 +1555,60 @@ impl TileView {
     ) -> gpui::AnyElement {
         let pending = question.is_pending();
         let on_accent = self.store.read(cx).accent.on;
-        let mut card = div().flex().flex_col().gap_1().flex_1().min_w_0();
+        let mut card = div().flex().flex_col().gap_1p5().flex_1().min_w_0();
         if pending {
+            let store = self.store.clone();
+            let id = question.id.clone();
             card = card.child(
                 div()
                     .flex()
                     .items_center()
                     .gap_2()
-                    .child(div().size(px(7.)).rounded_full().bg(accent))
+                    .child(crate::ui::icon(
+                        "icons/chat-outline.svg",
+                        px(fonts.icon_small),
+                        theme::CHANGES,
+                    ))
                     .child(
                         div()
-                            .text_size(px(fonts.font_heading))
+                            .text_size(px(fonts.font_body))
                             .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .text_color(theme::TEXT)
+                            .text_color(theme::CHANGES)
                             .child("question"),
                     )
                     .child(
                         div()
+                            .flex_1()
+                            .min_w_0()
                             .text_size(px(fonts.font_meta))
-                            .text_color(theme::TEXT_FAINT)
+                            .text_color(theme::TEXT_MUTED)
+                            .truncate()
                             .child("pick an answer for each question"),
+                    )
+                    .child(
+                        div()
+                            .id(gpui::ElementId::NamedInteger(
+                                "dismiss".into(),
+                                Self::hash(&id),
+                            ))
+                            .role(Role::Button)
+                            .aria_label("Dismiss question")
+                            .flex_shrink_0()
+                            .cursor_pointer()
+                            .p_1()
+                            .rounded(px(4.))
+                            .hover(|s| s.bg(theme::RAISED))
+                            .on_click({
+                                let id = id.clone();
+                                move |_, _, cx| {
+                                    store.update(cx, |s, cx| s.dismiss_question(&id, cx));
+                                }
+                            })
+                            .child(crate::ui::icon(
+                                "icons/close.svg",
+                                px(fonts.icon_small),
+                                theme::TEXT_DIM,
+                            )),
                     ),
             );
         }
@@ -1537,7 +1640,7 @@ impl TileView {
                         "Answer",
                         BtnKind::Primary(on_accent),
                         accent,
-                        fonts.font_heading,
+                        fonts.font_control,
                         can_submit,
                         {
                             let store = store.clone();
@@ -1548,32 +1651,7 @@ impl TileView {
                                 }
                             }
                         },
-                    ))
-                    .child(
-                        div()
-                            .id(gpui::ElementId::NamedInteger(
-                                "dismiss".into(),
-                                Self::hash(&id),
-                            ))
-                            .role(Role::Button)
-                            .aria_label("Dismiss question")
-                            .cursor_pointer()
-                            .p_1()
-                            .rounded_sm()
-                            .hover(|s| s.bg(theme::HOVER))
-                            .on_click({
-                                let store = store.clone();
-                                let id = id.clone();
-                                move |_, _, cx| {
-                                    store.update(cx, |s, cx| s.dismiss_question(&id, cx));
-                                }
-                            })
-                            .child(crate::ui::icon(
-                                "icons/close.svg",
-                                px(fonts.icon_small),
-                                theme::TEXT_MUTED,
-                            )),
-                    ),
+                    )),
             );
         } else if let Some(resolution) = &question.resolution {
             card = card.child(
@@ -1589,13 +1667,19 @@ impl TileView {
             .flex()
             .child(
                 div()
-                    .max_w(px(640.))
-                    .mr_10()
-                    .rounded_lg()
-                    .bg(theme::BUBBLE_ASSISTANT)
+                    .debug_selector(|| "question-card".into())
+                    .min_w_0()
+                    .max_w(px(CARD_WIDTH))
+                    .rounded(px(8.))
                     .border_1()
-                    .border_color(theme::HAIRLINE)
-                    .p_2()
+                    .border_color(if pending {
+                        theme::CHANGES
+                    } else {
+                        theme::HAIRLINE
+                    })
+                    .bg(theme::SURFACE)
+                    .py_3()
+                    .px_3p5()
                     .flex()
                     .child(card),
             )
@@ -1681,7 +1765,7 @@ impl TileView {
             })
             .child(
                 div()
-                    .text_size(px(fonts.font_heading))
+                    .text_size(px(fonts.font_body))
                     .text_color(theme::TEXT)
                     .child(self.selectable_text(
                         &format!("{item_id}#{qi}"),
@@ -1731,11 +1815,11 @@ impl TileView {
                     .gap_2()
                     .px_2()
                     .py_1p5()
-                    .rounded_lg()
+                    .rounded(px(6.))
                     .border_1()
-                    .border_color(theme::HAIRLINE)
+                    .border_color(theme::LINE_STRONG)
                     .when(selected, |d| d.bg(theme::Q_OPT_SELECTED))
-                    .when(!selected, |d| d.hover(|s| s.bg(theme::HOVER)))
+                    .when(!selected, |d| d.hover(|s| s.bg(theme::RAISED)))
                     .cursor_pointer()
                     .when(!entry_locked, |d| {
                         d.on_click({
@@ -1798,7 +1882,7 @@ impl TileView {
                             .min_w_0()
                             .child(
                                 div()
-                                    .text_size(px(fonts.font_heading))
+                                    .text_size(px(fonts.font_body))
                                     .font_weight(gpui::FontWeight::SEMIBOLD)
                                     .text_color(theme::TEXT)
                                     .child(SharedString::from(label)),
@@ -1867,7 +1951,9 @@ struct TileSnap {
     agents_summary: String,
     tile_agents: Vec<crate::store::RunningAgentItem>,
     multiple_workspaces: bool,
-    has_attention: bool,
+    /// What this chat waits on, if a person has to answer it.
+    waiting: Option<&'static str>,
+    density: TileDensity,
     allow_on: bool,
     /// MCP toggle: any servers configured for the tile's workspace, and
     /// whether the toggle currently keeps them enabled
@@ -1884,7 +1970,7 @@ impl TileView {
         let close_store = self.store.clone();
         let close_key = self.key.clone();
 
-        let mut header_right = div().flex().items_center().gap_1p5();
+        let mut header_right = div().flex_shrink_0().flex().items_center().gap_1p5();
         // stream-status pill: amber while this tile's workspace pump retries
         // its event stream
         if snap.is_reconnecting {
@@ -1910,89 +1996,103 @@ impl TileView {
                 )
                 .child(
                     div()
-                        .text_size(px(fonts.font_body))
+                        .text_size(px(fonts.font_meta))
                         .text_color(theme::WARN)
                         .child("reconnecting"),
                 ),
             );
         }
-        // context usage ring + numeric readout (no "Ctx" label)
-        if snap.has_ctx {
-            header_right = header_right.child(
-                tip(
+        // the context readout: the ring and its numbers, and the way into the
+        // flyout when the chat has tasks
+        let readout = if snap.density == TileDensity::Full {
+            snap.ctx.as_str()
+        } else {
+            snap.ctx
+                .split_once(" · ")
+                .map_or(snap.ctx.as_str(), |(_, numbers)| numbers)
+        };
+        let readout = div()
+            .flex()
+            .items_center()
+            .gap_1p5()
+            .when(snap.has_ctx, |d| {
+                d.child(context_ring(snap.ctx_frac)).child(
                     div()
-                        .id("ctx-readout")
-                        .role(Role::Label)
-                        .aria_label(SharedString::from(format!("Context used: {}", snap.ctx)))
-                        .flex()
-                        .items_center()
-                        .gap_1(),
-                    format!("Context used: {}", snap.ctx),
-                )
-                .child(context_ring(snap.ctx_frac))
-                .child(
-                    div()
-                        .max_w(px(160.))
-                        .text_size(px(fonts.font_control))
-                        .text_color(theme::TEXT_FAINT)
+                        .max_w(px(180.))
+                        .text_size(px(fonts.font_meta))
+                        .text_color(theme::TEXT_DIM)
                         .truncate()
-                        .child(SharedString::from(snap.ctx.clone())),
-                ),
-            );
-        }
+                        .child(SharedString::from(readout.to_string())),
+                )
+            });
         if snap.has_tasks_or_agents {
             header_right = header_right.child(
                 tip(
                     div()
                         .id("tasks-btn")
+                        .debug_selector(|| "tile-flyout-toggle".into())
                         .role(Role::Button)
                         .aria_label("Tasks & agents")
                         .aria_expanded(self.flyout_open)
-                        .relative()
-                        .flex()
-                        .items_center()
-                        .gap_1p5()
-                        .p_1()
-                        .rounded_md()
+                        .px_1p5()
+                        .py_0p5()
+                        .rounded(px(6.))
                         .cursor_pointer()
-                        .hover(|s| s.bg(theme::HOVER))
+                        .hover(|s| s.bg(theme::RAISED))
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.flyout_open = !this.flyout_open;
                             cx.notify();
                         })),
                     "Tasks & agents",
                 )
-                .when(snap.has_attention, |d| {
-                    d.child(crate::ui::icon(
-                        "icons/warn.svg",
-                        px(fonts.icon_medium),
-                        theme::WARN,
-                    ))
-                })
-                .child(crate::ui::icon(
-                    "icons/expand.svg",
-                    px(fonts.icon_medium),
-                    theme::TEXT,
-                )),
+                .child(if snap.has_ctx {
+                    readout.into_any_element()
+                } else {
+                    crate::ui::icon("icons/expand.svg", px(fonts.icon_small), theme::TEXT_DIM)
+                        .into_any_element()
+                }),
+            );
+        } else if snap.has_ctx {
+            header_right = header_right.child(
+                tip(
+                    div()
+                        .id("ctx-readout")
+                        .role(Role::Label)
+                        .aria_label(SharedString::from(format!("Context used: {}", snap.ctx)))
+                        .px_1p5(),
+                    format!("Context used: {}", snap.ctx),
+                )
+                .child(readout),
             );
         }
 
+        let state = snap
+            .waiting
+            .map(|word| (word, true))
+            .or((snap.is_busy && snap.density != TileDensity::Tight).then_some(("Running", false)));
+
         div()
+            .debug_selector(|| "tile-head".into())
+            .flex_shrink_0()
+            .h(px(shell::scaled(TILE_HEAD_HEIGHT)))
             .flex()
             .items_center()
-            .gap_1()
-            .px_2p5()
-            .pt_2()
+            .gap_1p5()
+            .pl_2()
+            .pr_1p5()
+            .border_b_1()
+            .border_color(theme::HAIRLINE)
             .child(
                 tip(
                     div()
                         .id("close-tile")
                         .role(Role::Button)
                         .aria_label(SharedString::from(format!("Close chat {}", snap.title)))
+                        .flex_shrink_0()
                         .cursor_pointer()
                         .p_1()
-                        .rounded_md()
-                        .hover(|s| s.bg(theme::HOVER))
+                        .rounded(px(4.))
+                        .hover(|s| s.bg(theme::RAISED))
                         .on_click(move |_, _, cx| {
                             close_store.update(cx, |s, cx| s.close_tile(&close_key, cx));
                         }),
@@ -2001,30 +2101,45 @@ impl TileView {
                 .child(crate::ui::icon(
                     "icons/close.svg",
                     px(fonts.icon_small),
-                    theme::TEXT_MUTED,
+                    theme::TEXT_DIM,
                 )),
             )
-            .when(snap.is_busy, |d| {
-                d.child(
-                    div()
-                        .ml_1()
-                        .size(px(5.))
-                        .rounded_full()
-                        .bg(theme::WORKING)
-                        .flex_shrink_0(),
-                )
-            })
             .child(
                 div()
-                    .ml_2()
-                    .flex_1()
                     .min_w_0()
-                    .text_size(px(fonts.font_heading))
+                    .text_size(px(fonts.font_name))
                     .font_weight(gpui::FontWeight::SEMIBOLD)
                     .text_color(theme::TEXT)
                     .truncate()
                     .child(SharedString::from(snap.title.clone())),
             )
+            .when_some(state, |d, (word, needs_you)| {
+                d.child(
+                    div()
+                        .debug_selector(|| "tile-state".into())
+                        .flex_shrink_0()
+                        .text_size(px(fonts.font_meta))
+                        .when(needs_you, |d| {
+                            d.font_weight(gpui::FontWeight::MEDIUM)
+                                .text_color(theme::CHANGES)
+                        })
+                        .when(!needs_you, |d| d.text_color(theme::TEXT_DIM))
+                        .child(word),
+                )
+            })
+            .when(
+                snap.is_busy && snap.waiting.is_none() && snap.density == TileDensity::Tight,
+                |d| {
+                    d.child(
+                        div()
+                            .size(px(6.))
+                            .rounded_full()
+                            .bg(theme::WORKING)
+                            .flex_shrink_0(),
+                    )
+                },
+            )
+            .child(div().flex_1())
             .child(header_right)
             .into_any_element()
     }
@@ -2043,33 +2158,40 @@ impl TileView {
                 let remove_key = entry.key;
                 queue_rows_el = queue_rows_el.child(
                     div()
+                        .debug_selector(|| "queue-row".into())
                         .w_full()
-                        .rounded_lg()
-                        .border_1()
-                        .border_color(theme::QUEUED_BORDER)
-                        .bg(theme::BUBBLE_QUEUED)
-                        .p_2()
+                        .min_h(px(36.))
+                        .rounded(px(6.))
+                        .bg(theme::PANEL)
+                        .pl_3()
+                        .pr_1p5()
+                        .py_1()
                         .flex()
                         .items_center()
                         .gap_2()
+                        .child(crate::ui::icon(
+                            "icons/clock.svg",
+                            px(fonts.icon_tiny),
+                            theme::TEXT_MUTED,
+                        ))
                         .child(
                             div()
                                 .flex_1()
                                 .min_w_0()
                                 .flex()
                                 .flex_col()
-                                .gap_0p5()
                                 .child(
                                     div()
-                                        .text_size(px(fonts.font_brand))
+                                        .text_size(px(fonts.font_body))
                                         .text_color(theme::TEXT)
+                                        .truncate()
                                         .child(SharedString::from(text)),
                                 )
                                 .when(count > 0, |d| {
                                     d.child(
                                         div()
                                             .text_size(px(fonts.font_meta))
-                                            .text_color(theme::TEXT_FAINT)
+                                            .text_color(theme::TEXT_MUTED)
                                             .child(format!("{count} attachment(s)")),
                                     )
                                 }),
@@ -2086,24 +2208,17 @@ impl TileView {
                                         "Steer — {}",
                                         entry.text.chars().take(40).collect::<String>()
                                     )))
-                                    .px_2()
-                                    .py_1()
-                                    .rounded_md()
-                                    .bg(theme::CHIP)
-                                    .hover(|s| s.bg(theme::QUEUED_BORDER))
+                                    .flex_shrink_0()
+                                    .px_1p5()
+                                    .py_0p5()
+                                    .rounded(px(6.))
+                                    .hover(|s| s.bg(theme::RAISED))
                                     .cursor_pointer()
-                                    .text_size(px(fonts.font_meta))
-                                    .text_color(theme::TEXT)
-                                    .flex()
-                                    .items_center()
-                                    .gap_1(),
+                                    .text_size(px(fonts.font_control))
+                                    .font_weight(gpui::FontWeight::MEDIUM)
+                                    .text_color(snap.accent_text),
                                 "Abort the running turn and send this next",
                             )
-                            .child(crate::ui::icon(
-                                "icons/arrow-up.svg",
-                                px(fonts.icon_tiny),
-                                theme::TEXT,
-                            ))
                             .child("Steer")
                             .on_click({
                                 let store = store_handle.clone();
@@ -2124,10 +2239,11 @@ impl TileView {
                                         "Edit queued — {}",
                                         entry.text.chars().take(40).collect::<String>()
                                     )))
+                                    .flex_shrink_0()
                                     .cursor_pointer()
                                     .p_1()
-                                    .rounded_sm()
-                                    .hover(|s| s.bg(theme::HOVER)),
+                                    .rounded(px(4.))
+                                    .hover(|s| s.bg(theme::RAISED)),
                                 "Edit in the composer",
                             )
                             .on_click({
@@ -2154,10 +2270,11 @@ impl TileView {
                                         "Remove queued — {}",
                                         entry.text.chars().take(40).collect::<String>()
                                     )))
+                                    .flex_shrink_0()
                                     .cursor_pointer()
                                     .p_1()
-                                    .rounded_sm()
-                                    .hover(|s| s.bg(theme::HOVER)),
+                                    .rounded(px(4.))
+                                    .hover(|s| s.bg(theme::RAISED)),
                                 "Remove from the queue",
                             )
                             .on_click({
@@ -2242,7 +2359,15 @@ impl TileView {
     fn render_pills(&mut self, snap: &TileSnap, cx: &mut Context<Self>) -> gpui::AnyElement {
         let fonts = snap.fonts;
         let accent_text = snap.accent_text;
-        let mut pills = div().flex().items_center().gap_1();
+        let locked_small = snap.harness_locked && snap.density != TileDensity::Full;
+        // the one that gives way is the model: the rest keep their words
+        let mut pills = div()
+            .flex_1()
+            .min_w_0()
+            .flex()
+            .items_center()
+            .gap_0p5()
+            .overflow_hidden();
         // harness pill: click toggles opencode ↔ dsh on a draft; a chat that
         // already has a session is bound to the server it was created on
         let next_harness = if snap.harness_label == "dsh" {
@@ -2254,6 +2379,8 @@ impl TileView {
             tip(
                 div()
                     .id("pill-harness")
+                    .debug_selector(|| "pill-harness".into())
+                    .flex_shrink_0()
                     .role(Role::Button)
                     .aria_label(SharedString::from(format!(
                         "Harness: {} — click to use {}",
@@ -2262,15 +2389,16 @@ impl TileView {
                     .flex()
                     .items_center()
                     .gap_1()
-                    .px_2()
-                    .py_1()
-                    .rounded_lg()
+                    .h(px(PILL_HEIGHT))
+                    .px_1p5()
+                    .rounded(px(6.))
                     .cursor_pointer()
                     .text_color(theme::TEXT_MUTED)
                     .when(!snap.harness_locked, |d| {
-                        d.hover(|s| s.bg(theme::HOVER).text_color(accent_text))
+                        d.text_color(theme::TEXT)
+                            .hover(|s| s.bg(theme::RAISED).text_color(accent_text))
                     })
-                    .when(snap.harness_locked, |d| d.opacity(0.4)),
+                    .when(snap.harness_locked, |d| d.cursor_default()),
                 if snap.harness_locked {
                     format!("runs on {} — new chats can switch", snap.harness_label)
                 } else {
@@ -2282,22 +2410,35 @@ impl TileView {
                 AccessibleAction::Click,
                 TileView::a11y_activator(cx, TileView::toggle_tile_harness),
             )
-            .child(
-                div()
-                    .text_size(px(fonts.font_body))
-                    .child(SharedString::from(snap.harness_label)),
-            )
-            .child(crate::ui::icon(
-                "icons/chevron-down.svg",
-                px(fonts.icon_tiny),
-                theme::TEXT_MUTED,
-            )),
+            .when(snap.harness_locked, |d| {
+                d.child(crate::ui::icon(
+                    "icons/spark.svg",
+                    px(fonts.icon_tiny),
+                    theme::TEXT_MUTED,
+                ))
+            })
+            .when(!locked_small, |d| {
+                d.child(
+                    div()
+                        .debug_selector(|| "pill-harness-word".into())
+                        .text_size(px(fonts.font_meta))
+                        .child(SharedString::from(snap.harness_label)),
+                )
+            })
+            .when(!snap.harness_locked, |d| {
+                d.child(crate::ui::icon(
+                    "icons/chevron-down.svg",
+                    px(fonts.icon_tiny),
+                    theme::TEXT_MUTED,
+                ))
+            }),
         );
         if snap.has_agents {
             pills = pills.child(
                 tip(
                     div()
                         .id("pill-agent")
+                        .flex_shrink_0()
                         .role(Role::ComboBox)
                         .aria_label("Agent")
                         .aria_value(SharedString::from(if snap.selected_agent.is_empty() {
@@ -2309,12 +2450,12 @@ impl TileView {
                         .flex()
                         .items_center()
                         .gap_1()
-                        .px_2()
-                        .py_1()
-                        .rounded_lg()
+                        .h(px(PILL_HEIGHT))
+                        .px_1p5()
+                        .rounded(px(6.))
                         .cursor_pointer()
-                        .text_color(theme::TEXT_MUTED)
-                        .hover(|s| s.bg(theme::HOVER).text_color(accent_text)),
+                        .text_color(theme::TEXT)
+                        .hover(|s| s.bg(theme::RAISED).text_color(accent_text)),
                     "Agent",
                 )
                 .on_click(cx.listener(|this, _, window, cx| this.toggle_agent_picker(window, cx)))
@@ -2324,7 +2465,7 @@ impl TileView {
                 )
                 .child(
                     div()
-                        .text_size(px(fonts.font_body))
+                        .text_size(px(fonts.font_meta))
                         .child(SharedString::from(if snap.selected_agent.is_empty() {
                             crate::store::DEFAULT_AGENT_ENTRY.to_string()
                         } else {
@@ -2343,6 +2484,8 @@ impl TileView {
                 tip(
                     div()
                         .id("pill-model")
+                        .debug_selector(|| "pill-model".into())
+                        .min_w(px(56.))
                         .role(Role::ComboBox)
                         .aria_label("Model")
                         .aria_value(SharedString::from(
@@ -2356,12 +2499,12 @@ impl TileView {
                         .flex()
                         .items_center()
                         .gap_1()
-                        .px_2()
-                        .py_1()
-                        .rounded_lg()
+                        .h(px(PILL_HEIGHT))
+                        .px_1p5()
+                        .rounded(px(6.))
                         .cursor_pointer()
-                        .text_color(theme::TEXT_MUTED)
-                        .hover(|s| s.bg(theme::HOVER).text_color(accent_text)),
+                        .text_color(theme::TEXT)
+                        .hover(|s| s.bg(theme::RAISED).text_color(accent_text)),
                     "Model",
                 )
                 .on_click(cx.listener(|this, _, window, cx| this.toggle_model_picker(window, cx)))
@@ -2371,7 +2514,9 @@ impl TileView {
                 )
                 .child(
                     div()
-                        .text_size(px(fonts.font_body))
+                        .min_w_0()
+                        .truncate()
+                        .text_size(px(fonts.font_meta))
                         .child(SharedString::from(
                             if snap.selected_model_short.is_empty() {
                                 crate::store::DEFAULT_MODEL_ENTRY.to_string()
@@ -2390,6 +2535,7 @@ impl TileView {
                 tip(
                     div()
                         .id("pill-variant")
+                        .flex_shrink_0()
                         .role(Role::ComboBox)
                         .aria_label("Response variant")
                         .aria_value(SharedString::from(snap.selected_variant.clone()))
@@ -2397,13 +2543,13 @@ impl TileView {
                         .flex()
                         .items_center()
                         .gap_1()
-                        .px_2()
-                        .py_1()
-                        .rounded_lg()
+                        .h(px(PILL_HEIGHT))
+                        .px_1p5()
+                        .rounded(px(6.))
                         .cursor_pointer()
                         .when(snap.has_variants, |d| {
-                            d.text_color(theme::TEXT_MUTED)
-                                .hover(|s| s.bg(theme::HOVER).text_color(accent_text))
+                            d.text_color(theme::TEXT)
+                                .hover(|s| s.bg(theme::RAISED).text_color(accent_text))
                         })
                         .when(!snap.has_variants, |d| d.opacity(0.4)),
                     "Response variant",
@@ -2415,14 +2561,17 @@ impl TileView {
                 )
                 .child(crate::ui::icon(
                     "icons/gauge.svg",
-                    px(fonts.icon_medium),
+                    px(fonts.icon_small),
                     theme::TEXT_MUTED,
                 ))
-                .child(
-                    div()
-                        .text_size(px(fonts.font_body))
-                        .child(SharedString::from(snap.selected_variant.clone())),
-                )
+                .when(snap.density != TileDensity::Tight, |d| {
+                    d.child(
+                        div()
+                            .debug_selector(|| "pill-variant-word".into())
+                            .text_size(px(fonts.font_meta))
+                            .child(SharedString::from(snap.selected_variant.clone())),
+                    )
+                })
                 .child(crate::ui::icon(
                     "icons/chevron-down.svg",
                     px(fonts.icon_tiny),
@@ -2513,66 +2662,63 @@ impl TileView {
         }
     }
 
-    /// The 34px send/stop square: stop while busy, otherwise send (muted out
-    /// while the workspace is disconnected).
+    /// Stop while a turn runs, beside Send: text sent then lands in the queue.
+    /// Send mutes out while the workspace is disconnected.
     fn render_send_button(&self, snap: &TileSnap) -> gpui::AnyElement {
         let fonts = snap.fonts;
         let accent_text = snap.accent_text;
+        let square = |id: &'static str| {
+            div()
+                .id(id)
+                .debug_selector(move || id.into())
+                .role(Role::Button)
+                .flex_shrink_0()
+                .size(px(SEND_SIZE))
+                .rounded(px(6.))
+                .border_1()
+                .border_color(theme::LINE_STRONG)
+                .bg(theme::PANEL)
+                .flex()
+                .items_center()
+                .justify_center()
+                .cursor_pointer()
+        };
+        let mut row = div().flex_shrink_0().flex().items_center().gap_1().ml_1();
         if snap.is_busy {
             let store = self.store.clone();
             let key = self.key.clone();
             let a11y_store = store.clone();
             let a11y_key = key.clone();
+            row = row.child(
+                tip(
+                    square("stop")
+                        .aria_label("Stop")
+                        .hover(|s| s.bg(theme::RAISED))
+                        .on_click(move |_, _, cx| {
+                            store.update(cx, |s, cx| s.abort_tile(&key, cx));
+                        })
+                        .on_a11y_action(AccessibleAction::Click, move |_, _, cx| {
+                            a11y_store.update(cx, |s, cx| s.abort_tile(&a11y_key, cx));
+                        }),
+                    "Stop",
+                )
+                .child(crate::ui::icon(
+                    "icons/stop.svg",
+                    px(fonts.icon_small),
+                    theme::TEXT_DIM,
+                )),
+            );
+        }
+        let store = self.store.clone();
+        let key = self.key.clone();
+        let a11y_store = store.clone();
+        let a11y_key = key.clone();
+        row.child(
             tip(
-                div()
-                    .id("stop")
-                    .role(Role::Button)
-                    .aria_label("Stop")
-                    .size(px(34.))
-                    .rounded_lg()
-                    .border_1()
-                    .border_color(theme::HAIRLINE)
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .cursor_pointer()
-                    .text_color(theme::TEXT_MUTED)
-                    .hover(|s| s.bg(theme::HOVER).text_color(theme::DANGER))
-                    .on_click(move |_, _, cx| {
-                        store.update(cx, |s, cx| s.abort_tile(&key, cx));
-                    })
-                    .on_a11y_action(AccessibleAction::Click, move |_, _, cx| {
-                        a11y_store.update(cx, |s, cx| s.abort_tile(&a11y_key, cx));
-                    }),
-                "Stop",
-            )
-            .child(crate::ui::icon(
-                "icons/stop.svg",
-                px(fonts.icon_medium),
-                theme::TEXT_MUTED,
-            ))
-            .into_any_element()
-        } else {
-            let store = self.store.clone();
-            let key = self.key.clone();
-            let a11y_store = store.clone();
-            let a11y_key = key.clone();
-            tip(
-                div()
-                    .id("send")
-                    .role(Role::Button)
+                square("send")
                     .aria_label("Send")
-                    .size(px(34.))
-                    .rounded_lg()
-                    .border_1()
-                    .border_color(theme::HAIRLINE)
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .cursor_pointer()
                     .when(snap.is_connected, |d| {
-                        d.text_color(theme::TEXT_MUTED)
-                            .hover(|s| s.bg(theme::HOVER).text_color(accent_text))
+                        d.hover(|s| s.bg(theme::RAISED).text_color(accent_text))
                     })
                     .when(!snap.is_connected, |d| d.opacity(0.4))
                     .on_click(move |_, _, cx| {
@@ -2585,11 +2731,11 @@ impl TileView {
             )
             .child(crate::ui::icon(
                 "icons/arrow-up.svg",
-                px(fonts.icon_xl),
-                theme::TEXT_MUTED,
-            ))
-            .into_any_element()
-        }
+                px(fonts.icon_small),
+                theme::TEXT,
+            )),
+        )
+        .into_any_element()
     }
 
     /// The tasks/agents flyout, anchored under the header toggle.
@@ -2598,12 +2744,7 @@ impl TileView {
         let accent = snap.accent;
         let mut flyout = div();
         if self.flyout_open && snap.has_tasks_or_agents {
-            let mut content = div()
-                .flex()
-                .flex_col()
-                .gap_2()
-                .min_w(px(300.))
-                .max_w(px(440.));
+            let mut content = div().flex().flex_col().gap_2().w(px(300.));
             if snap.has_tasks {
                 content = content
                     .child(
@@ -2621,7 +2762,7 @@ impl TileView {
                             .child(
                                 div()
                                     .text_size(px(fonts.font_meta))
-                                    .text_color(theme::TEXT_FAINT)
+                                    .text_color(theme::TEXT_MUTED)
                                     .child(SharedString::from(snap.tasks_progress.clone())),
                             ),
                     )
@@ -2634,17 +2775,19 @@ impl TileView {
                                 (
                                     crate::ui::icon(
                                         "icons/circle-check.svg",
-                                        px(fonts.icon_medium),
-                                        theme::TEXT_MUTED,
-                                    ),
-                                    theme::TEXT_MUTED,
+                                        px(fonts.icon_small),
+                                        theme::SUCCESS_BRIGHT,
+                                    )
+                                    .into_any_element(),
+                                    theme::TEXT_DIM,
                                 )
                             } else if task.in_progress() {
                                 (
-                                    crate::ui::icon(
-                                        "icons/play.svg",
-                                        px(fonts.icon_medium),
-                                        theme::TEXT_DIM,
+                                    motion::spinner(
+                                        "task-spinner",
+                                        "icons/spinner.svg",
+                                        px(fonts.icon_small),
+                                        theme::BEHIND,
                                     ),
                                     theme::TEXT,
                                 )
@@ -2652,25 +2795,28 @@ impl TileView {
                                 (
                                     crate::ui::icon(
                                         "icons/dash.svg",
-                                        px(fonts.icon_medium),
-                                        theme::TEXT_FAINT,
-                                    ),
-                                    theme::TEXT_FAINT,
+                                        px(fonts.icon_small),
+                                        theme::TEXT_MUTED,
+                                    )
+                                    .into_any_element(),
+                                    theme::TEXT_MUTED,
                                 )
                             } else {
                                 (
                                     crate::ui::icon(
-                                        "icons/circle.svg",
-                                        px(fonts.icon_medium),
-                                        theme::TEXT_FAINT,
-                                    ),
+                                        "icons/clock.svg",
+                                        px(fonts.icon_small),
+                                        theme::TEXT_MUTED,
+                                    )
+                                    .into_any_element(),
                                     theme::TEXT_DIM,
                                 )
                             };
                             list = list.child(
                                 div().flex().items_start().gap_2().py_1().child(icon).child(
                                     div()
-                                        .text_size(px(fonts.font_heading))
+                                        .min_w_0()
+                                        .text_size(px(fonts.font_body))
                                         .text_color(text)
                                         .child(SharedString::from(task.content.clone())),
                                 ),
@@ -2699,7 +2845,7 @@ impl TileView {
                             .child(
                                 div()
                                     .text_size(px(fonts.font_meta))
-                                    .text_color(theme::TEXT_FAINT)
+                                    .text_color(theme::TEXT_MUTED)
                                     .child(SharedString::from(snap.agents_summary.clone())),
                             ),
                     )
@@ -2764,7 +2910,7 @@ impl TileView {
                                             .child(
                                                 div()
                                                     .max_w(px(220.))
-                                                    .text_size(px(fonts.font_heading))
+                                                    .text_size(px(fonts.font_body))
                                                     .text_color(theme::TEXT)
                                                     .truncate()
                                                     .child(SharedString::from(agent.title.clone())),
@@ -2772,8 +2918,8 @@ impl TileView {
                                             .when(snap.multiple_workspaces, |d| {
                                                 d.child(
                                                     div()
-                                                        .text_size(px(fonts.font_control))
-                                                        .text_color(theme::TEXT_FAINT)
+                                                        .text_size(px(fonts.font_meta))
+                                                        .text_color(theme::TEXT_MUTED)
                                                         .child(SharedString::from(
                                                             agent.workspace.clone(),
                                                         )),
@@ -2821,14 +2967,13 @@ impl TileView {
                         list
                     });
             }
-            flyout = div().absolute().top_8().right_2().child(
+            flyout = div().absolute().top(px(40.)).right_2().child(
                 div()
-                    .rounded_xl()
+                    .debug_selector(|| "tile-flyout".into())
+                    .rounded(px(8.))
                     .border_1()
-                    .border_color(theme::HAIRLINE)
-                    // translucent gray: chat shows through faintly, without
-                    // the old near-black stain
-                    .bg(theme::FLYOUT_SURFACE)
+                    .border_color(theme::LINE_STRONG)
+                    .bg(theme::OVERLAY)
                     .p_3()
                     .shadow_lg()
                     .id("flyout-body")
@@ -3166,13 +3311,17 @@ impl TileView {
         let composer_focus_is = self.composer_focused;
 
         let bottom_row = div()
+            .debug_selector(|| "composer-row".into())
             .flex()
             .items_center()
+            .min_w_0()
+            .gap_1p5()
             .child(
                 div()
+                    .flex_shrink_0()
                     .flex()
                     .items_center()
-                    .gap_1()
+                    .gap_0p5()
                     .child(
                         tip(
                             div()
@@ -3181,9 +3330,9 @@ impl TileView {
                                 .aria_label("Attach files")
                                 .cursor_pointer()
                                 .p_1()
-                                .rounded_md()
+                                .rounded(px(4.))
                                 .text_color(theme::TEXT_MUTED)
-                                .hover(|s| s.text_color(accent_text))
+                                .hover(|s| s.bg(theme::RAISED).text_color(accent_text))
                                 .on_click(cx.listener(|this, _, window, cx| {
                                     this.pick_files(window, cx);
                                 })),
@@ -3191,7 +3340,7 @@ impl TileView {
                         )
                         .child(crate::ui::icon(
                             "icons/plus.svg",
-                            px(fonts.icon_medium),
+                            px(fonts.icon_small),
                             theme::TEXT_MUTED,
                         )),
                     )
@@ -3208,8 +3357,8 @@ impl TileView {
                                 })
                                 .cursor_pointer()
                                 .p_1()
-                                .rounded_md()
-                                .hover(|s| s.bg(theme::HOVER))
+                                .rounded(px(4.))
+                                .hover(|s| s.bg(theme::RAISED))
                                 .on_click({
                                     let store = self.store.clone();
                                     move |_, _, cx| {
@@ -3226,13 +3375,13 @@ impl TileView {
                         .child(if snap.allow_on {
                             crate::ui::icon(
                                 "icons/shield-filled.svg",
-                                px(fonts.icon_medium),
+                                px(fonts.icon_small),
                                 theme::WARN,
                             )
                         } else {
                             crate::ui::icon(
                                 "icons/shield.svg",
-                                px(fonts.icon_medium),
+                                px(fonts.icon_small),
                                 theme::TEXT_MUTED,
                             )
                         }),
@@ -3251,8 +3400,8 @@ impl TileView {
                                 .when(!snap.has_mcp, |d| d.opacity(0.4))
                                 .cursor_pointer()
                                 .p_1()
-                                .rounded_md()
-                                .hover(|s| s.bg(theme::HOVER))
+                                .rounded(px(4.))
+                                .hover(|s| s.bg(theme::RAISED))
                                 .on_click({
                                     let store = self.store.clone();
                                     let key = self.key.clone();
@@ -3263,17 +3412,16 @@ impl TileView {
                             "Toggle MCP servers",
                         )
                         .child(if snap.mcp_on {
-                            crate::ui::icon("icons/plug.svg", px(fonts.icon_medium), accent)
+                            crate::ui::icon("icons/plug.svg", px(fonts.icon_small), theme::TEXT)
                         } else {
                             crate::ui::icon(
                                 "icons/plug.svg",
-                                px(fonts.icon_medium),
+                                px(fonts.icon_small),
                                 theme::TEXT_MUTED,
                             )
                         }),
                     ),
             )
-            .child(div().flex_1())
             .child(pills)
             .child(self.render_send_button(snap));
 
@@ -3283,21 +3431,20 @@ impl TileView {
         let slash_el = self.suggest.clone();
 
         div()
-            .mx_1()
-            .mb_1()
+            .m_2()
             // anchors the popovers and scopes the slash-menu key
             // bindings ("Composer > Input") to this frame only
             .relative()
             .key_context("Composer")
-            .rounded_xl()
+            .rounded(px(8.))
             .border_1()
-            .when(composer_focus_is, |d| d.border_color(accent))
-            .when(!composer_focus_is, |d| d.border_color(theme::HAIRLINE))
-            .bg(theme::INPUT)
-            .p_1p5()
+            .when(composer_focus_is, |d| d.border_color(accent_text))
+            .when(!composer_focus_is, |d| d.border_color(theme::LINE_STRONG))
+            .bg(theme::WELL)
+            .p_2()
             .flex()
             .flex_col()
-            .gap_1p5()
+            .gap_1()
             // files dragged from the file manager land here as attachments
             .drag_over::<gpui::ExternalPaths>(move |style, _, _, _| style.border_color(accent))
             .on_drop({
@@ -3478,7 +3625,8 @@ impl Render for TileView {
                 agents_summary: tile.tile_agents_summary(),
                 tile_agents: tile.tile_agents.clone(),
                 multiple_workspaces: store.multiple_workspaces(),
-                has_attention: store.has_attention_needed(),
+                waiting: waiting_word(tile.items.iter().map(Arc::as_ref)),
+                density: self.density,
                 allow_on: store.auto_allow,
                 spring: store.todos_spring.as_deref() == Some(self.key.as_str()),
                 has_mcp,
@@ -3551,10 +3699,10 @@ impl Render for TileView {
                     this.scroll_to(next, cx);
                 }),
             )
-            .p_1()
+            .p_2p5()
             .flex()
             .flex_col()
-            .gap_1();
+            .gap_2();
         // consecutive tool calls collapse into one disclosure row; the run is
         // split by anything non-tool (permission cards, notes) in between.
         // visible_tools feeds the cache-prune set below: members hidden inside
@@ -3696,11 +3844,17 @@ impl Render for TileView {
                 .min_w_0()
                 .flex()
                 .flex_col()
-                .rounded_xl()
+                .rounded(px(8.))
                 .border_1()
-                .when(snap.is_focused, |d| d.border_color(accent))
-                .when(!snap.is_focused, |d| d.border_color(theme::HAIRLINE))
-                .bg(theme::CARD)
+                // the focus edge wins: the state word still says what it waits on
+                .border_color(if snap.is_focused {
+                    accent
+                } else if snap.waiting.is_some() {
+                    theme::CHANGES
+                } else {
+                    theme::HAIRLINE
+                })
+                .bg(theme::SURFACE)
                 .overflow_hidden()
                 // composer-only key overrides (bound over the kit's "Input" context)
                 .on_action(cx.listener(|this, _: &ComposerUp, window, cx| {
@@ -3754,13 +3908,6 @@ impl Render for TileView {
                     .size_full()
                 })
                 .child(header)
-                .child(
-                    div()
-                        .h(px(1.))
-                        .mt_1p5()
-                        .mx_2p5()
-                        .bg(theme::TILE_HEADER_SEPARATOR),
-                )
                 .child(transcript_area)
                 .when(jump_visible, |d| {
                     d.child(
@@ -3796,9 +3943,10 @@ impl Render for TileView {
                     d.child(
                         div()
                             .id("queue-strip")
+                            .flex_shrink_0()
                             .max_h(px(150.))
-                            .mx_1()
-                            .mb_0p5()
+                            .mx_2()
+                            .mt_1p5()
                             .overflow_y_scroll()
                             .child(queue_el),
                     )
@@ -4316,7 +4464,7 @@ impl Render for ComposerField {
             .w_full()
             .child(
                 Textarea::new(&self.state)
-                    .with_size(theme::field_size_at(theme::font_brand()))
+                    .with_size(theme::field_size())
                     .appearance(false)
                     .bordered(false)
                     .on_paste(move |item: &gpui::ClipboardItem, _, cx| {

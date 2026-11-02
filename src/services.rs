@@ -32,6 +32,15 @@ pub fn open_folder(path: &str) -> Result<(), String> {
         .map_err(|err| err.to_string())
 }
 
+/// Launches a sibling Warp app by the binary name the suite installs. The
+/// window is the other app's; this process only hands it over.
+pub fn launch_sibling(binary: &str) -> Result<(), String> {
+    std::process::Command::new(binary)
+        .spawn()
+        .map(|_| ())
+        .map_err(|err| err.to_string())
+}
+
 /// Hooks the store up to scale changes; each one re-reads the ladder and
 /// re-maps the kit.
 pub fn init_font_scale(store: &Entity<Store>, cx: &mut App) {

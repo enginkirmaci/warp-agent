@@ -578,6 +578,15 @@ pub struct ChatTile {
 }
 
 impl ChatTile {
+    /// Whether an open card here needs a person: a permission or a question.
+    pub fn is_waiting(&self) -> bool {
+        self.items.iter().any(|item| match item.as_ref() {
+            ChatItem::Permission(perm) => perm.is_pending(),
+            ChatItem::Question(question) => question.is_pending(),
+            _ => false,
+        })
+    }
+
     /// Rebuild the variant picker list around the tile's model and keep the
     /// current pick when it still exists, else fall back to "(default)".
     /// Runs wherever the option list could have drifted: tile creation, the
@@ -2414,7 +2423,22 @@ impl Store {
     }
 
     pub fn has_attention_needed(&self) -> bool {
-        self.running_agents.iter().any(|r| r.needs_attention)
+        self.tiles_waiting() > 0 || self.running_agents.iter().any(|r| r.needs_attention)
+    }
+
+    /// Open chats that hold a card only a person can answer.
+    pub fn tiles_waiting(&self) -> usize {
+        self.open_tiles
+            .iter()
+            .filter(|tile| tile.is_waiting())
+            .count()
+    }
+
+    /// Whether this chat's open tile is waiting on a person.
+    pub fn session_waiting(&self, session_id: &str) -> bool {
+        self.open_tiles
+            .iter()
+            .any(|tile| tile.session_id.as_deref() == Some(session_id) && tile.is_waiting())
     }
 
     fn effective_workspace_path(&self, session_id: &str) -> Option<String> {
@@ -6626,6 +6650,7 @@ impl Store {
         // (Theme::update refreshes every window)
         theme::apply_kit_theme(self.accent, &self.fonts, cx);
         self.tool_tips_visible = self.settings.show_tool_tips;
+        warpui_kit_core::motion::set_reduced(self.settings.reduce_motion);
         crate::ui::tooltip::sync_settings(cx, self.tool_tips_visible, self.fonts.font_meta);
         // push the MCP master switch into running servers right away: disable
         // severs every configured server, re-enabling reconnects all but the

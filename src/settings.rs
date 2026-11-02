@@ -108,6 +108,9 @@ pub struct AppSettings {
     pub accent: Option<String>,
     #[serde(rename = "ShowToolTips", default = "tru")]
     pub show_tool_tips: bool,
+    /// Turns the family motion off, spinners included; busy words stay.
+    #[serde(rename = "ReduceMotion", default)]
+    pub reduce_motion: bool,
     /// Master switch: keep every workspace's MCP servers disconnected,
     /// overriding the composer's per-workspace toggle.
     #[serde(rename = "McpDisabled", default)]
@@ -175,6 +178,7 @@ impl Default for AppSettings {
             font_scale: None,
             accent: None,
             show_tool_tips: true,
+            reduce_motion: false,
             mcp_disabled: false,
         }
     }

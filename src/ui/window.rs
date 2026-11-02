@@ -5,7 +5,7 @@ use crate::store::{Store, WorkspaceItem};
 use crate::theme;
 use crate::ui::controls::{self, BtnKind, menu_row, popover_card};
 use crate::ui::settings::SettingsBuffers;
-use crate::ui::tile::TileView;
+use crate::ui::tile::{TileDensity, TileView};
 use crate::ui::tooltip::{self, tip};
 use gpui::prelude::*;
 use gpui::{
@@ -15,10 +15,58 @@ use gpui::{
 use gpui_kit::component::Sizable as _;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use std::collections::HashMap;
+use warpui_kit_core::A11y as _;
+use warpui_kit_core::shell;
 use warpui_kit_picker::{
     FilteredPicker, OverlayAnchor, PanelChrome, PickerBody, PickerData, PickerIcons, PickerItem,
     PickerRow, PickerSpec, PickerTarget, Selection, TriggerScale, model_name, model_provider,
 };
+
+/// The grid's gap, and its margin to the pane: the design's 12 gutter.
+const GRID_GAP: f32 = 12.;
+
+/// The Settings page's sections: the design's list of four, each with its own
+/// group of rows in the pane beside it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum SettingsSection {
+    Appearance,
+    ChatDefaults,
+    Permissions,
+    Server,
+}
+
+impl SettingsSection {
+    const ALL: [SettingsSection; 4] = [
+        SettingsSection::Appearance,
+        SettingsSection::ChatDefaults,
+        SettingsSection::Permissions,
+        SettingsSection::Server,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            SettingsSection::Appearance => "Appearance",
+            SettingsSection::ChatDefaults => "Chat defaults",
+            SettingsSection::Permissions => "Permissions",
+            SettingsSection::Server => "Server",
+        }
+    }
+
+    fn hint(self) -> &'static str {
+        match self {
+            SettingsSection::Appearance => "Palette, type and text size",
+            SettingsSection::ChatDefaults => "Harness, model and variant",
+            SettingsSection::Permissions => "Auto-allow and working hours",
+            SettingsSection::Server => "Executables and idle stop",
+        }
+    }
+}
+
+/// One track of the grid inside `grid_width`.
+fn tile_track_width(grid_width: f32, columns: usize) -> f32 {
+    let columns = columns.max(1) as f32;
+    (grid_width - GRID_GAP * (columns + 1.)) / columns
+}
 
 #[derive(Clone)]
 pub enum SideMenuAction {
@@ -96,6 +144,12 @@ pub struct WarpWindow {
     add_folder_sender: async_channel::Sender<String>,
     add_folder_receiver: async_channel::Receiver<String>,
     settings_buffers: SettingsBuffers,
+    /// The Settings page's open section.
+    settings_section: SettingsSection,
+    /// E2E hook: WARP_AGENT_PAGE=settings[-chat|-permissions|-server] opens
+    /// the rail's Settings section after the first window exists (the pointer
+    /// cannot reach a hidden window, and probes need the page).
+    open_settings_on_first_render: Option<SettingsSection>,
     settings_fields: Vec<(&'static str, Entity<InputState>)>,
     /// leaf renderers for the plain settings fields — keystrokes repaint
     /// only the field, never the window (see InputLeaf below)
@@ -142,6 +196,14 @@ impl WarpWindow {
             add_folder_sender: folder_tx,
             add_folder_receiver: folder_rx,
             settings_buffers,
+            settings_section: SettingsSection::Appearance,
+            open_settings_on_first_render: match std::env::var("WARP_AGENT_PAGE").as_deref() {
+                Ok("settings") => Some(SettingsSection::Appearance),
+                Ok("settings-chat") => Some(SettingsSection::ChatDefaults),
+                Ok("settings-permissions") => Some(SettingsSection::Permissions),
+                Ok("settings-server") => Some(SettingsSection::Server),
+                _ => None,
+            },
             settings_fields: Vec::new(),
             settings_leafs: Vec::new(),
             settings_model_picker: None,
@@ -173,6 +235,10 @@ fn execute_menu_action(store: &Entity<Store>, action: &SideMenuAction, cx: &mut 
 
 impl Render for WarpWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl gpui::IntoElement {
+        if let Some(section) = self.open_settings_on_first_render.take() {
+            self.open_settings(window, cx);
+            self.settings_section = section;
+        }
         // pending folder picks + menu requests from App-only closures
         while let Ok(path) = self.add_folder_receiver.try_recv() {
             self.store.update(cx, |s, cx| s.add_workspace(&path, cx));
@@ -196,13 +262,16 @@ impl Render for WarpWindow {
 
         let fonts = self.store.read(cx).fonts;
         let sidebar_visible = self.store.read(cx).sidebar_visible;
+        // Settings brings its own section list; the chat tree steps aside
+        let settings_open = self.store.read(cx).is_settings_open;
 
-        let mut content = div().flex().flex_row().flex_1().min_h_0();
-        if sidebar_visible {
+        let list_shown = sidebar_visible && !settings_open && !self.grid_takes_the_list(window, cx);
+        let mut content = shell::panes().child(self.render_rail(window, cx));
+        if list_shown {
             content = content.child(self.render_sidebar(window, cx));
             content = content.child(self.render_splitter());
         }
-        content = content.child(self.render_main(window, cx));
+        content = content.child(self.render_main(list_shown, window, cx));
 
         let mut root = div()
             .size_full()
@@ -380,6 +449,89 @@ impl WarpWindow {
         }
     }
 
+    /// Below the compact width, a grid of two or more takes the list's room.
+    fn grid_takes_the_list(&self, window: &Window, cx: &App) -> bool {
+        window.viewport_size().width < px(shell::scaled(shell::COMPACT_WINDOW_WIDTH))
+            && self.store.read(cx).open_tiles.len() >= 2
+    }
+
+    fn open_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.store.read(cx).is_settings_open {
+            return;
+        }
+        self.store.update(cx, |s, _| {
+            s.is_settings_open = true;
+        });
+        self.settings_buffers = SettingsBuffers::from_settings(&self.store.read(cx).settings);
+        let (fields, leafs, model_picker) = self.make_settings_fields(window, cx);
+        self.settings_fields = fields;
+        self.settings_leafs = leafs;
+        self.settings_model_picker = model_picker;
+        cx.notify();
+    }
+
+    /// Leaving the page discards unsaved edits: the design gives Settings a
+    /// Save button, and Appearance applies on its own.
+    fn close_settings(&mut self, cx: &mut Context<Self>) {
+        if !self.store.read(cx).is_settings_open {
+            return;
+        }
+        self.store.update(cx, |s, _| s.is_settings_open = false);
+        cx.notify();
+    }
+
+    fn render_rail(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let (in_settings, ink, attention) = {
+            let store = self.store.read(cx);
+            (
+                store.is_settings_open,
+                store.accent.text,
+                store.has_attention_needed(),
+            )
+        };
+        shell::rail()
+            .debug_selector(|| "app-rail".into())
+            .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                gpui_kit::base::GlobalState::suppress_text_selection(cx);
+            })
+            .child(
+                shell::rail_item_inked(
+                    "rail-chats",
+                    "icons/chat-outline.svg",
+                    "Chats",
+                    !in_settings,
+                    ink,
+                )
+                .debug_selector(|| "rail-chats".into())
+                .relative()
+                .on_click(cx.listener(|this, _, _, cx| this.close_settings(cx)))
+                .when(attention, |d| {
+                    d.child(
+                        div()
+                            .absolute()
+                            .top_1p5()
+                            .right(px(12.))
+                            .size(px(8.))
+                            .rounded_full()
+                            .bg(theme::CHANGES),
+                    )
+                }),
+            )
+            .child(div().flex_1())
+            .child(
+                shell::rail_item_inked(
+                    "open-settings",
+                    "icons/cog.svg",
+                    "Settings",
+                    in_settings,
+                    ink,
+                )
+                .debug_selector(|| "rail-settings".into())
+                .on_click(cx.listener(|this, _, window, cx| this.open_settings(window, cx))),
+            )
+            .into_any_element()
+    }
+
     fn render_titlebar(&mut self, window: &Window, cx: &mut Context<Self>) -> gpui::AnyElement {
         let (fonts, visible) = {
             let store = self.store.read(cx);
@@ -398,28 +550,81 @@ impl WarpWindow {
             }
         };
         let store_handle = self.store.clone();
-        div()
-            .h(px(38.))
-            .flex()
-            .items_center()
-            .px_2()
-            .gap_1()
+        let running = {
+            let store = self.store.read(cx);
+            store.open_tiles.iter().filter(|t| t.is_busy(store)).count()
+        };
+        shell::title_bar()
+            .pl_3()
             // titlebar chrome owns no selectable text either (see sidebar note)
             .on_mouse_down(MouseButton::Left, |_, _, cx| {
                 gpui_kit::base::GlobalState::suppress_text_selection(cx);
             })
             .child(
                 div()
+                    .flex_shrink_0()
                     .flex()
                     .items_center()
                     .justify_center()
-                    .size(px(30.))
+                    .size(px(28.))
+                    .rounded(px(6.))
+                    .bg(theme::BRAND_BG)
+                    .border_1()
+                    .border_color(theme::BRAND_BORDER)
                     .child(crate::ui::icon(
                         "icons/spark.svg",
-                        px(fonts.icon_large),
-                        theme::TEXT,
+                        px(fonts.icon_small),
+                        theme::ACCENT_INK,
                     )),
             )
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .text_size(px(fonts.font_brand))
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .text_color(theme::TEXT)
+                    .child("Warp Agent"),
+            )
+            .child(
+                div()
+                    .id("titlebar-drag")
+                    .flex_1()
+                    .h_full()
+                    // Windows drags via the hit-test path (this hitbox answers
+                    // HTCAPTION); start_window_move is a no-op there. Linux
+                    // keeps the explicit move call.
+                    .window_control_area(WindowControlArea::Drag)
+                    .on_mouse_down(MouseButton::Left, |_, window, _| {
+                        window.start_window_move();
+                    }),
+            )
+            .when(running > 0, |d| {
+                d.child(
+                    div()
+                        .id("activity-chip")
+                        .debug_selector(|| "activity-chip".into())
+                        .role(Role::Status)
+                        .aria_label(SharedString::from(format!("{running} running")))
+                        .flex_shrink_0()
+                        .h(px(28.))
+                        .px_2p5()
+                        .rounded(px(14.))
+                        .bg(theme::PANEL)
+                        .flex()
+                        .items_center()
+                        .gap(px(7.))
+                        .text_size(px(fonts.font_meta))
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .text_color(theme::BEHIND)
+                        .child(warpui_kit_core::motion::spinner(
+                            "activity-spinner",
+                            "icons/spinner.svg",
+                            px(fonts.icon_tiny),
+                            theme::BEHIND,
+                        ))
+                        .child(format!("{running} running")),
+                )
+            })
             .child(
                 tip(
                     div()
@@ -431,12 +636,12 @@ impl WarpWindow {
                             "Show sidebar"
                         })
                         .cursor_pointer()
-                        .size(px(26.))
-                        .rounded_md()
+                        .w(px(36.))
+                        .h(px(shell::scaled(shell::TITLE_BAR_HEIGHT)))
                         .flex()
                         .items_center()
                         .justify_center()
-                        .hover(|s| s.bg(theme::HOVER))
+                        .hover(|s| s.bg(theme::RAISED))
                         .on_click(move |_, _, cx| {
                             store_handle
                                 .update(cx, |s, cx| s.set_sidebar_visible(!s.sidebar_visible, cx));
@@ -462,18 +667,32 @@ impl WarpWindow {
                 }),
             )
             .child(
-                div()
-                    .id("titlebar-drag")
-                    .flex_1()
-                    .h_full()
-                    // Windows drags via the hit-test path (this hitbox answers
-                    // HTCAPTION); start_window_move is a no-op there. Linux
-                    // keeps the explicit move call.
-                    .window_control_area(WindowControlArea::Drag)
-                    .on_mouse_down(MouseButton::Left, |_, window, _| {
-                        window.start_window_move();
-                    }),
+                tip(
+                    div()
+                        .id("launch-station")
+                        .role(Role::Button)
+                        .aria_label("Open Warp Station")
+                        .cursor_pointer()
+                        .w(px(36.))
+                        .h(px(shell::scaled(shell::TITLE_BAR_HEIGHT)))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .hover(|s| s.bg(theme::RAISED))
+                        .on_click(|_, _, _| {
+                            if let Err(err) = crate::services::launch_sibling("warp-station") {
+                                tracing::warn!("could not launch warp-station: {err}");
+                            }
+                        }),
+                    "Open Warp Station",
+                )
+                .child(crate::ui::icon(
+                    "icons/code.svg",
+                    px(fonts.icon_medium),
+                    theme::TEXT_MUTED,
+                )),
             )
+            .child(div().w(px(1.)).h(px(20.)).mx_1().bg(theme::HAIRLINE))
             .child(
                 tip(
                     div()
@@ -481,12 +700,12 @@ impl WarpWindow {
                         .role(Role::Button)
                         .aria_label("Minimize")
                         .cursor_pointer()
-                        .size(px(26.))
-                        .rounded_md()
+                        .w(px(36.))
+                        .h(px(shell::scaled(shell::TITLE_BAR_HEIGHT)))
                         .flex()
                         .items_center()
                         .justify_center()
-                        .hover(|s| s.bg(theme::HOVER))
+                        .hover(|s| s.bg(theme::RAISED))
                         .on_click(|_, window, _| window.minimize_window()),
                     "Minimize",
                 )
@@ -503,12 +722,12 @@ impl WarpWindow {
                         .role(Role::Button)
                         .aria_label("Zoom · server health")
                         .cursor_pointer()
-                        .size(px(26.))
-                        .rounded_md()
+                        .w(px(36.))
+                        .h(px(shell::scaled(shell::TITLE_BAR_HEIGHT)))
                         .flex()
                         .items_center()
                         .justify_center()
-                        .hover(|s| s.bg(theme::HOVER))
+                        .hover(|s| s.bg(theme::RAISED))
                         .on_click(cx.listener(|_, _, window, cx| {
                             window.zoom_window();
                             // the compositor toggles asynchronously — nudge a
@@ -526,8 +745,8 @@ impl WarpWindow {
                         .role(Role::Button)
                         .aria_label("Close")
                         .cursor_pointer()
-                        .size(px(26.))
-                        .rounded_md()
+                        .w(px(36.))
+                        .h(px(shell::scaled(shell::TITLE_BAR_HEIGHT)))
                         .flex()
                         .items_center()
                         .justify_center()
@@ -586,10 +805,11 @@ impl WarpWindow {
                 if ws.show_empty_hint() {
                     workspaces = workspaces.child(
                         div()
-                            .ml(px(26.))
-                            .text_size(px(fonts.font_body))
+                            .pl(px(40.))
+                            .py_2()
+                            .text_size(px(fonts.font_meta))
                             .italic()
-                            .text_color(theme::TEXT_FAINT)
+                            .text_color(theme::TEXT_MUTED)
                             .child("No chats yet"),
                     );
                 }
@@ -603,21 +823,49 @@ impl WarpWindow {
         if !filter.is_empty() && shown == 0 {
             workspaces = workspaces.child(
                 div()
-                    .px_2()
-                    .text_size(px(fonts.font_body))
+                    .pl(px(40.))
+                    .py_2()
+                    .text_size(px(fonts.font_meta))
                     .italic()
-                    .text_color(theme::TEXT_FAINT)
+                    .text_color(theme::TEXT_MUTED)
                     .child("No matching workspace"),
             );
         }
 
-        div()
-            .w(px(width))
-            .h_full()
+        let (need, running, open) = {
+            let store = self.store.read(cx);
+            (
+                store.tiles_waiting(),
+                store.open_tiles.iter().filter(|t| t.is_busy(store)).count(),
+                store.open_tiles.len(),
+            )
+        };
+        let mut summary = div()
             .flex()
-            .flex_col()
-            .px_2p5()
-            .pb_2()
+            .items_center()
+            .gap_1()
+            .text_size(px(fonts.font_meta))
+            .text_color(theme::TEXT_DIM);
+        if need > 0 {
+            summary = summary.child(
+                div()
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .text_color(theme::CHANGES)
+                    .child(if need == 1 {
+                        "1 needs you".to_string()
+                    } else {
+                        format!("{need} need you")
+                    }),
+            );
+            summary = summary.child("·");
+        }
+        if running > 0 {
+            summary = summary.child(format!("{running} running ·"));
+        }
+        summary = summary.child(format!("{open} open"));
+
+        shell::list_pane(width)
+            .debug_selector(|| "agent-list".into())
             // the sidebar owns no selectable text: a press here (row, + button)
             // must not seed a window drag-selection — otherwise the gesture
             // that starts on a row can land on transcript text and select it
@@ -626,63 +874,66 @@ impl WarpWindow {
             })
             .child(
                 div()
-                    .group("wsheader")
+                    .flex_shrink_0()
                     .flex()
-                    .items_center()
-                    .gap_1()
+                    .flex_col()
+                    .gap_2p5()
+                    .px_4()
+                    .pt_3p5()
+                    .pb_3()
+                    .border_b_1()
+                    .border_color(theme::HAIRLINE)
                     .child(
                         div()
-                            .flex_1()
-                            .text_size(px(fonts.font_body))
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .text_color(theme::TEXT_DIM)
-                            .child("Workspaces"),
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .text_size(px(fonts.font_list_title))
+                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                    .text_color(theme::TEXT)
+                                    .child("Workspaces"),
+                            )
+                            .child(
+                                tip(
+                                    div()
+                                        .id("add-workspace")
+                                        .role(Role::Button)
+                                        .aria_label("Add a workspace folder")
+                                        .cursor_pointer()
+                                        .p_1p5()
+                                        .rounded(px(6.))
+                                        .hover(|s| s.bg(theme::RAISED))
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.pick_folder(cx);
+                                        })),
+                                    "Add a workspace folder",
+                                )
+                                .child(crate::ui::icon(
+                                    "icons/plus.svg",
+                                    px(fonts.icon_medium),
+                                    theme::TEXT_DIM,
+                                )),
+                            ),
                     )
+                    .child(summary)
                     .child(
-                        // hover-reveal safety: an opacity(0) control is still
-                        // hit-tested in gpui, but it can only be clicked while
-                        // the pointer is over its row — which is exactly when
-                        // group_hover has revealed it. Keep that invariant if
-                        // this pattern ever moves somewhere pointer-less input
-                        // (keyboard/touch) can reach.
-                        tip(
-                            div()
-                                .id("add-workspace")
-                                .role(Role::Button)
-                                .aria_label("Add a workspace folder")
-                                .cursor_pointer()
-                                .p_1()
-                                .rounded_sm()
-                                .opacity(0.)
-                                .group_hover("wsheader", |s| s.opacity(1.))
-                                .hover(|s| s.bg(theme::HOVER))
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.pick_folder(cx);
-                                })),
-                            "Add a workspace folder",
-                        )
-                        .child(crate::ui::icon(
-                            "icons/plus.svg",
-                            px(fonts.icon_medium),
-                            theme::TEXT_MUTED,
-                        )),
+                        // the kit Input has no a11y of its own — the wrapper carries the
+                        // role/value; an AT click lands at the wrapper's center, which is
+                        // the input itself, so focus still reaches the real field
+                        div()
+                            .id("sidebar-filter")
+                            .role(Role::SearchInput)
+                            .track_focus(&filter_leaf.read(cx).state.read(cx).focus_handle(cx))
+                            .aria_label("Filter workspaces")
+                            .aria_placeholder("Filter workspaces")
+                            .aria_value(self.sidebar_filter.clone())
+                            .w_full()
+                            .min_w_0()
+                            .child(filter_leaf),
                     ),
-            )
-            .child(
-                // the kit Input has no a11y of its own — the wrapper carries the
-                // role/value; an AT click lands at the wrapper's center, which is
-                // the input itself, so focus still reaches the real field
-                div()
-                    .id("sidebar-filter")
-                    .role(Role::SearchInput)
-                    .track_focus(&filter_leaf.read(cx).state.read(cx).focus_handle(cx))
-                    .aria_label("Filter workspaces")
-                    .aria_placeholder("Filter workspaces")
-                    .aria_value(self.sidebar_filter.clone())
-                    .w_full()
-                    .min_w_0()
-                    .mt_1()
-                    .child(filter_leaf),
             )
             .child(
                 div()
@@ -690,50 +941,9 @@ impl WarpWindow {
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scroll()
-                    .pt_2()
+                    .pt_1()
+                    .pb_3()
                     .child(workspaces),
-            )
-            .child(
-                tip(
-                    div()
-                        .id("open-settings")
-                        .role(Role::Button)
-                        .aria_label("Settings")
-                        .w_full()
-                        .flex()
-                        .items_center()
-                        .gap_1p5()
-                        .px_2()
-                        .py_1p5()
-                        .rounded_lg()
-                        .cursor_pointer()
-                        .hover(|s| s.bg(theme::HOVER))
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.store.update(cx, |s, _| {
-                                s.is_settings_open = true;
-                            });
-                            this.settings_buffers =
-                                SettingsBuffers::from_settings(&this.store.read(cx).settings);
-                            let (fields, leafs, model_picker) =
-                                this.make_settings_fields(window, cx);
-                            this.settings_fields = fields;
-                            this.settings_leafs = leafs;
-                            this.settings_model_picker = model_picker;
-                            cx.notify();
-                        })),
-                    "Settings",
-                )
-                .child(crate::ui::icon(
-                    "icons/cog.svg",
-                    px(fonts.icon_medium),
-                    theme::TEXT_MUTED,
-                ))
-                .child(
-                    div()
-                        .text_size(px(fonts.font_body))
-                        .text_color(theme::TEXT)
-                        .child("Settings"),
-                ),
             )
             .into_any_element()
     }
@@ -792,10 +1002,10 @@ impl WarpWindow {
             .flex()
             .items_center()
             .w_full()
-            .px_2()
-            .py_1p5()
-            .rounded_lg()
-            .hover(|s| s.bg(theme::HOVER))
+            .min_h(px(40.))
+            .pl_4()
+            .pr_3()
+            .hover(|s| s.bg(theme::RAISED))
             .cursor_pointer()
             .on_click(move |_, _, cx| {
                 let expand_path = path_click.clone();
@@ -842,8 +1052,9 @@ impl WarpWindow {
             .child(
                 div()
                     .min_w_0()
-                    .ml_1p5()
-                    .text_size(px(fonts.font_heading))
+                    .ml_2()
+                    .text_size(px(fonts.font_name))
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
                     .text_color(theme::TEXT)
                     .truncate()
                     .child(SharedString::from(ws.name.clone())),
@@ -853,9 +1064,9 @@ impl WarpWindow {
                     div()
                         .flex_shrink_0()
                         .ml_1p5()
-                        .text_size(px(fonts.font_body))
-                        .text_color(theme::TEXT_FAINT)
-                        .child(SharedString::from(format!("({})", ws.chats.len()))),
+                        .text_size(px(fonts.font_meta))
+                        .text_color(theme::TEXT_MUTED)
+                        .child(SharedString::from(format!("{}", ws.chats.len()))),
                 )
             })
             // running dot pinned to the right edge; hovering the row fades it
@@ -865,7 +1076,7 @@ impl WarpWindow {
             .child(
                 div()
                     .absolute()
-                    .right_1()
+                    .right_3()
                     .top_0()
                     .bottom_0()
                     .flex()
@@ -879,7 +1090,7 @@ impl WarpWindow {
             .child(
                 div()
                     .absolute()
-                    .right_1()
+                    .right_2()
                     .top_0()
                     .bottom_0()
                     .flex()
@@ -959,9 +1170,9 @@ impl WarpWindow {
                             "New chat",
                         )
                         .child(crate::ui::icon(
-                            "icons/chat-outline.svg",
-                            px(fonts.icon_medium),
-                            theme::TEXT_MUTED,
+                            "icons/plus.svg",
+                            px(fonts.icon_small),
+                            theme::TEXT_DIM,
                         )),
                     ),
             )
@@ -992,12 +1203,13 @@ impl WarpWindow {
         chat: &crate::store::SessionItem,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
-        let (fonts, accent_dim, harness_label) = {
+        let (fonts, accent, harness_label, waiting) = {
             let store = self.store.read(cx);
             (
                 store.fonts,
-                store.accent.dim,
+                store.accent.accent,
                 store.session_harness(&chat.id).label(),
+                store.session_waiting(&chat.id),
             )
         };
         let id = chat.id.clone();
@@ -1008,9 +1220,16 @@ impl WarpWindow {
         let id_menu = id.clone();
         let store_del = self.store.clone();
         let id_del = id.clone();
-        let gutter: gpui::AnyElement = if chat.is_running {
-            crate::ui::icon("icons/spinner.svg", px(fonts.icon_small), theme::RUNNING)
+        let gutter: gpui::AnyElement = if waiting {
+            crate::ui::icon("icons/shield.svg", px(fonts.icon_tiny), theme::CHANGES)
                 .into_any_element()
+        } else if chat.is_running {
+            warpui_kit_core::motion::spinner(
+                SharedString::from(format!("chat-spinner-{id}")),
+                "icons/spinner.svg",
+                px(fonts.icon_tiny),
+                theme::BEHIND,
+            )
         } else if chat.pin_visible() {
             crate::ui::icon("icons/pin.svg", px(fonts.icon_small), theme::TEXT_MUTED)
                 .into_any_element()
@@ -1030,15 +1249,21 @@ impl WarpWindow {
             .group("chatrow")
             .flex()
             .items_center()
-            // no w_full: with the 26px indent, w_full overflowed the sidebar and
-            // clipped the right-pinned time/delete layers; flex-col stretch
-            // already sizes the row to the parent minus the indent
-            .ml(px(26.))
-            .px_2()
-            .py_1p5()
-            .rounded_lg()
-            .when(chat.is_selected, |d| d.bg(accent_dim))
-            .hover(|s| s.bg(theme::HOVER))
+            .min_h(px(40.))
+            .pl(px(24.))
+            .pr_3()
+            .when(chat.is_selected, |d| {
+                d.bg(theme::RAISED).child(
+                    div()
+                        .absolute()
+                        .top_0()
+                        .bottom_0()
+                        .left_0()
+                        .w(px(3.))
+                        .bg(accent),
+                )
+            })
+            .hover(|s| s.bg(theme::RAISED))
             .cursor_pointer()
             .on_click(move |_, _, cx| {
                 tracing::info!("chat-row clicked {}", id_click);
@@ -1062,7 +1287,9 @@ impl WarpWindow {
             )
             .child(
                 div()
-                    .w(px(13.))
+                    .flex_shrink_0()
+                    .w(px(16.))
+                    .mr_1()
                     .flex()
                     .items_center()
                     .justify_center()
@@ -1079,7 +1306,10 @@ impl WarpWindow {
                     div()
                         .flex_1()
                         .min_w_0()
-                        .text_size(px(fonts.font_heading))
+                        .text_size(px(fonts.font_body))
+                        .when(chat.is_selected, |d| {
+                            d.font_weight(gpui::FontWeight::SEMIBOLD)
+                        })
                         .text_color(theme::TEXT)
                         .truncate()
                         .child(SharedString::from(chat.title.clone())),
@@ -1095,8 +1325,9 @@ impl WarpWindow {
                         .items_center()
                         .gap_1()
                         .group_hover("chatrow", |s| s.opacity(0.))
-                        .text_size(px(fonts.font_control))
-                        .text_color(theme::TEXT_FAINT)
+                        .ml_2()
+                        .text_size(px(fonts.font_meta))
+                        .text_color(theme::TEXT_MUTED)
                         .child(SharedString::from(harness_label))
                         .child(self.cached_time_label(chat)),
                 )
@@ -1154,8 +1385,10 @@ impl WarpWindow {
             .relative()
             .w(px(theme::SPLITTER_WIDTH))
             .h_full()
+            .flex_shrink_0()
+            .bg(theme::WELL)
             .cursor_col_resize()
-            .hover(|s| s.bg(theme::HOVER))
+            .hover(|s| s.bg(theme::LINE_STRONG))
             .on_mouse_down(
                 MouseButton::Left,
                 move |event: &gpui::MouseDownEvent, _, cx| {
@@ -1326,15 +1559,6 @@ impl WarpWindow {
             .into_any_element()
     }
 
-    fn settings_section(&self, text: &str, fonts: &theme::FontTokens) -> gpui::AnyElement {
-        div()
-            .text_size(px(fonts.font_body))
-            .font_weight(gpui::FontWeight::SEMIBOLD)
-            .text_color(theme::TEXT_MUTED)
-            .child(text.to_string())
-            .into_any_element()
-    }
-
     fn settings_card(&self, children: Vec<gpui::AnyElement>) -> gpui::AnyElement {
         div()
             .w_full()
@@ -1468,7 +1692,17 @@ impl WarpWindow {
 
     // ---- main area -------------------------------------------------------------
 
-    fn render_main(&mut self, window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
+    fn render_main(
+        &mut self,
+        list_shown: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        // Settings is a rail section of its own: it replaces the grid rather
+        // than floating over it
+        if self.store.read(cx).is_settings_open {
+            return self.render_settings(window, cx);
+        }
         let fonts = self.store.read(cx).fonts;
 
         // keep TileView entities in sync with the store's tile list
@@ -1503,16 +1737,32 @@ impl WarpWindow {
         // explicit equal rows: implicit grid rows are content-sized (auto),
         // which let a second-row tile end up shorter than the first-row pair
         let tile_rows = keys.len().div_ceil(tile_columns).max(1) as u16;
+        // tiles are cached views: the window measures them, and a density change
+        // repaints the one tile it touches
+        let list_width = if list_shown {
+            self.store.read(cx).sidebar_shown_width + theme::SPLITTER_WIDTH
+        } else {
+            0.
+        };
+        let grid_width =
+            window.viewport_size().width.as_f32() - shell::scaled(shell::RAIL_WIDTH) - list_width;
+        let tile_width = tile_track_width(grid_width, tile_columns);
+        let density = TileDensity::for_width(tile_width, shell::scaled(1.));
+        for view in self.tile_views.values() {
+            view.update(cx, |tile, cx| tile.set_density(density, cx));
+        }
+
         let mut grid = div()
+            .debug_selector(|| "tile-grid".into())
             .grid()
             .grid_cols(tile_columns as u16)
             .grid_rows(tile_rows)
-            .gap_2()
+            .gap(px(GRID_GAP))
             .flex_1()
             .min_h_0()
             .min_w_0()
             .overflow_hidden()
-            .p_1();
+            .p(px(GRID_GAP));
         for key in &keys {
             if let Some(view) = self.tile_views.get(key) {
                 // cached: the tile's render only runs when its own revision
@@ -1526,17 +1776,11 @@ impl WarpWindow {
         let mut main = div()
             .flex_1()
             .min_w_0()
-            // no h_full here: the row's stretch must subtract my_2p5 so the
-            // bottom margin isn't clipped past the window edge
             .flex()
             .flex_col()
-            .my_2p5()
-            .mr_2p5()
-            .rounded_xl()
-            // the panel sits one point off the chrome, so the edge draws it
-            .border_1()
-            .border_color(theme::BORDER_LIGHT)
-            .bg(theme::SURFACE)
+            // the grid is the same detail pane every app has; the tiles are
+            // base cards that sit on it
+            .bg(theme::PANEL)
             .overflow_hidden()
             .relative()
             .child(div().flex_1().min_h_0().flex().flex_col().child(grid));
@@ -1571,11 +1815,6 @@ impl WarpWindow {
                         .flex_col()
                         .items_center()
                         .justify_center()
-                        .child(div().mb_4().child(crate::ui::icon(
-                            "icons/spark.svg",
-                            px(64.),
-                            theme::TEXT,
-                        )))
                         .child(
                             div()
                                 .text_size(px(fonts.font_body))
@@ -1597,26 +1836,25 @@ impl WarpWindow {
             main = main.child(
                 div()
                     .absolute()
-                    .top_3()
-                    .left(px(24.))
+                    .top_2()
+                    .left_2()
                     .flex()
                     .items_center()
-                    .gap_3()
-                    .rounded_lg()
+                    .gap_2p5()
+                    .rounded(px(8.))
                     .border_1()
                     .border_color(theme::HAIRLINE)
-                    .bg(theme::CARD)
-                    .px_3p5()
-                    .py_1p5()
-                    .shadow_lg()
+                    .bg(theme::PANEL)
+                    .px_3()
+                    .py_2()
                     .child(crate::ui::icon(
                         "icons/clock.svg",
-                        px(fonts.icon_medium),
+                        px(fonts.icon_small),
                         theme::TEXT_MUTED,
                     ))
                     .child(
                         div()
-                            .text_size(px(fonts.font_heading))
+                            .text_size(px(fonts.font_body))
                             .text_color(theme::TEXT)
                             .child(SharedString::from(restore_text.clone())),
                     )
@@ -1625,7 +1863,7 @@ impl WarpWindow {
                         "Restore",
                         BtnKind::Outline,
                         accent,
-                        fonts.font_heading,
+                        fonts.font_control,
                         true,
                         {
                             let store = store_handle.clone();
@@ -1639,7 +1877,7 @@ impl WarpWindow {
                         "Ignore",
                         BtnKind::Outline,
                         accent,
-                        fonts.font_heading,
+                        fonts.font_control,
                         true,
                         {
                             let store = store_handle.clone();
@@ -1649,11 +1887,6 @@ impl WarpWindow {
                         },
                     )),
             );
-        }
-
-        let settings_open = self.store.read(cx).is_settings_open;
-        if settings_open {
-            main = main.child(self.render_settings(window, cx));
         }
 
         main.into_any_element()
@@ -1667,206 +1900,438 @@ impl WarpWindow {
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let fonts = self.store.read(cx).fonts;
-        let buffers = self.settings_buffers.clone();
+        let active = self.settings_section;
+        let width = self.store.read(cx).sidebar_shown_width;
 
-        let page = div()
-            .id("settings-page")
-            .absolute()
-            .inset_0()
-            // opaque sheet: without it the chat tiles bleed through the cards
-            .bg(theme::SETTINGS_BG)
-            .overflow_y_scroll()
-            .child(
-            div()
-                .max_w(px(1040.))
-                .m(px(28.))
-                .flex()
-                .flex_col()
-                .gap_4()
+        // the section list: Settings is a rail section like every other page,
+        // so it is a list beside a detail pane, not a sheet over the grid
+        let mut rows = div().flex().flex_col();
+        for section in SettingsSection::ALL {
+            rows = rows.child(
+                shell::list_row(
+                    gpui::ElementId::Name(format!("settings-section-{}", section.label()).into()),
+                    section == active,
+                )
+                .debug_selector(move || format!("settings-section-{}", section.label()))
+                .a11y_button(section.label())
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.settings_section = section;
+                    cx.notify();
+                }))
                 .child(
                     div()
-                        .flex()
-                        .items_center()
-                        .gap_2()
-                                .child(
-                                    div()
-                                        .id("settings-back")
-                                        .role(Role::Button)
-                                        .aria_label("Back to chats")
-                                        .cursor_pointer()
-                                .p_1()
-                                .rounded_md()
-                                .hover(|s| s.bg(theme::HOVER))
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    // leaving the page commits: text fields land
-                                    // in the buffers, then persist like Save did
-                                    this.commit_settings(cx);
-                                    this.store.update(cx, |s, _| s.is_settings_open = false);
-                                }))
-                                .child(crate::ui::icon("icons/arrow-left.svg", px(fonts.icon_medium), theme::TEXT_MUTED)),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(fonts.font_screen_title))
-                                .font_weight(gpui::FontWeight::SEMIBOLD)
-                                .text_color(theme::TEXT)
-                                .child("Settings"),
-                        ),
+                        .text_size(px(fonts.font_name))
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .text_color(theme::TEXT)
+                        .child(section.label()),
                 )
                 .child(
                     div()
-                        .grid()
-                        .grid_cols(2)
-                        .gap_4()                        .child(
-                            div().flex().flex_col().gap_4()
-                                .child(self.settings_section("Server", &fonts))
-                                .child(self.settings_card(vec![
-                                    div().flex().items_center().gap_2p5()
-                                        .child(settings_label("OpenCode executable", &fonts))
-                                        .child(self.settings_field_wrap("executable", cx))
-                                        .into_any_element(),
-                                    div().flex().items_center().gap_2p5()
-                                        .child(settings_label("DSH executable", &fonts))
-                                        .child(self.settings_field_wrap("dsh_executable", cx))
-                                        .into_any_element(),
-                                    div().flex().items_center().gap_2p5()
-                                        .child(settings_label("Idle stop", &fonts))
-                                        .child(self.settings_field_wrap("idlemin", cx))
-                                        .child(self.settings_hint("min", &fonts))
-                                        .into_any_element(),
-                                    self.settings_hint("A workspace server with no running chat closes after this many idle minutes; the next chat restarts it. 0 keeps servers running.", &fonts),
-                                ]))
-                                .child(self.settings_section("Harness", &fonts))
-                                .child(self.settings_card(vec![
-                                    div().flex().items_center().gap_2p5()
-                                        .child(settings_label("Default for new chats", &fonts))
-                                        .child(self.radio_row(
-                                            &crate::settings::HarnessKind::ALL
-                                                .map(|h| (h.label(), h.option_label())),
-                                            if buffers.default_harness_dsh { "dsh" } else { "opencode" },
-                                            &fonts,
-                                            |b, key| b.default_harness_dsh = key == "dsh",
-                                            cx,
-                                        ))
-                                        .into_any_element(),
-                                    self.settings_hint("The composer's harness pill switches each chat before its first message.", &fonts),
-                                ]))
-                                .child(self.settings_section("Chat defaults", &fonts))
-                                .child(self.settings_card(vec![
-                                    div().flex().items_center().gap_2p5()
-                                        .child(settings_label("Model", &fonts))
-                                        .child(self.settings_model_picker.clone()
-                                            .map(|picker| picker.into_any_element())
-                                            .unwrap_or_else(|| div().into_any_element()))
-                                        .into_any_element(),
-                                    div().flex().items_center().gap_2p5()
-                                        .child(settings_label("Variant", &fonts))
-                                        .child(self.settings_field_wrap("variant", cx)).into_any_element(),
-                                    self.check_row(
-                                        "Always select the highest variant by default",
-                                        buffers.variant_highest,
-                                        &fonts,
-                                        |b| b.variant_highest = !b.variant_highest,
-                                        cx,
-                                    ),
-                                    div().flex().items_center().gap_2p5()
-                                        .child(settings_label("Agent", &fonts))
-                                        .child(self.settings_field_wrap("agent", cx)).into_any_element(),
-                                ])),
+                        .mt_0p5()
+                        .text_size(px(fonts.font_row_meta))
+                        .text_color(theme::TEXT_DIM)
+                        .child(section.hint()),
+                ),
+            );
+        }
+        let list = shell::list_pane(width)
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .px_4()
+                    .pt_3p5()
+                    .pb_3()
+                    .border_b_1()
+                    .border_color(theme::HAIRLINE)
+                    .text_size(px(fonts.font_list_title))
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .text_color(theme::TEXT)
+                    .child("Settings"),
+            )
+            .child(rows);
+
+        let mut head = div()
+            .flex_shrink_0()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_2()
+            .px(px(shell::DETAIL_PADDING))
+            .py_4()
+            .border_b_1()
+            .border_color(theme::HAIRLINE)
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .child(
+                        div()
+                            .text_size(px(fonts.font_screen_title))
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_color(theme::TEXT)
+                            .child(active.label()),
+                    )
+                    .child(
+                        div()
+                            .mt_0p5()
+                            .text_size(px(fonts.font_meta))
+                            .text_color(theme::TEXT_DIM)
+                            .child(active.hint()),
+                    ),
+            );
+        if active == SettingsSection::Appearance {
+            head = head.child(
+                div()
+                    .text_size(px(fonts.font_meta))
+                    .text_color(theme::TEXT_FAINT)
+                    .child("Applied at once"),
+            );
+        } else {
+            head = head.child(
+                div()
+                    .id("settings-save")
+                    .a11y_button("Save settings")
+                    .cursor_pointer()
+                    .h(px(shell::scaled(shell::CONTROL_HEIGHT)))
+                    .px_4()
+                    .rounded(px(6.))
+                    .flex()
+                    .items_center()
+                    .text_size(px(fonts.font_control))
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .bg(theme::ACCENT)
+                    .text_color(theme::ON_ACCENT)
+                    .hover(|s| s.opacity(0.9))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.commit_settings(cx);
+                        cx.notify();
+                    }))
+                    .child("Save"),
+            );
+        }
+
+        let mut cards = div()
+            .w_full()
+            .max_w(px(shell::READING_WIDTH))
+            .flex()
+            .flex_col()
+            .gap_3();
+        for card in self.settings_cards(active, &fonts, cx) {
+            cards = cards.child(card);
+        }
+
+        shell::panes()
+            .child(list)
+            .child(
+                shell::detail_pane()
+                    .debug_selector(|| "settings-detail".into())
+                    .child(head)
+                    .child(
+                        div()
+                            .id("settings-scroll")
+                            .flex_1()
+                            .min_h_0()
+                            .overflow_y_scroll()
+                            .p(px(shell::DETAIL_PADDING))
+                            .child(cards),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    /// One section's rows, grouped into the design's cards.
+    fn settings_cards(
+        &mut self,
+        active: SettingsSection,
+        fonts: &theme::FontTokens,
+        cx: &mut Context<Self>,
+    ) -> Vec<gpui::AnyElement> {
+        let buffers = self.settings_buffers.clone();
+        match active {
+            SettingsSection::Appearance => vec![
+                self.settings_card(vec![
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2p5()
+                        .child(settings_label("Text size", fonts))
+                        .child(warpui_kit_core::text_size_control())
+                        .into_any_element(),
+                    self.settings_hint(
+                        "Applied right away. The other Warp apps follow when they next open.",
+                        fonts,
+                    ),
+                    div().h(px(1.)).bg(theme::HAIRLINE).into_any_element(),
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2p5()
+                        .child(settings_label("Palette", fonts))
+                        .child(
+                            div()
+                                .size(px(14.))
+                                .rounded(px(3.))
+                                .bg(theme::ACCENT),
                         )
                         .child(
-                            div().flex().flex_col().gap_4()
-                                .child(self.settings_section("Appearance", &fonts))
-                                .child(self.settings_card(vec![
-                                    div().flex().items_center().gap_2p5()
-                                        .child(settings_label("Text size", &fonts))
-                                        .child(warpui_kit_core::text_size_control())
-                                        .into_any_element(),
-                                    self.settings_hint("Applied right away. The other Warp apps follow when they next open.", &fonts),
-                                    div().h(px(1.)).bg(theme::HAIRLINE).into_any_element(),
-                                    div().flex().flex_wrap().items_center().gap_2p5()
-                                        .child(settings_label("Accent", &fonts))
-                                        .child({
-                                            // wrap keeps all presets reachable at any card width
-                                            let mut swatches = div().flex().flex_wrap().gap_2p5();
-                                            for preset in theme::ACCENT_PRESETS.iter() {
-                                                let key = preset.key.to_string();
-                                                let selected = buffers.accent_key == preset.key;
-                                                swatches = swatches.child(
-                                                    div()
-                                                        .id(gpui::ElementId::NamedInteger("accent".into(), TileView::hash(preset.key)))
-                                                        .role(Role::RadioButton)
-                                                        .aria_label(SharedString::from(format!("Accent {}", preset.key)))
-                                                        .aria_selected(selected)
-                                                        .size(px(24.))
-                                                        .flex_shrink_0()
-                                                        .rounded_full()
-                                                        .bg(theme::rgba_u32(preset.accent))
-                                                        .when(selected, |d| d.border_2().border_color(theme::TEXT_MUTED))
-                                                        .cursor_pointer()
-                                                        .on_click(cx.listener(move |this, _, _, cx| {
-                                                            this.settings_buffers.accent_key = key.clone();
-                                                            cx.notify();
-                                                        })),
-                                                );
-                                            }
-                                            swatches.into_any_element()
-                                        })
-                                        .into_any_element(),
-                                    self.settings_hint("Green, blue, amber, salmon and four gray tones; recolors selected states and accents.", &fonts),
-                                    div().h(px(1.)).bg(theme::HAIRLINE).into_any_element(),
-                                    self.check_row("Show tooltips on hover", buffers.show_tool_tips, &fonts, |b| b.show_tool_tips = !b.show_tool_tips, cx),
-                                ]))
-                                .child(self.settings_section("Permissions", &fonts))
-                                .child({
-                                    let mut perm_rows: Vec<gpui::AnyElement> = Vec::new();
-                                    perm_rows.push(self.check_row("Auto-allow tool permissions (edit, bash, webfetch)", buffers.auto_allow, &fonts, |b| b.auto_allow = !b.auto_allow, cx));
-                                    if buffers.auto_allow {
-                                        perm_rows.push(self.check_row("Allow immediately (skip the random wait)", buffers.auto_allow_instant, &fonts, |b| b.auto_allow_instant = !b.auto_allow_instant, cx));
-                                        if !buffers.auto_allow_instant {
-                                            perm_rows.push(div().flex().items_center().gap_2p5()
-                                                .child(settings_label("Working hours", &fonts))
-                                                .child(self.settings_field_wrap("min", cx))
-                                                .child(div().text_color(theme::TEXT_MUTED).child("–"))
-                                                .child(self.settings_field_wrap("max", cx))
-                                                .child(self.settings_hint("seconds", &fonts))
-                                                .into_any_element());
-                                            perm_rows.push(div().flex().items_center().gap_2p5()
-                                                .child(settings_label("Lunch", &fonts))
-                                                .child(self.settings_field_wrap("lunchstart", cx))
-                                                .child(div().text_color(theme::TEXT_MUTED).child("–"))
-                                                .child(self.settings_field_wrap("lunchend", cx))
-                                                .into_any_element());
-                                            perm_rows.push(div().flex().items_center().gap_2p5()
-                                                .child(settings_label("Off hours", &fonts))
-                                                .child(self.settings_field_wrap("offstart", cx))
-                                                .child(div().text_color(theme::TEXT_MUTED).child("→"))
-                                                .child(self.settings_field_wrap("workdaystart", cx))
-                                                .into_any_element());
-                                            // one range for both away windows: Store::auto_allow_range
-                                            perm_rows.push(div().flex().items_center().gap_2p5()
-                                                .child(settings_label("Lunch and off hours", &fonts))
-                                                .child(self.settings_field_wrap("awaymin", cx))
-                                                .child(div().text_color(theme::TEXT_MUTED).child("–"))
-                                                .child(self.settings_field_wrap("awaymax", cx))
-                                                .child(self.settings_hint("seconds", &fonts))
-                                                .into_any_element());
-                                            perm_rows.push(self.settings_hint("Random wait before auto-allow, picked by local time.", &fonts));
-                                        }
-                                    }
-                                    perm_rows.push(self.check_row("Disable MCP servers (all workspaces)", buffers.mcp_disabled, &fonts, |b| b.mcp_disabled = !b.mcp_disabled, cx));
-                                    perm_rows.push(self.settings_hint("Disconnects every workspace's MCP servers at once and overrides the composer's per-workspace toggle.", &fonts));
-                                    self.settings_card(perm_rows)
-                                }),
-                        ),
+                            div()
+                                .text_size(px(fonts.font_body))
+                                .text_color(theme::TEXT)
+                                .child("Copper"),
+                        )
+                        .into_any_element(),
+                    self.settings_hint(
+                        "The family palette. Plum and Pine stay in the prototype for comparison.",
+                        fonts,
+                    ),
+                    div().h(px(1.)).bg(theme::HAIRLINE).into_any_element(),
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2p5()
+                        .child(settings_label("Typeface", fonts))
+                        .child(
+                            div()
+                                .text_size(px(fonts.font_body))
+                                .text_color(theme::TEXT)
+                                .child("Inter + JetBrains Mono"),
+                        )
+                        .into_any_element(),
+                    self.settings_hint(
+                        "The family's two faces, bundled with the app; code, paths and titles set in mono.",
+                        fonts,
+                    ),
+                ]),
+                self.settings_card(vec![
+                    self.appearance_check(
+                        "Reduce motion",
+                        buffers.reduce_motion,
+                        fonts,
+                        |b| b.reduce_motion = !b.reduce_motion,
+                        cx,
+                    ),
+                    self.appearance_check(
+                        "Show tooltips on hover",
+                        buffers.show_tool_tips,
+                        fonts,
+                        |b| b.show_tool_tips = !b.show_tool_tips,
+                        cx,
+                    ),
+                    self.settings_hint(
+                        "Reduce motion turns animation off, spinners included; busy labels stay.",
+                        fonts,
+                    ),
+                ]),
+            ],
+            SettingsSection::ChatDefaults => vec![
+                self.settings_card(vec![
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2p5()
+                        .child(settings_label("Harness", fonts))
+                        .child(self.radio_row(
+                            &crate::settings::HarnessKind::ALL
+                                .map(|h| (h.label(), h.option_label())),
+                            if buffers.default_harness_dsh { "dsh" } else { "opencode" },
+                            fonts,
+                            |b, key| b.default_harness_dsh = key == "dsh",
+                            cx,
+                        ))
+                        .into_any_element(),
+                    self.settings_hint(
+                        "Runs new chats until the composer's harness pill switches one before its first message.",
+                        fonts,
+                    ),
+                ]),
+                self.settings_card(vec![
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2p5()
+                        .child(settings_label("Model", fonts))
+                        .child(
+                            self.settings_model_picker
+                                .clone()
+                                .map(|picker| picker.into_any_element())
+                                .unwrap_or_else(|| div().into_any_element()),
+                        )
+                        .into_any_element(),
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2p5()
+                        .child(settings_label("Variant", fonts))
+                        .child(self.settings_field_wrap("variant", cx))
+                        .into_any_element(),
+                    self.check_row(
+                        "Always select the highest variant by default",
+                        buffers.variant_highest,
+                        fonts,
+                        |b| b.variant_highest = !b.variant_highest,
+                        cx,
+                    ),
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2p5()
+                        .child(settings_label("Agent", fonts))
+                        .child(self.settings_field_wrap("agent", cx))
+                        .into_any_element(),
+                ]),
+            ],
+            SettingsSection::Permissions => {
+                let mut perm_rows: Vec<gpui::AnyElement> = Vec::new();
+                perm_rows.push(self.check_row(
+                    "Auto-allow tool permissions (edit, bash, webfetch)",
+                    buffers.auto_allow,
+                    fonts,
+                    |b| b.auto_allow = !b.auto_allow,
+                    cx,
+                ));
+                if buffers.auto_allow {
+                    perm_rows.push(self.check_row(
+                        "Allow immediately (skip the random wait)",
+                        buffers.auto_allow_instant,
+                        fonts,
+                        |b| b.auto_allow_instant = !b.auto_allow_instant,
+                        cx,
+                    ));
+                    if !buffers.auto_allow_instant {
+                        perm_rows.push(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_2p5()
+                                .child(settings_label("Working hours", fonts))
+                                .child(self.settings_field_wrap("min", cx))
+                                .child(div().text_color(theme::TEXT_MUTED).child("–"))
+                                .child(self.settings_field_wrap("max", cx))
+                                .child(self.settings_hint("seconds", fonts))
+                                .into_any_element(),
+                        );
+                        perm_rows.push(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_2p5()
+                                .child(settings_label("Lunch", fonts))
+                                .child(self.settings_field_wrap("lunchstart", cx))
+                                .child(div().text_color(theme::TEXT_MUTED).child("–"))
+                                .child(self.settings_field_wrap("lunchend", cx))
+                                .into_any_element(),
+                        );
+                        perm_rows.push(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_2p5()
+                                .child(settings_label("Off hours", fonts))
+                                .child(div().text_color(theme::TEXT_MUTED).child("→"))
+                                .child(self.settings_field_wrap("offstart", cx))
+                                .into_any_element(),
+                        );
+                        perm_rows.push(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_2p5()
+                                .child(settings_label("Workday starts", fonts))
+                                .child(div().text_color(theme::TEXT_MUTED).child("→"))
+                                .child(self.settings_field_wrap("workdaystart", cx))
+                                .into_any_element(),
+                        );
+                        // one range for both away windows: Store::auto_allow_range
+                        perm_rows.push(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_2p5()
+                                .child(settings_label("Lunch and off hours", fonts))
+                                .child(self.settings_field_wrap("awaymin", cx))
+                                .child(div().text_color(theme::TEXT_MUTED).child("–"))
+                                .child(self.settings_field_wrap("awaymax", cx))
+                                .child(self.settings_hint("seconds", fonts))
+                                .into_any_element(),
+                        );
+                        perm_rows.push(self.settings_hint(
+                            "Random wait before auto-allow, picked by local time.",
+                            fonts,
+                        ));
+                    }
+                }
+                perm_rows.push(self.check_row(
+                    "Disable MCP servers (all workspaces)",
+                    buffers.mcp_disabled,
+                    fonts,
+                    |b| b.mcp_disabled = !b.mcp_disabled,
+                    cx,
+                ));
+                perm_rows.push(self.settings_hint(
+                    "Disconnects every workspace's MCP servers at once and overrides the composer's per-workspace toggle.",
+                    fonts,
+                ));
+                vec![self.settings_card(perm_rows)]
+            }
+            SettingsSection::Server => vec![self.settings_card(vec![
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2p5()
+                    .child(settings_label("OpenCode executable", fonts))
+                    .child(self.settings_field_wrap("executable", cx))
+                    .into_any_element(),
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2p5()
+                    .child(settings_label("DSH executable", fonts))
+                    .child(self.settings_field_wrap("dsh_executable", cx))
+                    .into_any_element(),
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2p5()
+                    .child(settings_label("Idle stop", fonts))
+                    .child(self.settings_field_wrap("idlemin", cx))
+                    .child(self.settings_hint("minutes", fonts))
+                    .into_any_element(),
+                self.settings_hint(
+                    "A workspace server with no running chat closes after this many idle minutes; the next chat restarts it. 0 keeps servers running.",
+                    fonts,
                 ),
-        );
-        page.into_any_element()
+            ])],
+        }
+    }
+
+    /// An Appearance row: it applies the moment it is pressed, the design's
+    /// one exception to Save. The row itself reads the buffer, so the check
+    /// repaints from the same value the settings file gets.
+    fn appearance_check(
+        &self,
+        text: &str,
+        checked: bool,
+        fonts: &theme::FontTokens,
+        flip: fn(&mut SettingsBuffers),
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        div()
+            .id(gpui::ElementId::NamedInteger(
+                "appearance-check".into(),
+                TileView::hash(text),
+            ))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                flip(&mut this.settings_buffers);
+                this.commit_settings(cx);
+                cx.notify();
+            }))
+            .child(self.check_row(text, checked, fonts, |_b| {}, cx))
+            .into_any_element()
     }
 
     /// Persists the settings page: text fields land in the buffers, then the
-    /// buffers parse and push into live state. Runs when the page closes —
-    /// there is no separate Save button.
+    /// buffers parse and push into live state. Runs from the design's Save
+    /// button; Appearance rows call it themselves so they apply at once.
     fn commit_settings(&self, cx: &mut App) {
         let mut buffers = self.settings_buffers.clone();
         for (key, field) in &self.settings_fields {

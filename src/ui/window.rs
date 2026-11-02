@@ -290,8 +290,8 @@ impl Render for WarpWindow {
             .size_full()
             .flex()
             .flex_col()
-            .bg(theme::WINDOW_CHROME)
-            .text_color(theme::TEXT)
+            .bg(theme::window_chrome())
+            .text_color(theme::text())
             .font_family(theme::ui_font())
             // mounts the window's selection machinery: without this layer the
             // kit's global mouse handlers never register and selectable
@@ -595,7 +595,7 @@ impl WarpWindow {
             } else if store.any_stream_unhealthy() {
                 theme::DANGER
             } else {
-                theme::TEXT_MUTED
+                theme::text_muted()
             }
         };
         let store_handle = self.store.clone();
@@ -617,13 +617,13 @@ impl WarpWindow {
                     .justify_center()
                     .size(px(28.))
                     .rounded(px(6.))
-                    .bg(theme::BRAND_BG)
+                    .bg(theme::brand_bg())
                     .border_1()
                     .border_color(theme::BRAND_BORDER)
                     .child(crate::ui::icon(
                         "icons/spark.svg",
                         px(fonts.icon_small),
-                        theme::ACCENT_INK,
+                        theme::accent_ink(),
                     )),
             )
             .child(
@@ -631,7 +631,7 @@ impl WarpWindow {
                     .flex_shrink_0()
                     .text_size(px(fonts.font_brand))
                     .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .text_color(theme::TEXT)
+                    .text_color(theme::text())
                     .child("Warp Agent"),
             )
             .child(
@@ -658,7 +658,7 @@ impl WarpWindow {
                         .h(px(28.))
                         .px_2p5()
                         .rounded(px(14.))
-                        .bg(theme::PANEL)
+                        .bg(theme::panel())
                         .flex()
                         .items_center()
                         .gap(px(7.))
@@ -690,7 +690,7 @@ impl WarpWindow {
                         .flex()
                         .items_center()
                         .justify_center()
-                        .hover(|s| s.bg(theme::RAISED))
+                        .hover(|s| s.bg(theme::raised()))
                         .on_click(move |_, _, cx| {
                             store_handle
                                 .update(cx, |s, cx| s.set_sidebar_visible(!s.sidebar_visible, cx));
@@ -705,13 +705,13 @@ impl WarpWindow {
                     crate::ui::icon(
                         "icons/panel-left.svg",
                         px(fonts.icon_medium),
-                        theme::TEXT_MUTED,
+                        theme::text_muted(),
                     )
                 } else {
                     crate::ui::icon(
                         "icons/panel-left-open.svg",
                         px(fonts.icon_medium),
-                        theme::TEXT_MUTED,
+                        theme::text_muted(),
                     )
                 }),
             )
@@ -727,7 +727,7 @@ impl WarpWindow {
                         .flex()
                         .items_center()
                         .justify_center()
-                        .hover(|s| s.bg(theme::RAISED))
+                        .hover(|s| s.bg(theme::raised()))
                         .on_click(|_, _, _| {
                             if let Err(err) = crate::services::launch_sibling("warp-station") {
                                 tracing::warn!("could not launch warp-station: {err}");
@@ -738,10 +738,10 @@ impl WarpWindow {
                 .child(crate::ui::icon(
                     "icons/code.svg",
                     px(fonts.icon_medium),
-                    theme::TEXT_MUTED,
+                    theme::text_muted(),
                 )),
             )
-            .child(div().w(px(1.)).h(px(20.)).mx_1().bg(theme::HAIRLINE))
+            .child(div().w(px(1.)).h(px(20.)).mx_1().bg(theme::hairline()))
             .child(
                 tip(
                     div()
@@ -754,14 +754,14 @@ impl WarpWindow {
                         .flex()
                         .items_center()
                         .justify_center()
-                        .hover(|s| s.bg(theme::RAISED))
+                        .hover(|s| s.bg(theme::raised()))
                         .on_click(|_, window, _| window.minimize_window()),
                     "Minimize",
                 )
                 .child(crate::ui::icon(
                     "icons/dash.svg",
                     px(fonts.icon_medium),
-                    theme::TEXT_MUTED,
+                    theme::text_muted(),
                 )),
             )
             .child(
@@ -776,7 +776,7 @@ impl WarpWindow {
                         .flex()
                         .items_center()
                         .justify_center()
-                        .hover(|s| s.bg(theme::RAISED))
+                        .hover(|s| s.bg(theme::raised()))
                         .on_click(cx.listener(|_, _, window, cx| {
                             window.zoom_window();
                             // the compositor toggles asynchronously — nudge a
@@ -806,7 +806,7 @@ impl WarpWindow {
                 .child(crate::ui::icon(
                     "icons/close.svg",
                     px(fonts.icon_medium),
-                    theme::TEXT_MUTED,
+                    theme::text_muted(),
                 )),
             )
             .into_any_element()
@@ -858,7 +858,7 @@ impl WarpWindow {
                             .py_2()
                             .text_size(px(fonts.font_meta))
                             .italic()
-                            .text_color(theme::TEXT_MUTED)
+                            .text_color(theme::text_muted())
                             .child("No chats yet"),
                     );
                 }
@@ -876,7 +876,7 @@ impl WarpWindow {
                     .py_2()
                     .text_size(px(fonts.font_meta))
                     .italic()
-                    .text_color(theme::TEXT_MUTED)
+                    .text_color(theme::text_muted())
                     .child("No matching workspace"),
             );
         }
@@ -894,7 +894,7 @@ impl WarpWindow {
             .items_center()
             .gap_1()
             .text_size(px(fonts.font_meta))
-            .text_color(theme::TEXT_DIM);
+            .text_color(theme::text_dim());
         if need > 0 {
             summary = summary.child(
                 div()
@@ -931,7 +931,7 @@ impl WarpWindow {
                     .pt_3p5()
                     .pb_3()
                     .border_b_1()
-                    .border_color(theme::HAIRLINE)
+                    .border_color(theme::hairline())
                     .child(
                         div()
                             .flex()
@@ -942,7 +942,7 @@ impl WarpWindow {
                                     .flex_1()
                                     .text_size(px(fonts.font_list_title))
                                     .font_weight(gpui::FontWeight::SEMIBOLD)
-                                    .text_color(theme::TEXT)
+                                    .text_color(theme::text())
                                     .child("Workspaces"),
                             )
                             .child(
@@ -954,7 +954,7 @@ impl WarpWindow {
                                         .cursor_pointer()
                                         .p_1p5()
                                         .rounded(px(6.))
-                                        .hover(|s| s.bg(theme::RAISED))
+                                        .hover(|s| s.bg(theme::raised()))
                                         .on_click(cx.listener(|this, _, _, cx| {
                                             this.pick_folder(cx);
                                         })),
@@ -963,7 +963,7 @@ impl WarpWindow {
                                 .child(crate::ui::icon(
                                     "icons/plus.svg",
                                     px(fonts.icon_medium),
-                                    theme::TEXT_DIM,
+                                    theme::text_dim(),
                                 )),
                             ),
                     )
@@ -1008,21 +1008,21 @@ impl WarpWindow {
             crate::ui::icon(
                 "icons/chat-outline.svg",
                 px(fonts.icon_medium),
-                theme::TEXT_MUTED,
+                theme::text_muted(),
             )
             .into_any_element()
         } else if ws.is_expanded() {
             crate::ui::icon(
                 "icons/folder-open-outline.svg",
                 px(fonts.icon_medium),
-                theme::TEXT_MUTED,
+                theme::text_muted(),
             )
             .into_any_element()
         } else {
             crate::ui::icon(
                 "icons/folder-outline.svg",
                 px(fonts.icon_medium),
-                theme::TEXT_MUTED,
+                theme::text_muted(),
             )
             .into_any_element()
         };
@@ -1054,7 +1054,7 @@ impl WarpWindow {
             .min_h(px(40.))
             .pl_4()
             .pr_3()
-            .hover(|s| s.bg(theme::RAISED))
+            .hover(|s| s.bg(theme::raised()))
             .cursor_pointer()
             .on_click(move |_, _, cx| {
                 let expand_path = path_click.clone();
@@ -1104,7 +1104,7 @@ impl WarpWindow {
                     .ml_2()
                     .text_size(px(fonts.font_name))
                     .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .text_color(theme::TEXT)
+                    .text_color(theme::text())
                     .truncate()
                     .child(SharedString::from(ws.name.clone())),
             )
@@ -1114,7 +1114,7 @@ impl WarpWindow {
                         .flex_shrink_0()
                         .ml_1p5()
                         .text_size(px(fonts.font_meta))
-                        .text_color(theme::TEXT_MUTED)
+                        .text_color(theme::text_muted())
                         .child(SharedString::from(format!("{}", ws.chats.len()))),
                 )
             })
@@ -1173,7 +1173,7 @@ impl WarpWindow {
                         .child(crate::ui::icon(
                             "icons/plus.svg",
                             px(fonts.icon_small),
-                            theme::TEXT_DIM,
+                            theme::text_dim(),
                         )),
                     )
                     .when(!ws.is_general(), |d| {
@@ -1219,7 +1219,7 @@ impl WarpWindow {
                             .child(crate::ui::icon(
                                 "icons/kebab.svg",
                                 px(fonts.icon_medium),
-                                theme::TEXT_MUTED,
+                                theme::text_muted(),
                             )),
                         )
                     }),
@@ -1282,7 +1282,7 @@ impl WarpWindow {
                 theme::BEHIND,
             )
         } else if chat.pin_visible() {
-            crate::ui::icon("icons/pin.svg", px(fonts.icon_small), theme::TEXT_MUTED)
+            crate::ui::icon("icons/pin.svg", px(fonts.icon_small), theme::text_muted())
                 .into_any_element()
         } else {
             div().into_any_element()
@@ -1304,7 +1304,7 @@ impl WarpWindow {
             .pl(px(24.))
             .pr_3()
             .when(chat.is_selected, |d| {
-                d.bg(theme::RAISED).child(
+                d.bg(theme::raised()).child(
                     div()
                         .absolute()
                         .top_0()
@@ -1314,7 +1314,7 @@ impl WarpWindow {
                         .bg(accent),
                 )
             })
-            .hover(|s| s.bg(theme::RAISED))
+            .hover(|s| s.bg(theme::raised()))
             .cursor_pointer()
             .on_click(move |_, _, cx| {
                 tracing::info!("chat-row clicked {}", id_click);
@@ -1361,7 +1361,7 @@ impl WarpWindow {
                         .when(chat.is_selected, |d| {
                             d.font_weight(gpui::FontWeight::SEMIBOLD)
                         })
-                        .text_color(theme::TEXT)
+                        .text_color(theme::text())
                         .truncate()
                         .child(SharedString::from(chat.title.clone())),
                 )
@@ -1378,7 +1378,7 @@ impl WarpWindow {
                         .group_hover("chatrow", |s| s.opacity(0.))
                         .ml_2()
                         .text_size(px(fonts.font_meta))
-                        .text_color(theme::TEXT_MUTED)
+                        .text_color(theme::text_muted())
                         .child(SharedString::from(harness_label))
                         .child(self.cached_time_label(chat)),
                 )
@@ -1434,7 +1434,7 @@ impl WarpWindow {
                             .child(crate::ui::icon(
                                 "icons/kebab.svg",
                                 px(fonts.icon_medium),
-                                theme::TEXT_MUTED,
+                                theme::text_muted(),
                             )),
                         ),
                 );
@@ -1453,9 +1453,9 @@ impl WarpWindow {
             .w(px(theme::SPLITTER_WIDTH))
             .h_full()
             .flex_shrink_0()
-            .bg(theme::WELL)
+            .bg(theme::well())
             .cursor_col_resize()
-            .hover(|s| s.bg(theme::LINE_STRONG))
+            .hover(|s| s.bg(theme::line_strong()))
             .on_mouse_down(
                 MouseButton::Left,
                 move |event: &gpui::MouseDownEvent, _, cx| {
@@ -1621,7 +1621,7 @@ impl WarpWindow {
         div()
             .text_size(px(fonts.font_body))
             .italic()
-            .text_color(theme::TEXT_FAINT)
+            .text_color(theme::text_faint())
             .child(text.to_string())
             .into_any_element()
     }
@@ -1631,8 +1631,8 @@ impl WarpWindow {
             .w_full()
             .rounded_lg()
             .border_1()
-            .border_color(theme::HAIRLINE)
-            .bg(theme::SETTINGS_CARD)
+            .border_color(theme::hairline())
+            .bg(theme::settings_card())
             .p_3()
             .flex()
             .flex_col()
@@ -1661,7 +1661,7 @@ impl WarpWindow {
                 .child(crate::ui::icon(
                     "icons/check.svg",
                     px(fonts.icon_nano),
-                    theme::SURFACE,
+                    theme::surface(),
                 ))
                 .into_any_element()
         } else {
@@ -1669,7 +1669,7 @@ impl WarpWindow {
                 .size(px(14.))
                 .rounded_sm()
                 .border_1()
-                .border_color(theme::TEXT_MUTED)
+                .border_color(theme::text_muted())
                 .into_any_element()
         };
         div()
@@ -1696,7 +1696,7 @@ impl WarpWindow {
             .child(
                 div()
                     .text_size(px(fonts.font_heading))
-                    .text_color(theme::TEXT)
+                    .text_color(theme::text())
                     .child(text.to_string()),
             )
             .into_any_element()
@@ -1743,13 +1743,13 @@ impl WarpWindow {
                             .size(px(11.))
                             .rounded_full()
                             .border_1()
-                            .border_color(theme::TEXT_MUTED)
+                            .border_color(theme::text_muted())
                             .into_any_element()
                     })
                     .child(
                         div()
                             .text_size(px(fonts.font_heading))
-                            .text_color(theme::TEXT)
+                            .text_color(theme::text())
                             .child((*label_text).to_string()),
                     ),
             );
@@ -1847,7 +1847,7 @@ impl WarpWindow {
             .flex_col()
             // the grid is the same detail pane every app has; the tiles are
             // base cards that sit on it
-            .bg(theme::PANEL)
+            .bg(theme::panel())
             .overflow_hidden()
             .relative();
 
@@ -1884,7 +1884,7 @@ impl WarpWindow {
                         .child(
                             div()
                                 .text_size(px(fonts.font_body))
-                                .text_color(theme::TEXT_FAINT)
+                                .text_color(theme::text_faint())
                                 .child(hint),
                         ),
                 );
@@ -1909,19 +1909,19 @@ impl WarpWindow {
                     .gap_2p5()
                     .rounded(px(8.))
                     .border_1()
-                    .border_color(theme::HAIRLINE)
-                    .bg(theme::SURFACE)
+                    .border_color(theme::hairline())
+                    .bg(theme::surface())
                     .px_3()
                     .py_2()
                     .child(crate::ui::icon(
                         "icons/clock.svg",
                         px(fonts.icon_small),
-                        theme::TEXT_MUTED,
+                        theme::text_muted(),
                     ))
                     .child(
                         div()
                             .text_size(px(fonts.font_body))
-                            .text_color(theme::TEXT)
+                            .text_color(theme::text())
                             .child(SharedString::from(restore_text.clone())),
                     )
                     .child(controls::button(
@@ -1990,14 +1990,14 @@ impl WarpWindow {
                     div()
                         .text_size(px(fonts.font_name))
                         .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .text_color(theme::TEXT)
+                        .text_color(theme::text())
                         .child(section.label()),
                 )
                 .child(
                     div()
                         .mt_0p5()
                         .text_size(px(fonts.font_row_meta))
-                        .text_color(theme::TEXT_DIM)
+                        .text_color(theme::text_dim())
                         .child(section.hint()),
                 ),
             );
@@ -2010,10 +2010,10 @@ impl WarpWindow {
                     .pt_3p5()
                     .pb_3()
                     .border_b_1()
-                    .border_color(theme::HAIRLINE)
+                    .border_color(theme::hairline())
                     .text_size(px(fonts.font_list_title))
                     .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .text_color(theme::TEXT)
+                    .text_color(theme::text())
                     .child("Settings"),
             )
             .child(rows);
@@ -2027,7 +2027,7 @@ impl WarpWindow {
             .px(px(shell::DETAIL_PADDING))
             .py_4()
             .border_b_1()
-            .border_color(theme::HAIRLINE)
+            .border_color(theme::hairline())
             .child(
                 div()
                     .flex_1()
@@ -2036,14 +2036,14 @@ impl WarpWindow {
                         div()
                             .text_size(px(fonts.font_screen_title))
                             .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .text_color(theme::TEXT)
+                            .text_color(theme::text())
                             .child(active.label()),
                     )
                     .child(
                         div()
                             .mt_0p5()
                             .text_size(px(fonts.font_meta))
-                            .text_color(theme::TEXT_DIM)
+                            .text_color(theme::text_dim())
                             .child(active.hint()),
                     ),
             );
@@ -2051,7 +2051,7 @@ impl WarpWindow {
             head = head.child(
                 div()
                     .text_size(px(fonts.font_meta))
-                    .text_color(theme::TEXT_FAINT)
+                    .text_color(theme::text_faint())
                     .child("Applied at once"),
             );
         } else {
@@ -2067,8 +2067,8 @@ impl WarpWindow {
                     .items_center()
                     .text_size(px(fonts.font_control))
                     .font_weight(gpui::FontWeight::MEDIUM)
-                    .bg(theme::ACCENT)
-                    .text_color(theme::ON_ACCENT)
+                    .bg(theme::accent())
+                    .text_color(theme::on_accent())
                     .hover(|s| s.opacity(0.9))
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.commit_settings(cx);
@@ -2129,30 +2129,19 @@ impl WarpWindow {
                         "Applied right away. The other Warp apps follow when they next open.",
                         fonts,
                     ),
-                    div().h(px(1.)).bg(theme::HAIRLINE).into_any_element(),
+                    div().h(px(1.)).bg(theme::hairline()).into_any_element(),
                     div()
                         .flex()
                         .items_center()
                         .gap_2p5()
                         .child(settings_label("Palette", fonts))
-                        .child(
-                            div()
-                                .size(px(14.))
-                                .rounded(px(3.))
-                                .bg(theme::ACCENT),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(fonts.font_body))
-                                .text_color(theme::TEXT)
-                                .child("Copper"),
-                        )
+                        .child(warpui_kit_core::palette_control())
                         .into_any_element(),
                     self.settings_hint(
-                        "The family palette. Plum and Pine stay in the prototype for comparison.",
+                        "Applied right away. The other Warp apps follow when they next open.",
                         fonts,
                     ),
-                    div().h(px(1.)).bg(theme::HAIRLINE).into_any_element(),
+                    div().h(px(1.)).bg(theme::hairline()).into_any_element(),
                     div()
                         .flex()
                         .items_center()
@@ -2161,7 +2150,7 @@ impl WarpWindow {
                         .child(
                             div()
                                 .text_size(px(fonts.font_body))
-                                .text_color(theme::TEXT)
+                                .text_color(theme::text())
                                 .child("Inter + JetBrains Mono"),
                         )
                         .into_any_element(),
@@ -2273,7 +2262,7 @@ impl WarpWindow {
                                 .gap_2p5()
                                 .child(settings_label("Working hours", fonts))
                                 .child(self.settings_field_wrap("min", cx))
-                                .child(div().text_color(theme::TEXT_MUTED).child("–"))
+                                .child(div().text_color(theme::text_muted()).child("–"))
                                 .child(self.settings_field_wrap("max", cx))
                                 .child(self.settings_hint("seconds", fonts))
                                 .into_any_element(),
@@ -2285,7 +2274,7 @@ impl WarpWindow {
                                 .gap_2p5()
                                 .child(settings_label("Lunch", fonts))
                                 .child(self.settings_field_wrap("lunchstart", cx))
-                                .child(div().text_color(theme::TEXT_MUTED).child("–"))
+                                .child(div().text_color(theme::text_muted()).child("–"))
                                 .child(self.settings_field_wrap("lunchend", cx))
                                 .into_any_element(),
                         );
@@ -2295,7 +2284,7 @@ impl WarpWindow {
                                 .items_center()
                                 .gap_2p5()
                                 .child(settings_label("Off hours", fonts))
-                                .child(div().text_color(theme::TEXT_MUTED).child("→"))
+                                .child(div().text_color(theme::text_muted()).child("→"))
                                 .child(self.settings_field_wrap("offstart", cx))
                                 .into_any_element(),
                         );
@@ -2305,7 +2294,7 @@ impl WarpWindow {
                                 .items_center()
                                 .gap_2p5()
                                 .child(settings_label("Workday starts", fonts))
-                                .child(div().text_color(theme::TEXT_MUTED).child("→"))
+                                .child(div().text_color(theme::text_muted()).child("→"))
                                 .child(self.settings_field_wrap("workdaystart", cx))
                                 .into_any_element(),
                         );
@@ -2317,7 +2306,7 @@ impl WarpWindow {
                                 .gap_2p5()
                                 .child(settings_label("Lunch and off hours", fonts))
                                 .child(self.settings_field_wrap("awaymin", cx))
-                                .child(div().text_color(theme::TEXT_MUTED).child("–"))
+                                .child(div().text_color(theme::text_muted()).child("–"))
                                 .child(self.settings_field_wrap("awaymax", cx))
                                 .child(self.settings_hint("seconds", fonts))
                                 .into_any_element(),
@@ -2432,7 +2421,7 @@ fn settings_label(text: &str, fonts: &theme::FontTokens) -> gpui::AnyElement {
         .w(px(150.))
         .flex_shrink_0()
         .text_size(px(fonts.font_heading))
-        .text_color(theme::TEXT_DIM)
+        .text_color(theme::text_dim())
         .child(SharedString::from(text.to_string()))
         .into_any_element()
 }
@@ -2485,8 +2474,10 @@ fn settings_model_picker(
         stop_trigger_mousedown: false,
         visible_rows: 10,
         selected_accent: false,
-        overlay: false,
-        anchor: OverlayAnchor::Rail,
+        // a settings slot floats: the model list is taller than the card and
+        // must cover the rows under it, not stretch the form around itself
+        overlay: true,
+        anchor: OverlayAnchor::Field,
         trigger_scale: TriggerScale::Regular,
         trigger_rounded_lg: true,
         trigger_min_h: Some(26.),

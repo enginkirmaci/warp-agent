@@ -61,8 +61,8 @@ pub fn render_markdown(
         } else {
             (
                 "icons/copy.svg",
-                crate::theme::TEXT_MUTED,
-                crate::theme::HAIRLINE,
+                crate::theme::text_muted(),
+                crate::theme::hairline(),
             )
         };
         let click_view = view.clone();
@@ -75,7 +75,7 @@ pub fn render_markdown(
                 .rounded_sm()
                 .border_1()
                 .border_color(border)
-                .bg(crate::theme::CHIP)
+                .bg(crate::theme::chip())
                 .hover(|s| s.bg(crate::theme::HOVER))
                 .on_click(move |_, _, cx| {
                     cx.write_to_clipboard(gpui::ClipboardItem::new_string(code.to_string()));

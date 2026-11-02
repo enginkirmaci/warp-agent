@@ -100,6 +100,23 @@ fn main() {
 
             // the shared text size, seeded once from this app's old setting
             warpui_kit_core::adopt_text_size(store.read(cx).settings.font_scale.as_deref());
+            // the shared palette, before the first kit theme pass so the
+            // first frame already draws in it
+            warpui_kit_core::adopt_palette(None);
+            // a palette switch re-maps the kit and repaints every window; the
+            // store entity carries the app context, so the hook never has to
+            // hold the `&mut App` from this closure
+            warpui_kit_core::follow_palette({
+                let store = store.clone();
+                move |cx: &mut gpui::App| {
+                    let (accent, fonts) = {
+                        let s = store.read(cx);
+                        (s.accent, s.fonts)
+                    };
+                    theme::apply_kit_theme(accent, &fonts, cx);
+                    cx.refresh_windows();
+                }
+            });
             // the family motion setting, or the desktop's preference, applies
             // before the first frame
             warpui_kit_core::motion::set_reduced(

@@ -56,14 +56,14 @@ pub fn button(
             el = el
                 .font_weight(FontWeight::MEDIUM)
                 .border_1()
-                .border_color(theme::LINE_STRONG)
-                .bg(theme::PANEL)
-                .text_color(theme::TEXT);
+                .border_color(theme::line_strong())
+                .bg(theme::panel())
+                .text_color(theme::text());
         }
     }
     el.when(enabled, |d| match kind {
         BtnKind::Primary(_) => d.hover(|s| s.opacity(0.9)),
-        BtnKind::Chip | BtnKind::Outline => d.hover(|s| s.bg(theme::RAISED)),
+        BtnKind::Chip | BtnKind::Outline => d.hover(|s| s.bg(theme::raised())),
     })
     .when(!enabled, |d| d.opacity(0.5))
     .on_click(on_click)
@@ -91,7 +91,7 @@ pub fn menu_row(
         .text_size(px(text_size))
         .cursor_pointer()
         .when(destructive, |d| d.text_color(theme::DANGER))
-        .when(!destructive, |d| d.text_color(theme::TEXT))
+        .when(!destructive, |d| d.text_color(theme::text()))
         .hover(|s| s.bg(theme::HOVER))
         .on_click(on_click)
         .child(label)
@@ -104,8 +104,8 @@ pub fn popover_card() -> Div {
     div()
         .rounded(px(8.))
         .border_1()
-        .border_color(theme::LINE_STRONG)
-        .bg(theme::OVERLAY)
+        .border_color(theme::line_strong())
+        .bg(theme::overlay())
         .p_1()
         .shadow_lg()
 }
@@ -116,7 +116,7 @@ pub fn fold_body(id: impl Into<ElementId>) -> gpui::Stateful<Div> {
     div()
         .id(id.into())
         .rounded(px(6.))
-        .bg(theme::DIFF_BG)
+        .bg(theme::diff_bg())
         .p_2()
         .max_h(px(260.))
         .overflow_y_scroll()

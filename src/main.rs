@@ -100,8 +100,12 @@ fn main() {
 
             // the shared text size, seeded once from this app's old setting
             warpui_kit_core::adopt_text_size(store.read(cx).settings.font_scale.as_deref());
-            // the family motion setting applies before the first frame
-            warpui_kit_core::motion::set_reduced(store.read(cx).settings.reduce_motion);
+            // the family motion setting, or the desktop's preference, applies
+            // before the first frame
+            warpui_kit_core::motion::set_reduced(
+                store.read(cx).settings.reduce_motion
+                    || warpui_kit_core::motion::system_prefers_reduced(),
+            );
             store.update(cx, |s, _| s.fonts = theme::active_tokens());
 
             // kit theme after the store so the saved accent preset (not the

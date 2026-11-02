@@ -6653,7 +6653,9 @@ impl Store {
         // (Theme::update refreshes every window)
         theme::apply_kit_theme(self.accent, &self.fonts, cx);
         self.tool_tips_visible = self.settings.show_tool_tips;
-        warpui_kit_core::motion::set_reduced(self.settings.reduce_motion);
+        warpui_kit_core::motion::set_reduced(
+            self.settings.reduce_motion || warpui_kit_core::motion::system_prefers_reduced(),
+        );
         crate::ui::tooltip::sync_settings(cx, self.tool_tips_visible, self.fonts.font_meta);
         // push the MCP master switch into running servers right away: disable
         // severs every configured server, re-enabling reconnects all but the

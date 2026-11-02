@@ -1136,7 +1136,35 @@ impl WarpWindow {
                     .gap_0p5()
                     .opacity(0.)
                     .group_hover("wsrow", |s| s.opacity(1.))
-                    // General has no workspace menu — no kebab either
+                    .child(
+                        tip(
+                            div()
+                                .id(gpui::ElementId::NamedInteger(
+                                    "ws-new".into(),
+                                    TileView::hash(&path),
+                                ))
+                                .role(Role::Button)
+                                .aria_label(SharedString::from(format!("New chat in {}", ws.name)))
+                                .cursor_pointer()
+                                .p_1()
+                                .rounded_sm()
+                                .hover(|s| s.bg(theme::HOVER))
+                                .on_click(move |_, _, cx| {
+                                    // row under this button must not see the
+                                    // click — it toggles workspace expansion
+                                    cx.stop_propagation();
+                                    ws_store_new.update(cx, |s, cx| {
+                                        s.new_chat_for_workspace(&path_new, cx)
+                                    });
+                                }),
+                            "New chat",
+                        )
+                        .child(crate::ui::icon(
+                            "icons/plus.svg",
+                            px(fonts.icon_small),
+                            theme::TEXT_DIM,
+                        )),
+                    )
                     .when(!ws.is_general(), |d| {
                         d.child(
                             tip(
@@ -1183,36 +1211,7 @@ impl WarpWindow {
                                 theme::TEXT_MUTED,
                             )),
                         )
-                    })
-                    .child(
-                        tip(
-                            div()
-                                .id(gpui::ElementId::NamedInteger(
-                                    "ws-new".into(),
-                                    TileView::hash(&path),
-                                ))
-                                .role(Role::Button)
-                                .aria_label(SharedString::from(format!("New chat in {}", ws.name)))
-                                .cursor_pointer()
-                                .p_1()
-                                .rounded_sm()
-                                .hover(|s| s.bg(theme::HOVER))
-                                .on_click(move |_, _, cx| {
-                                    // row under this button must not see the
-                                    // click — it toggles workspace expansion
-                                    cx.stop_propagation();
-                                    ws_store_new.update(cx, |s, cx| {
-                                        s.new_chat_for_workspace(&path_new, cx)
-                                    });
-                                }),
-                            "New chat",
-                        )
-                        .child(crate::ui::icon(
-                            "icons/plus.svg",
-                            px(fonts.icon_small),
-                            theme::TEXT_DIM,
-                        )),
-                    ),
+                    }),
             )
             .into_any_element()
     }
@@ -1256,8 +1255,11 @@ impl WarpWindow {
         let menu_tx = self.menu_sender_cell.clone();
         let menu_store = self.store.clone();
         let id_menu = id.clone();
-        let store_del = self.store.clone();
-        let id_del = id.clone();
+        // the hover ⋯ needs its own handles: the right-click closure already
+        // moved the first set
+        let more_tx = self.menu_sender_cell.clone();
+        let more_store = self.store.clone();
+        let more_id = id.clone();
         let gutter: gpui::AnyElement = if waiting {
             crate::ui::icon("icons/shield.svg", px(fonts.icon_tiny), theme::CHANGES)
                 .into_any_element()
@@ -1369,6 +1371,8 @@ impl WarpWindow {
                         .child(SharedString::from(harness_label))
                         .child(self.cached_time_label(chat)),
                 )
+                // the design's ⋯: Pin, Rename, Remove and Delete chat (which
+                // arms before it runs), the same menu the right-click opens
                 .child(
                     div()
                         .absolute()
@@ -1383,27 +1387,41 @@ impl WarpWindow {
                             tip(
                                 div()
                                     .id(gpui::ElementId::NamedInteger(
-                                        "chat-del".into(),
+                                        "chat-more".into(),
                                         TileView::hash(&id),
                                     ))
                                     .role(Role::Button)
                                     .aria_label(SharedString::from(format!(
-                                        "Delete {}",
+                                        "{} — chat actions",
                                         chat.title
                                     )))
+                                    .occlude()
                                     .cursor_pointer()
                                     .p_1()
                                     .rounded_sm()
                                     .hover(|s| s.bg(theme::HOVER))
-                                    .on_click(move |_, _, cx| {
-                                        // delete only — don't select the row we're removing
+                                    .on_click(move |event, _, cx| {
+                                        // menu only — the row must not select
                                         cx.stop_propagation();
-                                        store_del.update(cx, |s, cx| s.delete_session(&id_del, cx));
+                                        let rows = {
+                                            let s = more_store.read(cx);
+                                            chat_menu_rows(s, &more_id)
+                                        };
+                                        let (x, y) = match event {
+                                            gpui::ClickEvent::Mouse(click) => (
+                                                click.up.position.x.as_f32(),
+                                                click.up.position.y.as_f32(),
+                                            ),
+                                            _ => (40.0, 60.0),
+                                        };
+                                        let _ = more_tx.send_blocking(MenuState { x, y, rows });
+                                        // menu paints on the next store-driven repaint
+                                        more_store.update(cx, |_, _| {});
                                     }),
-                                "Delete chat",
+                                "Chat actions",
                             )
                             .child(crate::ui::icon(
-                                "icons/trash.svg",
+                                "icons/kebab.svg",
                                 px(fonts.icon_medium),
                                 theme::TEXT_MUTED,
                             )),

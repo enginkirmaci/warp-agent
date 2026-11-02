@@ -2081,7 +2081,8 @@ impl TileView {
             .pl_2()
             .pr_1p5()
             .border_b_1()
-            .border_color(theme::HAIRLINE)
+            // the head's hairline is the quiet one (line-soft)
+            .border_color(theme::BORDER_LIGHT)
             .child(
                 tip(
                     div()
@@ -2114,18 +2115,44 @@ impl TileView {
                     .child(SharedString::from(snap.title.clone())),
             )
             .when_some(state, |d, (word, needs_you)| {
-                d.child(
-                    div()
-                        .debug_selector(|| "tile-state".into())
-                        .flex_shrink_0()
-                        .text_size(px(fonts.font_meta))
-                        .when(needs_you, |d| {
-                            d.font_weight(gpui::FontWeight::MEDIUM)
-                                .text_color(theme::CHANGES)
-                        })
-                        .when(!needs_you, |d| d.text_color(theme::TEXT_DIM))
-                        .child(word),
-                )
+                let ink = if needs_you {
+                    theme::CHANGES
+                } else {
+                    theme::BEHIND
+                };
+                let mut stat = div()
+                    .debug_selector(|| "tile-state".into())
+                    .flex_shrink_0()
+                    .flex()
+                    .items_center()
+                    .gap(px(5.))
+                    .text_size(px(fonts.font_meta))
+                    .text_color(ink);
+                if needs_you {
+                    stat = stat
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .child(crate::ui::icon(
+                            if word == "Needs approval" {
+                                "icons/shield.svg"
+                            } else {
+                                "icons/chat-outline.svg"
+                            },
+                            px(fonts.icon_tiny),
+                            theme::CHANGES,
+                        ));
+                } else {
+                    // Running: the same spinner the tree uses, in `behind`
+                    stat = stat.child(motion::spinner(
+                        gpui::ElementId::Name(SharedString::from(format!(
+                            "tile-state-spin-{}",
+                            snap.title
+                        ))),
+                        "icons/spinner.svg",
+                        px(fonts.icon_tiny),
+                        theme::BEHIND,
+                    ));
+                }
+                d.child(stat.child(word))
             })
             .when(
                 snap.is_busy && snap.waiting.is_none() && snap.density == TileDensity::Tight,
@@ -3869,6 +3896,11 @@ impl Render for TileView {
                     theme::CHANGES
                 } else {
                     theme::HAIRLINE
+                })
+                // the edge answers the pointer; the focused and waiting tiles
+                // already say something stronger in colour
+                .when(!snap.is_focused && snap.waiting.is_none(), |d| {
+                    d.hover(|s| s.border_color(theme::LINE_STRONG))
                 })
                 .bg(theme::SURFACE)
                 .overflow_hidden()

@@ -56,8 +56,9 @@ use crate::ui::markdown::render_markdown;
 use crate::ui::tooltip::tip;
 use gpui::prelude::*;
 use gpui::{
-    AccessibleAction, App, Context, Entity, Focusable, ImageFormat, MouseButton, Pixels, Render,
-    Role, ScrollHandle, SharedString, Toggled, Window, actions, canvas, div, img, px, relative,
+    AccessibleAction, Animation, AnimationExt as _, App, Context, Entity, Focusable, ImageFormat,
+    MouseButton, Pixels, Render, Role, ScrollHandle, SharedString, Toggled, Window, actions,
+    canvas, div, img, px, relative,
 };
 use gpui_kit::component::Sizable as _;
 use gpui_kit::component::input::{
@@ -326,6 +327,39 @@ fn context_ring(frac: f32) -> gpui::AnyElement {
         );
     }
     ring.into_any_element()
+}
+
+/// Three dots for a chat that is thinking: the run has started and nothing has
+/// arrived yet. Reduced motion leaves them static, because the tile's state
+/// word already says what is happening.
+fn thinking_dots(id: &str, color: gpui::Hsla) -> gpui::AnyElement {
+    let mut row = div()
+        .id(SharedString::from(format!("{id}-dots")))
+        .flex()
+        .items_center()
+        .gap(px(5.));
+    for dot in 0..3u32 {
+        // the svg is the animated element (a box cannot animate in this gpui);
+        // each dot runs a third of a cycle behind the one before it
+        let glyph = crate::ui::icon("icons/dot.svg", px(5.), color);
+        let body = if warpui_kit_core::motion::reduced() {
+            glyph.into_any_element()
+        } else {
+            glyph
+                .with_animation(
+                    gpui::ElementId::Name(SharedString::from(format!("{id}-dot-{dot}"))),
+                    Animation::new(std::time::Duration::from_millis(900)).repeat(),
+                    move |glyph, delta| {
+                        let phase = (delta + dot as f32 / 3.).fract();
+                        let wave = 1. - (phase * 2. - 1.).abs();
+                        glyph.opacity(0.3 + 0.7 * wave)
+                    },
+                )
+                .into_any_element()
+        };
+        row = row.child(body);
+    }
+    row.into_any_element()
 }
 
 /// The word a tile's head shows while its chat waits on a person. The newest
@@ -3829,6 +3863,33 @@ impl Render for TileView {
         // an opened chat with no messages yet still explains itself; the hint
         // is a plain overlay (no handlers), so wheel events reach the
         // scroll-tracked transcript underneath
+        // a chat with nothing in it yet either explains itself or, while its
+        // first turn runs, thinks out loud with three dots
+        let empty_overlay = div()
+            .absolute()
+            .inset_0()
+            .flex()
+            .flex_col()
+            .items_center()
+            .justify_center()
+            .gap_2()
+            .when(snap.is_busy, |d| {
+                d.child(thinking_dots(&self.key, theme::TEXT_FAINT.into()))
+            })
+            .when(!snap.is_busy, |d| {
+                d.child(crate::ui::icon(
+                    "icons/spark.svg",
+                    px(32.),
+                    theme::TEXT_FAINT,
+                ))
+                .child(
+                    div()
+                        .text_size(px(fonts.font_body))
+                        .italic()
+                        .text_color(theme::TEXT_FAINT)
+                        .child("Nothing here yet — say hello, or / for commands · @ for files"),
+                )
+            });
         let transcript_area = div()
             .relative()
             .flex_1()
@@ -3836,32 +3897,7 @@ impl Render for TileView {
             .flex()
             .flex_col()
             .child(transcript)
-            .when(transcript_empty, |d| {
-                d.child(
-                    div()
-                        .absolute()
-                        .inset_0()
-                        .flex()
-                        .flex_col()
-                        .items_center()
-                        .justify_center()
-                        .gap_2()
-                        .child(crate::ui::icon(
-                            "icons/spark.svg",
-                            px(32.),
-                            theme::TEXT_FAINT,
-                        ))
-                        .child(
-                            div()
-                                .text_size(px(fonts.font_body))
-                                .italic()
-                                .text_color(theme::TEXT_FAINT)
-                                .child(
-                                    "Nothing here yet — say hello, or / for commands · @ for files",
-                                ),
-                        ),
-                )
-            });
+            .when(transcript_empty, |d| d.child(empty_overlay));
 
         let root =
             div()

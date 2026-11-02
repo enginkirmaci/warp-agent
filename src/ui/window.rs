@@ -309,6 +309,17 @@ impl Render for WarpWindow {
                 }
                 cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
             })
+            // the shell's Ctrl+\ hides the list; the title bar button does the same
+            .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
+                let modifiers = event.keystroke.modifiers;
+                if modifiers.control && !modifiers.shift && event.keystroke.key == "\\" {
+                    let visible = this.store.read(cx).sidebar_visible;
+                    this.store
+                        .update(cx, |s, cx| s.set_sidebar_visible(!visible, cx));
+                    cx.stop_propagation();
+                    cx.notify();
+                }
+            }))
             .child(self.render_titlebar(window, cx))
             .child(content);
 

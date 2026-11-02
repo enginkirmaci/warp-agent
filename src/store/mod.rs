@@ -578,15 +578,6 @@ pub struct ChatTile {
 }
 
 impl ChatTile {
-    /// Whether an open card here needs a person: a permission or a question.
-    pub fn is_waiting(&self) -> bool {
-        self.items.iter().any(|item| match item.as_ref() {
-            ChatItem::Permission(perm) => perm.is_pending(),
-            ChatItem::Question(question) => question.is_pending(),
-            _ => false,
-        })
-    }
-
     /// Rebuild the variant picker list around the tile's model and keep the
     /// current pick when it still exists, else fall back to "(default)".
     /// Runs wherever the option list could have drifted: tile creation, the
@@ -2423,22 +2414,7 @@ impl Store {
     }
 
     pub fn has_attention_needed(&self) -> bool {
-        self.tiles_waiting() > 0 || self.running_agents.iter().any(|r| r.needs_attention)
-    }
-
-    /// Open chats that hold a card only a person can answer.
-    pub fn tiles_waiting(&self) -> usize {
-        self.open_tiles
-            .iter()
-            .filter(|tile| tile.is_waiting())
-            .count()
-    }
-
-    /// Whether this chat's open tile is waiting on a person.
-    pub fn session_waiting(&self, session_id: &str) -> bool {
-        self.open_tiles
-            .iter()
-            .any(|tile| tile.session_id.as_deref() == Some(session_id) && tile.is_waiting())
+        self.running_agents.iter().any(|r| r.needs_attention)
     }
 
     fn effective_workspace_path(&self, session_id: &str) -> Option<String> {

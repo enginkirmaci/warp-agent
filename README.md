@@ -69,7 +69,8 @@ integration surface.
   selection; context-usage readout in the tile corner (last-turn tokens vs the
   model's context limit).
 - **Prompt history** (Up/Down in the composer), clipboard image paste, and a
-  settings page (accent presets, text size, auto-allow, executable) persisted to
+  Settings page with the family's four sections (Appearance, Chat defaults,
+  Permissions, Server), the shared text size and reduce motion, persisted to
   `~/.warp-agent/settings.json`.
 - Stop aborts the running turn (*stopped in Xs*); *done in Xs* closes a normal
   one.
@@ -80,7 +81,7 @@ integration surface.
 |---|---|---|
 | `src/store/mod.rs` | MainViewModel + ChatTileViewModel + ChatItems | All app logic: workspaces (one `opencode serve` each), the shared tile grid, transcripts, queue w/ Steer/Edit/Remove, permission asks + auto-allow countdowns (lunch/off-hours ranges), `question` tool cards, subagent tracking, prompt history, restore banner |
 | `src/oc.rs` | OpenCodeServer + OpenCodeApiClient | Serve spawn/attach, OPENCODE_CONFIG_CONTENT ask-forcing, free-port pick, 25 s health wait; REST + SSE on a dedicated tokio thread talking to the UI via channels |
-| `src/theme.rs` | App.xaml resources | The whole palette, accent presets (green/amber/salmon/4 grays), font/icon size tokens with compact/normal/large × system factor |
+| `src/theme.rs` | App.xaml resources | Re-exports warpui-kit-core's Copper palette and type ladder; the app keeps no colours or font sizes of its own |
 | `src/ui/markdown.rs` | MarkdownViewerKit.Avalonia **(replaced)** | gpui-kit TextView markdown: tree-sitter syntax highlighting for fenced code (12 languages, per-block copy button), selectable text, clickable links |
 | `src/ui/diff.rs` | DiffTextBlock | GitHub-style unified diff: line-number gutter, add/del tints, hunk separators |
 | gpui-kit `Textarea` | — (was src/ui/input.rs, deleted) | Multi-line composer input: wrapping, auto-grow, Enter/Shift+Enter submit, Up/Down prompt history, paste-image hook |

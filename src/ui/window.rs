@@ -3,10 +3,10 @@
 
 use crate::store::{Store, WorkspaceItem};
 use crate::theme;
-use crate::ui::controls::{self, BtnKind, menu_row, popover_card};
 use crate::ui::settings::SettingsBuffers;
 use crate::ui::tile::{TileDensity, TileView};
 use crate::ui::tooltip::{self, tip};
+use crate::ui::{BtnKind, menu_row, popover_card};
 use gpui::prelude::*;
 use gpui::{
     App, Context, Entity, Focusable, MouseButton, Render, Role, SharedString, StyleRefinement,
@@ -1925,7 +1925,7 @@ impl WarpWindow {
                             .text_color(theme::text())
                             .child(SharedString::from(restore_text.clone())),
                     )
-                    .child(controls::button(
+                    .child(crate::ui::button(
                         "restore-btn",
                         "Restore",
                         BtnKind::Outline,
@@ -1939,7 +1939,7 @@ impl WarpWindow {
                             }
                         },
                     ))
-                    .child(controls::button(
+                    .child(crate::ui::button(
                         "ignore-btn",
                         "Ignore",
                         BtnKind::Outline,

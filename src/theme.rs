@@ -117,9 +117,6 @@ pub fn bubble_user() -> gpui::Rgba {
 pub fn chip() -> gpui::Rgba {
     raised()
 }
-pub fn diff_bg() -> gpui::Rgba {
-    well()
-}
 pub fn overlay() -> gpui::Rgba {
     popup()
 }

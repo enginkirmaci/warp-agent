@@ -5,7 +5,7 @@ use crate::oc::CommandInfo;
 use crate::settings::HarnessKind;
 use crate::store::{ChatItem, DEFAULT_MODEL_ENTRY, QuestionEntry, Store, ToolItem, at_token_start};
 use crate::theme;
-use crate::ui::controls::{BtnKind, fold_body, menu_row, popover_card};
+use crate::ui::{BtnKind, fold_body, menu_row, popover_card};
 use warpui_kit_picker::{
     DismissFn, FilteredPicker, OverlayAnchor, PanelChrome, PickerBody, PickerData, PickerIcons,
     PickerItem, PickerRow, PickerSpec, PickerTarget, Selection, TriggerScale, model_name,
@@ -51,7 +51,6 @@ impl TileDensity {
 
 /// A model pick from the composer pill: applies through the store/tile.
 type ModelPick = Box<dyn Fn(&str, &mut App)>;
-use crate::ui::controls;
 use crate::ui::markdown::render_markdown;
 use crate::ui::tooltip::tip;
 use gpui::prelude::*;
@@ -98,14 +97,6 @@ const SLASH_MENU_VISIBLE: usize = 8;
 enum SuggestMode {
     Commands,
     Files,
-}
-
-pub fn decode_png_render(png: &[u8]) -> Option<Arc<gpui::RenderImage>> {
-    let decoded = image::load_from_memory(png).ok()?;
-    let rgba = decoded.to_rgba8();
-    Some(Arc::new(gpui::RenderImage::new(smallvec::smallvec![
-        image::Frame::new(rgba)
-    ])))
 }
 
 enum PickerKind {
@@ -243,7 +234,7 @@ impl TileView {
         if let Some(cached) = self.img_cache.get(cache_key) {
             return Some(cached.clone());
         }
-        let decoded = decode_png_render(png)?;
+        let decoded = warpui_kit_core::decode_png_render(png)?;
         self.img_cache
             .insert(cache_key.to_string(), decoded.clone());
         Some(decoded)
@@ -1492,7 +1483,7 @@ impl TileView {
                                         .items_center()
                                         .gap_2()
                                         .pt_1()
-                                        .child(controls::button(
+                                        .child(crate::ui::button(
                                             gpui::ElementId::NamedInteger(
                                                 "pill".into(),
                                                 Self::hash("Allow"),
@@ -1512,7 +1503,7 @@ impl TileView {
                                                 }
                                             },
                                         ))
-                                        .child(controls::button(
+                                        .child(crate::ui::button(
                                             gpui::ElementId::NamedInteger(
                                                 "pill".into(),
                                                 Self::hash("Always"),
@@ -1534,7 +1525,7 @@ impl TileView {
                                                 }
                                             },
                                         ))
-                                        .child(controls::button(
+                                        .child(crate::ui::button(
                                             gpui::ElementId::NamedInteger(
                                                 "pill".into(),
                                                 Self::hash("Deny"),
@@ -1673,7 +1664,7 @@ impl TileView {
                     .items_center()
                     .gap_2()
                     .pt_1()
-                    .child(controls::button(
+                    .child(crate::ui::button(
                         gpui::ElementId::NamedInteger("answer".into(), Self::hash(&id)),
                         "Answer",
                         BtnKind::Primary(on_accent),

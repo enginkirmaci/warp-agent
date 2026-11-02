@@ -1375,7 +1375,7 @@ impl TileView {
                     .rounded(px(8.))
                     .border_1()
                     .border_color(theme::CHANGES)
-                    .bg(theme::SURFACE)
+                    .bg(theme::PANEL)
                     .overflow_hidden()
                     .flex()
                     .child(
@@ -1677,7 +1677,7 @@ impl TileView {
                     } else {
                         theme::HAIRLINE
                     })
-                    .bg(theme::SURFACE)
+                    .bg(theme::PANEL)
                     .py_3()
                     .px_3p5()
                     .flex()
@@ -3430,44 +3430,55 @@ impl TileView {
         // this tile (see SuggestMenu)
         let slash_el = self.suggest.clone();
 
+        // the composer is the tile's foot, not a box inside it: a quiet
+        // hairline, the well field, then the pill row on the tile itself
         div()
-            .m_2()
             // anchors the popovers and scopes the slash-menu key
             // bindings ("Composer > Input") to this frame only
             .relative()
             .key_context("Composer")
-            .rounded(px(8.))
-            .border_1()
-            .when(composer_focus_is, |d| d.border_color(accent_text))
-            .when(!composer_focus_is, |d| d.border_color(theme::LINE_STRONG))
-            .bg(theme::WELL)
-            .p_2()
+            .flex_shrink_0()
+            .px_3()
+            .pt_2()
+            .pb_2p5()
+            .border_t_1()
+            .border_color(theme::BORDER_LIGHT)
             .flex()
             .flex_col()
-            .gap_1()
-            // files dragged from the file manager land here as attachments
-            .drag_over::<gpui::ExternalPaths>(move |style, _, _, _| style.border_color(accent))
-            .on_drop({
-                let store = self.store.clone();
-                let key = self.key.clone();
-                move |paths: &gpui::ExternalPaths, _, cx| {
-                    let paths: Vec<std::path::PathBuf> = paths.paths().to_vec();
-                    let key = key.clone();
-                    store.update(cx, move |s, cx| s.attach_paths(&key, &paths, cx));
-                }
-            })
-            .on_mouse_down(MouseButton::Left, {
-                let composer = self.composer.clone();
-                move |_, window, cx| {
-                    let handle = composer.read(cx).focus_handle(cx).clone();
-                    window.focus(&handle, cx);
-                }
-            })
+            .gap_2()
             .child(attachments_el)
             .child(
-                // the leaf view owns the kit element: keystrokes re-render it
-                // alone, never this tile (see ComposerField)
-                div().flex_1().min_h_0().child(self.composer_field.clone()),
+                div()
+                    .rounded(px(6.))
+                    .border_1()
+                    .when(composer_focus_is, |d| d.border_color(accent_text))
+                    .when(!composer_focus_is, |d| d.border_color(theme::LINE_STRONG))
+                    .bg(theme::WELL)
+                    .p_2()
+                    .flex()
+                    // files dragged from the file manager land here as attachments
+                    .drag_over::<gpui::ExternalPaths>(move |style, _, _, _| {
+                        style.border_color(accent)
+                    })
+                    .on_drop({
+                        let store = self.store.clone();
+                        let key = self.key.clone();
+                        move |paths: &gpui::ExternalPaths, _, cx| {
+                            let paths: Vec<std::path::PathBuf> = paths.paths().to_vec();
+                            let key = key.clone();
+                            store.update(cx, move |s, cx| s.attach_paths(&key, &paths, cx));
+                        }
+                    })
+                    .on_mouse_down(MouseButton::Left, {
+                        let composer = self.composer.clone();
+                        move |_, window, cx| {
+                            let handle = composer.read(cx).focus_handle(cx).clone();
+                            window.focus(&handle, cx);
+                        }
+                    })
+                    // the leaf view owns the kit element: keystrokes re-render
+                    // it alone, never this tile (see ComposerField)
+                    .child(div().flex_1().min_h_0().child(self.composer_field.clone())),
             )
             .child(bottom_row)
             .child(slash_el)
@@ -3699,10 +3710,15 @@ impl Render for TileView {
                     this.scroll_to(next, cx);
                 }),
             )
-            .p_2p5()
+            // one 760 column centred in the tile, so a single tile filling the
+            // pane reads at the same measure as four
+            .w_full()
+            .max_w(px(MESSAGE_WIDTH))
+            .mx_auto()
+            .p_3()
             .flex()
             .flex_col()
-            .gap_2();
+            .gap_2p5();
         // consecutive tool calls collapse into one disclosure row; the run is
         // split by anything non-tool (permission cards, notes) in between.
         // visible_tools feeds the cache-prune set below: members hidden inside

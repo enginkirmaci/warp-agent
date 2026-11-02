@@ -1820,8 +1820,7 @@ impl WarpWindow {
             // base cards that sit on it
             .bg(theme::PANEL)
             .overflow_hidden()
-            .relative()
-            .child(div().flex_1().min_h_0().flex().flex_col().child(grid));
+            .relative();
 
         let (has_tiles, has_no_ws, has_idle_ws, has_running_ws) = {
             let store = self.store.read(cx);
@@ -1873,16 +1872,17 @@ impl WarpWindow {
             let accent = self.store.read(cx).accent.accent;
             main = main.child(
                 div()
-                    .absolute()
-                    .top_2()
-                    .left_2()
+                    .flex_shrink_0()
+                    .mx(px(GRID_GAP))
+                    .mt(px(GRID_GAP))
+                    .mr_auto()
                     .flex()
                     .items_center()
                     .gap_2p5()
                     .rounded(px(8.))
                     .border_1()
                     .border_color(theme::HAIRLINE)
-                    .bg(theme::PANEL)
+                    .bg(theme::SURFACE)
                     .px_3()
                     .py_2()
                     .child(crate::ui::icon(
@@ -1926,6 +1926,8 @@ impl WarpWindow {
                     )),
             );
         }
+
+        main = main.child(div().flex_1().min_h_0().flex().flex_col().child(grid));
 
         main.into_any_element()
     }

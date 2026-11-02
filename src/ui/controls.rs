@@ -10,9 +10,9 @@ use gpui::{
     AnyElement, App, ClickEvent, Div, ElementId, FontWeight, Role, SharedString, Window, div, px,
 };
 
-/// The button looks: accent-filled pill, quiet chip pill, and the outlined
-/// settings/restore style (hairline border, 26px min height). Primary carries
-/// the preset's on-accent text color (white under the default blue).
+/// The button looks: the accent fill, and the two quiet ones, which are the
+/// design's one outlined control. Primary carries the preset's on-accent text
+/// color.
 pub enum BtnKind {
     Primary(gpui::Rgba),
     Chip,
@@ -37,37 +37,33 @@ pub fn button(
         .id(id.into())
         .role(Role::Button)
         .aria_label(label.clone())
+        .flex_shrink_0()
+        .h(px(warpui_kit_core::shell::CONTROL_HEIGHT))
         .px_3()
-        .py_1()
+        .flex()
+        .items_center()
+        .rounded(px(6.))
         .text_size(px(text_size))
         .cursor_pointer();
     match kind {
         BtnKind::Primary(on_accent) => {
             el = el
-                .rounded_md()
                 .font_weight(FontWeight::SEMIBOLD)
                 .bg(accent)
                 .text_color(on_accent);
         }
-        BtnKind::Chip => {
+        BtnKind::Chip | BtnKind::Outline => {
             el = el
-                .rounded_md()
-                .font_weight(FontWeight::SEMIBOLD)
-                .bg(theme::CHIP)
-                .text_color(theme::TEXT);
-        }
-        BtnKind::Outline => {
-            el = el
-                .min_h(px(26.))
-                .rounded_lg()
+                .font_weight(FontWeight::MEDIUM)
                 .border_1()
-                .border_color(theme::HAIRLINE)
+                .border_color(theme::LINE_STRONG)
+                .bg(theme::PANEL)
                 .text_color(theme::TEXT);
         }
     }
     el.when(enabled, |d| match kind {
-        BtnKind::Primary(_) | BtnKind::Chip => d.hover(|s| s.opacity(0.9)),
-        BtnKind::Outline => d.hover(|s| s.bg(theme::HOVER)),
+        BtnKind::Primary(_) => d.hover(|s| s.opacity(0.9)),
+        BtnKind::Chip | BtnKind::Outline => d.hover(|s| s.bg(theme::RAISED)),
     })
     .when(!enabled, |d| d.opacity(0.5))
     .on_click(on_click)
@@ -102,14 +98,14 @@ pub fn menu_row(
         .into_any_element()
 }
 
-/// The shared popover card chrome: rounded_lg, hairline border, popup bg,
-/// soft shadow. Returns a Div so callers keep chaining (p_2, min_w, children).
+/// The shared popover card chrome: the design's menu edge, overlay bg, soft
+/// shadow. Returns a Div so callers keep chaining (p_2, min_w, children).
 pub fn popover_card() -> Div {
     div()
-        .rounded_lg()
+        .rounded(px(8.))
         .border_1()
-        .border_color(theme::HAIRLINE)
-        .bg(theme::POPUP)
+        .border_color(theme::LINE_STRONG)
+        .bg(theme::OVERLAY)
         .p_1()
         .shadow_lg()
 }
@@ -119,7 +115,7 @@ pub fn popover_card() -> Div {
 pub fn fold_body(id: impl Into<ElementId>) -> gpui::Stateful<Div> {
     div()
         .id(id.into())
-        .rounded_lg()
+        .rounded(px(6.))
         .bg(theme::DIFF_BG)
         .p_2()
         .max_h(px(260.))

@@ -4,9 +4,7 @@
 //! canvas < card < popup < chip; font/icon size tokens ride one factor so the
 //! shared text size rescales the whole UI.
 
-pub use warpui_kit_core::fonts::{
-    FontTokens, active_tokens, code_font, field_size, field_size_at, font_brand, ui_font,
-};
+pub use warpui_kit_core::fonts::{FontTokens, active_tokens, code_font, field_size, ui_font};
 // every shared color const stays reachable as `theme::X`
 pub use warpui_kit_core::palette::*;
 
@@ -23,7 +21,9 @@ pub fn apply_kit_theme(accent: AccentColors, fonts: &FontTokens, cx: &mut gpui::
 
 // ---- metrics ---------------------------------------------------------------
 
-pub const SIDEBAR_MIN_WIDTH: f32 = 180.0;
-pub const SIDEBAR_MAX_WIDTH: f32 = 480.0;
-pub const SIDEBAR_DEFAULT_WIDTH: f32 = 250.0;
-pub const SPLITTER_WIDTH: f32 = 12.0;
+// the tree's rows are short and the grid wants the width, so the list starts
+// at the shell's minimum
+pub const SIDEBAR_MIN_WIDTH: f32 = warpui_kit_core::shell::LIST_MIN_WIDTH;
+pub const SIDEBAR_MAX_WIDTH: f32 = warpui_kit_core::shell::LIST_MAX_WIDTH;
+pub const SIDEBAR_DEFAULT_WIDTH: f32 = warpui_kit_core::shell::LIST_MIN_WIDTH;
+pub const SPLITTER_WIDTH: f32 = 4.0;

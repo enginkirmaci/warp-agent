@@ -5,7 +5,7 @@ use crate::store::{Store, WorkspaceItem};
 use crate::theme;
 use crate::ui::controls::{self, BtnKind, menu_row, popover_card};
 use crate::ui::settings::SettingsBuffers;
-use crate::ui::tile::TileView;
+use crate::ui::tile::{TileDensity, TileView};
 use crate::ui::tooltip::{self, tip};
 use gpui::prelude::*;
 use gpui::{
@@ -15,10 +15,20 @@ use gpui::{
 use gpui_kit::component::Sizable as _;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use std::collections::HashMap;
+use warpui_kit_core::shell;
 use warpui_kit_picker::{
     FilteredPicker, OverlayAnchor, PanelChrome, PickerBody, PickerData, PickerIcons, PickerItem,
     PickerRow, PickerSpec, PickerTarget, Selection, TriggerScale, model_name, model_provider,
 };
+
+/// The grid's gap, and its margin to the pane.
+const GRID_GAP: f32 = 8.;
+
+/// One track of the grid inside `grid_width`.
+fn tile_track_width(grid_width: f32, columns: usize) -> f32 {
+    let columns = columns.max(1) as f32;
+    (grid_width - GRID_GAP * (columns + 1.)) / columns
+}
 
 #[derive(Clone)]
 pub enum SideMenuAction {
@@ -197,12 +207,13 @@ impl Render for WarpWindow {
         let fonts = self.store.read(cx).fonts;
         let sidebar_visible = self.store.read(cx).sidebar_visible;
 
-        let mut content = div().flex().flex_row().flex_1().min_h_0();
-        if sidebar_visible {
+        let list_shown = sidebar_visible && !self.grid_takes_the_list(window, cx);
+        let mut content = shell::panes().child(self.render_rail(window, cx));
+        if list_shown {
             content = content.child(self.render_sidebar(window, cx));
             content = content.child(self.render_splitter());
         }
-        content = content.child(self.render_main(window, cx));
+        content = content.child(self.render_main(list_shown, window, cx));
 
         let mut root = div()
             .size_full()
@@ -380,6 +391,90 @@ impl WarpWindow {
         }
     }
 
+    /// Below the compact width, a grid of two or more takes the list's room.
+    fn grid_takes_the_list(&self, window: &Window, cx: &App) -> bool {
+        window.viewport_size().width < px(shell::scaled(shell::COMPACT_WINDOW_WIDTH))
+            && self.store.read(cx).open_tiles.len() >= 2
+    }
+
+    fn open_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.store.read(cx).is_settings_open {
+            return;
+        }
+        self.store.update(cx, |s, _| {
+            s.is_settings_open = true;
+        });
+        self.settings_buffers = SettingsBuffers::from_settings(&self.store.read(cx).settings);
+        let (fields, leafs, model_picker) = self.make_settings_fields(window, cx);
+        self.settings_fields = fields;
+        self.settings_leafs = leafs;
+        self.settings_model_picker = model_picker;
+        cx.notify();
+    }
+
+    /// Leaving the page commits: text fields land in the buffers, then persist
+    /// like Save did.
+    fn close_settings(&mut self, cx: &mut Context<Self>) {
+        if !self.store.read(cx).is_settings_open {
+            return;
+        }
+        self.commit_settings(cx);
+        self.store.update(cx, |s, _| s.is_settings_open = false);
+        cx.notify();
+    }
+
+    fn render_rail(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let (in_settings, ink, attention) = {
+            let store = self.store.read(cx);
+            (
+                store.is_settings_open,
+                store.accent.text,
+                store.has_attention_needed(),
+            )
+        };
+        shell::rail()
+            .debug_selector(|| "app-rail".into())
+            .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                gpui_kit::base::GlobalState::suppress_text_selection(cx);
+            })
+            .child(
+                shell::rail_item_inked(
+                    "rail-chats",
+                    "icons/chat-outline.svg",
+                    "Chats",
+                    !in_settings,
+                    ink,
+                )
+                .debug_selector(|| "rail-chats".into())
+                .relative()
+                .on_click(cx.listener(|this, _, _, cx| this.close_settings(cx)))
+                .when(attention, |d| {
+                    d.child(
+                        div()
+                            .absolute()
+                            .top_1p5()
+                            .right(px(12.))
+                            .size(px(8.))
+                            .rounded_full()
+                            .bg(theme::CHANGES),
+                    )
+                }),
+            )
+            .child(div().flex_1())
+            .child(
+                shell::rail_item_inked(
+                    "open-settings",
+                    "icons/cog.svg",
+                    "Settings",
+                    in_settings,
+                    ink,
+                )
+                .debug_selector(|| "rail-settings".into())
+                .on_click(cx.listener(|this, _, window, cx| this.open_settings(window, cx))),
+            )
+            .into_any_element()
+    }
+
     fn render_titlebar(&mut self, window: &Window, cx: &mut Context<Self>) -> gpui::AnyElement {
         let (fonts, visible) = {
             let store = self.store.read(cx);
@@ -398,28 +493,81 @@ impl WarpWindow {
             }
         };
         let store_handle = self.store.clone();
-        div()
-            .h(px(38.))
-            .flex()
-            .items_center()
-            .px_2()
-            .gap_1()
+        let running = {
+            let store = self.store.read(cx);
+            store.open_tiles.iter().filter(|t| t.is_busy(store)).count()
+        };
+        shell::title_bar()
+            .pl_3()
             // titlebar chrome owns no selectable text either (see sidebar note)
             .on_mouse_down(MouseButton::Left, |_, _, cx| {
                 gpui_kit::base::GlobalState::suppress_text_selection(cx);
             })
             .child(
                 div()
+                    .flex_shrink_0()
                     .flex()
                     .items_center()
                     .justify_center()
-                    .size(px(30.))
+                    .size(px(28.))
+                    .rounded(px(6.))
+                    .bg(theme::BRAND_BG)
+                    .border_1()
+                    .border_color(theme::BRAND_BORDER)
                     .child(crate::ui::icon(
                         "icons/spark.svg",
-                        px(fonts.icon_large),
-                        theme::TEXT,
+                        px(fonts.icon_small),
+                        theme::ACCENT_INK,
                     )),
             )
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .text_size(px(fonts.font_brand))
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .text_color(theme::TEXT)
+                    .child("Warp Agent"),
+            )
+            .child(
+                div()
+                    .id("titlebar-drag")
+                    .flex_1()
+                    .h_full()
+                    // Windows drags via the hit-test path (this hitbox answers
+                    // HTCAPTION); start_window_move is a no-op there. Linux
+                    // keeps the explicit move call.
+                    .window_control_area(WindowControlArea::Drag)
+                    .on_mouse_down(MouseButton::Left, |_, window, _| {
+                        window.start_window_move();
+                    }),
+            )
+            .when(running > 0, |d| {
+                d.child(
+                    div()
+                        .id("activity-chip")
+                        .debug_selector(|| "activity-chip".into())
+                        .role(Role::Status)
+                        .aria_label(SharedString::from(format!("{running} running")))
+                        .flex_shrink_0()
+                        .h(px(28.))
+                        .px_2p5()
+                        .rounded(px(14.))
+                        .bg(theme::PANEL)
+                        .flex()
+                        .items_center()
+                        .gap(px(7.))
+                        .text_size(px(fonts.font_meta))
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .text_color(theme::BEHIND)
+                        .child(warpui_kit_core::motion::spinner(
+                            "activity-spinner",
+                            "icons/spinner.svg",
+                            px(fonts.icon_tiny),
+                            theme::BEHIND,
+                        ))
+                        .child(format!("{running} running")),
+                )
+            })
             .child(
                 tip(
                     div()
@@ -431,12 +579,12 @@ impl WarpWindow {
                             "Show sidebar"
                         })
                         .cursor_pointer()
-                        .size(px(26.))
-                        .rounded_md()
+                        .w(px(36.))
+                        .h(px(shell::scaled(shell::TITLE_BAR_HEIGHT)))
                         .flex()
                         .items_center()
                         .justify_center()
-                        .hover(|s| s.bg(theme::HOVER))
+                        .hover(|s| s.bg(theme::RAISED))
                         .on_click(move |_, _, cx| {
                             store_handle
                                 .update(cx, |s, cx| s.set_sidebar_visible(!s.sidebar_visible, cx));
@@ -462,31 +610,18 @@ impl WarpWindow {
                 }),
             )
             .child(
-                div()
-                    .id("titlebar-drag")
-                    .flex_1()
-                    .h_full()
-                    // Windows drags via the hit-test path (this hitbox answers
-                    // HTCAPTION); start_window_move is a no-op there. Linux
-                    // keeps the explicit move call.
-                    .window_control_area(WindowControlArea::Drag)
-                    .on_mouse_down(MouseButton::Left, |_, window, _| {
-                        window.start_window_move();
-                    }),
-            )
-            .child(
                 tip(
                     div()
                         .id("minimize-window")
                         .role(Role::Button)
                         .aria_label("Minimize")
                         .cursor_pointer()
-                        .size(px(26.))
-                        .rounded_md()
+                        .w(px(36.))
+                        .h(px(shell::scaled(shell::TITLE_BAR_HEIGHT)))
                         .flex()
                         .items_center()
                         .justify_center()
-                        .hover(|s| s.bg(theme::HOVER))
+                        .hover(|s| s.bg(theme::RAISED))
                         .on_click(|_, window, _| window.minimize_window()),
                     "Minimize",
                 )
@@ -503,12 +638,12 @@ impl WarpWindow {
                         .role(Role::Button)
                         .aria_label("Zoom · server health")
                         .cursor_pointer()
-                        .size(px(26.))
-                        .rounded_md()
+                        .w(px(36.))
+                        .h(px(shell::scaled(shell::TITLE_BAR_HEIGHT)))
                         .flex()
                         .items_center()
                         .justify_center()
-                        .hover(|s| s.bg(theme::HOVER))
+                        .hover(|s| s.bg(theme::RAISED))
                         .on_click(cx.listener(|_, _, window, cx| {
                             window.zoom_window();
                             // the compositor toggles asynchronously — nudge a
@@ -526,8 +661,8 @@ impl WarpWindow {
                         .role(Role::Button)
                         .aria_label("Close")
                         .cursor_pointer()
-                        .size(px(26.))
-                        .rounded_md()
+                        .w(px(36.))
+                        .h(px(shell::scaled(shell::TITLE_BAR_HEIGHT)))
                         .flex()
                         .items_center()
                         .justify_center()
@@ -586,10 +721,11 @@ impl WarpWindow {
                 if ws.show_empty_hint() {
                     workspaces = workspaces.child(
                         div()
-                            .ml(px(26.))
-                            .text_size(px(fonts.font_body))
+                            .pl(px(40.))
+                            .py_2()
+                            .text_size(px(fonts.font_meta))
                             .italic()
-                            .text_color(theme::TEXT_FAINT)
+                            .text_color(theme::TEXT_MUTED)
                             .child("No chats yet"),
                     );
                 }
@@ -603,21 +739,49 @@ impl WarpWindow {
         if !filter.is_empty() && shown == 0 {
             workspaces = workspaces.child(
                 div()
-                    .px_2()
-                    .text_size(px(fonts.font_body))
+                    .pl(px(40.))
+                    .py_2()
+                    .text_size(px(fonts.font_meta))
                     .italic()
-                    .text_color(theme::TEXT_FAINT)
+                    .text_color(theme::TEXT_MUTED)
                     .child("No matching workspace"),
             );
         }
 
-        div()
-            .w(px(width))
-            .h_full()
+        let (need, running, open) = {
+            let store = self.store.read(cx);
+            (
+                store.tiles_waiting(),
+                store.open_tiles.iter().filter(|t| t.is_busy(store)).count(),
+                store.open_tiles.len(),
+            )
+        };
+        let mut summary = div()
             .flex()
-            .flex_col()
-            .px_2p5()
-            .pb_2()
+            .items_center()
+            .gap_1()
+            .text_size(px(fonts.font_meta))
+            .text_color(theme::TEXT_DIM);
+        if need > 0 {
+            summary = summary.child(
+                div()
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .text_color(theme::CHANGES)
+                    .child(if need == 1 {
+                        "1 needs you".to_string()
+                    } else {
+                        format!("{need} need you")
+                    }),
+            );
+            summary = summary.child("·");
+        }
+        if running > 0 {
+            summary = summary.child(format!("{running} running ·"));
+        }
+        summary = summary.child(format!("{open} open"));
+
+        shell::list_pane(width)
+            .debug_selector(|| "agent-list".into())
             // the sidebar owns no selectable text: a press here (row, + button)
             // must not seed a window drag-selection — otherwise the gesture
             // that starts on a row can land on transcript text and select it
@@ -626,63 +790,66 @@ impl WarpWindow {
             })
             .child(
                 div()
-                    .group("wsheader")
+                    .flex_shrink_0()
                     .flex()
-                    .items_center()
-                    .gap_1()
+                    .flex_col()
+                    .gap_2p5()
+                    .px_4()
+                    .pt_3p5()
+                    .pb_3()
+                    .border_b_1()
+                    .border_color(theme::HAIRLINE)
                     .child(
                         div()
-                            .flex_1()
-                            .text_size(px(fonts.font_body))
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .text_color(theme::TEXT_DIM)
-                            .child("Workspaces"),
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .text_size(px(fonts.font_list_title))
+                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                    .text_color(theme::TEXT)
+                                    .child("Workspaces"),
+                            )
+                            .child(
+                                tip(
+                                    div()
+                                        .id("add-workspace")
+                                        .role(Role::Button)
+                                        .aria_label("Add a workspace folder")
+                                        .cursor_pointer()
+                                        .p_1p5()
+                                        .rounded(px(6.))
+                                        .hover(|s| s.bg(theme::RAISED))
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.pick_folder(cx);
+                                        })),
+                                    "Add a workspace folder",
+                                )
+                                .child(crate::ui::icon(
+                                    "icons/plus.svg",
+                                    px(fonts.icon_medium),
+                                    theme::TEXT_DIM,
+                                )),
+                            ),
                     )
+                    .child(summary)
                     .child(
-                        // hover-reveal safety: an opacity(0) control is still
-                        // hit-tested in gpui, but it can only be clicked while
-                        // the pointer is over its row — which is exactly when
-                        // group_hover has revealed it. Keep that invariant if
-                        // this pattern ever moves somewhere pointer-less input
-                        // (keyboard/touch) can reach.
-                        tip(
-                            div()
-                                .id("add-workspace")
-                                .role(Role::Button)
-                                .aria_label("Add a workspace folder")
-                                .cursor_pointer()
-                                .p_1()
-                                .rounded_sm()
-                                .opacity(0.)
-                                .group_hover("wsheader", |s| s.opacity(1.))
-                                .hover(|s| s.bg(theme::HOVER))
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.pick_folder(cx);
-                                })),
-                            "Add a workspace folder",
-                        )
-                        .child(crate::ui::icon(
-                            "icons/plus.svg",
-                            px(fonts.icon_medium),
-                            theme::TEXT_MUTED,
-                        )),
+                        // the kit Input has no a11y of its own — the wrapper carries the
+                        // role/value; an AT click lands at the wrapper's center, which is
+                        // the input itself, so focus still reaches the real field
+                        div()
+                            .id("sidebar-filter")
+                            .role(Role::SearchInput)
+                            .track_focus(&filter_leaf.read(cx).state.read(cx).focus_handle(cx))
+                            .aria_label("Filter workspaces")
+                            .aria_placeholder("Filter workspaces")
+                            .aria_value(self.sidebar_filter.clone())
+                            .w_full()
+                            .min_w_0()
+                            .child(filter_leaf),
                     ),
-            )
-            .child(
-                // the kit Input has no a11y of its own — the wrapper carries the
-                // role/value; an AT click lands at the wrapper's center, which is
-                // the input itself, so focus still reaches the real field
-                div()
-                    .id("sidebar-filter")
-                    .role(Role::SearchInput)
-                    .track_focus(&filter_leaf.read(cx).state.read(cx).focus_handle(cx))
-                    .aria_label("Filter workspaces")
-                    .aria_placeholder("Filter workspaces")
-                    .aria_value(self.sidebar_filter.clone())
-                    .w_full()
-                    .min_w_0()
-                    .mt_1()
-                    .child(filter_leaf),
             )
             .child(
                 div()
@@ -690,50 +857,9 @@ impl WarpWindow {
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scroll()
-                    .pt_2()
+                    .pt_1()
+                    .pb_3()
                     .child(workspaces),
-            )
-            .child(
-                tip(
-                    div()
-                        .id("open-settings")
-                        .role(Role::Button)
-                        .aria_label("Settings")
-                        .w_full()
-                        .flex()
-                        .items_center()
-                        .gap_1p5()
-                        .px_2()
-                        .py_1p5()
-                        .rounded_lg()
-                        .cursor_pointer()
-                        .hover(|s| s.bg(theme::HOVER))
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.store.update(cx, |s, _| {
-                                s.is_settings_open = true;
-                            });
-                            this.settings_buffers =
-                                SettingsBuffers::from_settings(&this.store.read(cx).settings);
-                            let (fields, leafs, model_picker) =
-                                this.make_settings_fields(window, cx);
-                            this.settings_fields = fields;
-                            this.settings_leafs = leafs;
-                            this.settings_model_picker = model_picker;
-                            cx.notify();
-                        })),
-                    "Settings",
-                )
-                .child(crate::ui::icon(
-                    "icons/cog.svg",
-                    px(fonts.icon_medium),
-                    theme::TEXT_MUTED,
-                ))
-                .child(
-                    div()
-                        .text_size(px(fonts.font_body))
-                        .text_color(theme::TEXT)
-                        .child("Settings"),
-                ),
             )
             .into_any_element()
     }
@@ -792,10 +918,10 @@ impl WarpWindow {
             .flex()
             .items_center()
             .w_full()
-            .px_2()
-            .py_1p5()
-            .rounded_lg()
-            .hover(|s| s.bg(theme::HOVER))
+            .min_h(px(40.))
+            .pl_4()
+            .pr_3()
+            .hover(|s| s.bg(theme::RAISED))
             .cursor_pointer()
             .on_click(move |_, _, cx| {
                 let expand_path = path_click.clone();
@@ -842,8 +968,9 @@ impl WarpWindow {
             .child(
                 div()
                     .min_w_0()
-                    .ml_1p5()
-                    .text_size(px(fonts.font_heading))
+                    .ml_2()
+                    .text_size(px(fonts.font_name))
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
                     .text_color(theme::TEXT)
                     .truncate()
                     .child(SharedString::from(ws.name.clone())),
@@ -853,9 +980,9 @@ impl WarpWindow {
                     div()
                         .flex_shrink_0()
                         .ml_1p5()
-                        .text_size(px(fonts.font_body))
-                        .text_color(theme::TEXT_FAINT)
-                        .child(SharedString::from(format!("({})", ws.chats.len()))),
+                        .text_size(px(fonts.font_meta))
+                        .text_color(theme::TEXT_MUTED)
+                        .child(SharedString::from(format!("{}", ws.chats.len()))),
                 )
             })
             // running dot pinned to the right edge; hovering the row fades it
@@ -865,7 +992,7 @@ impl WarpWindow {
             .child(
                 div()
                     .absolute()
-                    .right_1()
+                    .right_3()
                     .top_0()
                     .bottom_0()
                     .flex()
@@ -879,7 +1006,7 @@ impl WarpWindow {
             .child(
                 div()
                     .absolute()
-                    .right_1()
+                    .right_2()
                     .top_0()
                     .bottom_0()
                     .flex()
@@ -959,9 +1086,9 @@ impl WarpWindow {
                             "New chat",
                         )
                         .child(crate::ui::icon(
-                            "icons/chat-outline.svg",
-                            px(fonts.icon_medium),
-                            theme::TEXT_MUTED,
+                            "icons/plus.svg",
+                            px(fonts.icon_small),
+                            theme::TEXT_DIM,
                         )),
                     ),
             )
@@ -992,12 +1119,13 @@ impl WarpWindow {
         chat: &crate::store::SessionItem,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
-        let (fonts, accent_dim, harness_label) = {
+        let (fonts, accent, harness_label, waiting) = {
             let store = self.store.read(cx);
             (
                 store.fonts,
-                store.accent.dim,
+                store.accent.accent,
                 store.session_harness(&chat.id).label(),
+                store.session_waiting(&chat.id),
             )
         };
         let id = chat.id.clone();
@@ -1008,9 +1136,16 @@ impl WarpWindow {
         let id_menu = id.clone();
         let store_del = self.store.clone();
         let id_del = id.clone();
-        let gutter: gpui::AnyElement = if chat.is_running {
-            crate::ui::icon("icons/spinner.svg", px(fonts.icon_small), theme::RUNNING)
+        let gutter: gpui::AnyElement = if waiting {
+            crate::ui::icon("icons/shield.svg", px(fonts.icon_tiny), theme::CHANGES)
                 .into_any_element()
+        } else if chat.is_running {
+            warpui_kit_core::motion::spinner(
+                SharedString::from(format!("chat-spinner-{id}")),
+                "icons/spinner.svg",
+                px(fonts.icon_tiny),
+                theme::BEHIND,
+            )
         } else if chat.pin_visible() {
             crate::ui::icon("icons/pin.svg", px(fonts.icon_small), theme::TEXT_MUTED)
                 .into_any_element()
@@ -1030,15 +1165,21 @@ impl WarpWindow {
             .group("chatrow")
             .flex()
             .items_center()
-            // no w_full: with the 26px indent, w_full overflowed the sidebar and
-            // clipped the right-pinned time/delete layers; flex-col stretch
-            // already sizes the row to the parent minus the indent
-            .ml(px(26.))
-            .px_2()
-            .py_1p5()
-            .rounded_lg()
-            .when(chat.is_selected, |d| d.bg(accent_dim))
-            .hover(|s| s.bg(theme::HOVER))
+            .min_h(px(40.))
+            .pl(px(24.))
+            .pr_3()
+            .when(chat.is_selected, |d| {
+                d.bg(theme::RAISED).child(
+                    div()
+                        .absolute()
+                        .top_0()
+                        .bottom_0()
+                        .left_0()
+                        .w(px(3.))
+                        .bg(accent),
+                )
+            })
+            .hover(|s| s.bg(theme::RAISED))
             .cursor_pointer()
             .on_click(move |_, _, cx| {
                 tracing::info!("chat-row clicked {}", id_click);
@@ -1062,7 +1203,9 @@ impl WarpWindow {
             )
             .child(
                 div()
-                    .w(px(13.))
+                    .flex_shrink_0()
+                    .w(px(16.))
+                    .mr_1()
                     .flex()
                     .items_center()
                     .justify_center()
@@ -1079,7 +1222,10 @@ impl WarpWindow {
                     div()
                         .flex_1()
                         .min_w_0()
-                        .text_size(px(fonts.font_heading))
+                        .text_size(px(fonts.font_body))
+                        .when(chat.is_selected, |d| {
+                            d.font_weight(gpui::FontWeight::SEMIBOLD)
+                        })
                         .text_color(theme::TEXT)
                         .truncate()
                         .child(SharedString::from(chat.title.clone())),
@@ -1095,8 +1241,9 @@ impl WarpWindow {
                         .items_center()
                         .gap_1()
                         .group_hover("chatrow", |s| s.opacity(0.))
-                        .text_size(px(fonts.font_control))
-                        .text_color(theme::TEXT_FAINT)
+                        .ml_2()
+                        .text_size(px(fonts.font_meta))
+                        .text_color(theme::TEXT_MUTED)
                         .child(SharedString::from(harness_label))
                         .child(self.cached_time_label(chat)),
                 )
@@ -1154,8 +1301,10 @@ impl WarpWindow {
             .relative()
             .w(px(theme::SPLITTER_WIDTH))
             .h_full()
+            .flex_shrink_0()
+            .bg(theme::WELL)
             .cursor_col_resize()
-            .hover(|s| s.bg(theme::HOVER))
+            .hover(|s| s.bg(theme::LINE_STRONG))
             .on_mouse_down(
                 MouseButton::Left,
                 move |event: &gpui::MouseDownEvent, _, cx| {
@@ -1468,7 +1617,12 @@ impl WarpWindow {
 
     // ---- main area -------------------------------------------------------------
 
-    fn render_main(&mut self, window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
+    fn render_main(
+        &mut self,
+        list_shown: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
         let fonts = self.store.read(cx).fonts;
 
         // keep TileView entities in sync with the store's tile list
@@ -1503,16 +1657,32 @@ impl WarpWindow {
         // explicit equal rows: implicit grid rows are content-sized (auto),
         // which let a second-row tile end up shorter than the first-row pair
         let tile_rows = keys.len().div_ceil(tile_columns).max(1) as u16;
+        // tiles are cached views: the window measures them, and a density change
+        // repaints the one tile it touches
+        let list_width = if list_shown {
+            self.store.read(cx).sidebar_shown_width + theme::SPLITTER_WIDTH
+        } else {
+            0.
+        };
+        let grid_width =
+            window.viewport_size().width.as_f32() - shell::scaled(shell::RAIL_WIDTH) - list_width;
+        let tile_width = tile_track_width(grid_width, tile_columns);
+        let density = TileDensity::for_width(tile_width, shell::scaled(1.));
+        for view in self.tile_views.values() {
+            view.update(cx, |tile, cx| tile.set_density(density, cx));
+        }
+
         let mut grid = div()
+            .debug_selector(|| "tile-grid".into())
             .grid()
             .grid_cols(tile_columns as u16)
             .grid_rows(tile_rows)
-            .gap_2()
+            .gap(px(GRID_GAP))
             .flex_1()
             .min_h_0()
             .min_w_0()
             .overflow_hidden()
-            .p_1();
+            .p(px(GRID_GAP));
         for key in &keys {
             if let Some(view) = self.tile_views.get(key) {
                 // cached: the tile's render only runs when its own revision
@@ -1526,17 +1696,10 @@ impl WarpWindow {
         let mut main = div()
             .flex_1()
             .min_w_0()
-            // no h_full here: the row's stretch must subtract my_2p5 so the
-            // bottom margin isn't clipped past the window edge
             .flex()
             .flex_col()
-            .my_2p5()
-            .mr_2p5()
-            .rounded_xl()
-            // the panel sits one point off the chrome, so the edge draws it
-            .border_1()
-            .border_color(theme::BORDER_LIGHT)
-            .bg(theme::SURFACE)
+            // the well the tiles stand in
+            .bg(theme::WELL)
             .overflow_hidden()
             .relative()
             .child(div().flex_1().min_h_0().flex().flex_col().child(grid));
@@ -1597,26 +1760,25 @@ impl WarpWindow {
             main = main.child(
                 div()
                     .absolute()
-                    .top_3()
-                    .left(px(24.))
+                    .top_2()
+                    .left_2()
                     .flex()
                     .items_center()
-                    .gap_3()
-                    .rounded_lg()
+                    .gap_2p5()
+                    .rounded(px(8.))
                     .border_1()
                     .border_color(theme::HAIRLINE)
-                    .bg(theme::CARD)
-                    .px_3p5()
-                    .py_1p5()
-                    .shadow_lg()
+                    .bg(theme::PANEL)
+                    .px_3()
+                    .py_2()
                     .child(crate::ui::icon(
                         "icons/clock.svg",
-                        px(fonts.icon_medium),
+                        px(fonts.icon_small),
                         theme::TEXT_MUTED,
                     ))
                     .child(
                         div()
-                            .text_size(px(fonts.font_heading))
+                            .text_size(px(fonts.font_body))
                             .text_color(theme::TEXT)
                             .child(SharedString::from(restore_text.clone())),
                     )
@@ -1625,7 +1787,7 @@ impl WarpWindow {
                         "Restore",
                         BtnKind::Outline,
                         accent,
-                        fonts.font_heading,
+                        fonts.font_control,
                         true,
                         {
                             let store = store_handle.clone();
@@ -1639,7 +1801,7 @@ impl WarpWindow {
                         "Ignore",
                         BtnKind::Outline,
                         accent,
-                        fonts.font_heading,
+                        fonts.font_control,
                         true,
                         {
                             let store = store_handle.clone();
@@ -1697,12 +1859,7 @@ impl WarpWindow {
                                 .p_1()
                                 .rounded_md()
                                 .hover(|s| s.bg(theme::HOVER))
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    // leaving the page commits: text fields land
-                                    // in the buffers, then persist like Save did
-                                    this.commit_settings(cx);
-                                    this.store.update(cx, |s, _| s.is_settings_open = false);
-                                }))
+                                .on_click(cx.listener(|this, _, _, cx| this.close_settings(cx)))
                                 .child(crate::ui::icon("icons/arrow-left.svg", px(fonts.icon_medium), theme::TEXT_MUTED)),
                         )
                         .child(

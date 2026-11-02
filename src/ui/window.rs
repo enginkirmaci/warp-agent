@@ -737,7 +737,7 @@ impl WarpWindow {
                     "Open Warp Station",
                 )
                 .child(crate::ui::icon(
-                    "icons/code.svg",
+                    "icons/logo-station.svg",
                     px(fonts.icon_medium),
                     theme::text_muted(),
                 )),

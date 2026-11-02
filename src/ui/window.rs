@@ -217,6 +217,19 @@ impl WarpWindow {
     }
 }
 
+/// One stable key per menu action, so arming a destructive row survives the
+/// re-render that shows Confirm.
+fn menu_action_key(action: &SideMenuAction) -> String {
+    match action {
+        SideMenuAction::OpenFolder(path) => format!("open-folder:{path}"),
+        SideMenuAction::RemoveWorkspace(path) => format!("remove-workspace:{path}"),
+        SideMenuAction::PinChat(id) | SideMenuAction::UnpinChat(id) => format!("pin:{id}"),
+        SideMenuAction::RenameChat(id) => format!("rename:{id}"),
+        SideMenuAction::UnlinkChat(id) => format!("unlink:{id}"),
+        SideMenuAction::DeleteChat(id) => format!("delete-chat:{id}"),
+    }
+}
+
 fn execute_menu_action(store: &Entity<Store>, action: &SideMenuAction, cx: &mut App) {
     store.update(cx, |s, cx| match action {
         SideMenuAction::OpenFolder(path) => {
@@ -309,14 +322,38 @@ impl Render for WarpWindow {
                     action,
                     SideMenuAction::DeleteChat(_) | SideMenuAction::RemoveWorkspace(_)
                 );
+                let key = menu_action_key(&action);
+                let armed = destructive
+                    && self
+                        .store
+                        .read(cx)
+                        .menu_armed
+                        .as_deref()
+                        .is_some_and(|k| k == key);
                 rows = rows.child(menu_row(
                     gpui::ElementId::NamedInteger("menu".into(), i as u64),
-                    action.label(),
+                    if armed { "Confirm" } else { action.label() },
                     destructive,
                     fonts.font_heading,
                     {
                         let store_handle = store_handle.clone();
+                        let key = key.clone();
                         move |_, _, cx| {
+                            // the design's second click: a destructive row arms
+                            // in place, the next click on it runs
+                            let already = store_handle
+                                .read(cx)
+                                .menu_armed
+                                .as_deref()
+                                .is_some_and(|k| k == key);
+                            if destructive && !already {
+                                store_handle.update(cx, |s, cx| {
+                                    s.menu_armed = Some(key.clone());
+                                    cx.notify();
+                                });
+                                return;
+                            }
+                            store_handle.update(cx, |s, _| s.menu_armed = None);
                             execute_menu_action(&store_handle, &action, cx);
                         }
                     },
@@ -334,6 +371,7 @@ impl Render for WarpWindow {
                     // unmounts the menu rows before their on_click (mouse-up) runs
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.menu = None;
+                        this.store.update(cx, |s, _| s.menu_armed = None);
                         cx.notify();
                     }))
                     .child(

@@ -1673,7 +1673,13 @@ impl WarpWindow {
                     .aria_label(SharedString::from(format!("{key} field")))
                     .aria_value(value)
                     .flex_1()
-                    .min_w_0()
+                    // numeric rows seat this wrap inside content-sized
+                    // controls (min – max seconds): flex-basis 0 plus
+                    // min-width 0 collapsed the box to its padding, and the
+                    // kit input's value painted in a zero-wide viewport —
+                    // every small settings field rendered empty. A floor
+                    // keeps the box usable; wide fields outgrow it anyway.
+                    .min_w(px(warpui_kit_core::shell::scaled(72.)))
                     .child(leaf.clone())
                     .into_any_element()
             })

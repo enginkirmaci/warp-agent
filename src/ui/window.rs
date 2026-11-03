@@ -10,13 +10,13 @@ use crate::ui::{BtnKind, menu_row, popover_card};
 use gpui::prelude::*;
 use gpui::{
     App, Context, Entity, Focusable, MouseButton, Render, Role, SharedString, StyleRefinement,
-    Toggled, Window, WindowControlArea, canvas, div, px, uniform_list,
+    Window, WindowControlArea, canvas, div, px, uniform_list,
 };
-use gpui_kit::component::Sizable as _;
-use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::input::{InputEvent, InputState};
 use std::collections::HashMap;
 use std::rc::Rc;
 use warpui_kit_core::A11y as _;
+use warpui_kit_core::settings as kit;
 use warpui_kit_core::shell;
 use warpui_kit_picker::{
     FilteredPicker, OverlayAnchor, PanelChrome, PickerBody, PickerData, PickerIcons, PickerItem,
@@ -502,6 +502,8 @@ impl WarpWindow {
                 let leaf = cx.new(|_| InputLeaf {
                     state: entity.clone(),
                     disabled: false,
+                    mono: false,
+                    icon: None,
                 });
                 self.rename = Some((id, entity, leaf));
             }
@@ -841,6 +843,10 @@ impl WarpWindow {
             self.sidebar_filter_leaf = Some(cx.new(|_| InputLeaf {
                 state,
                 disabled: false,
+                // the prototype's filter is prose with a search icon, not a
+                // mono value field
+                mono: false,
+                icon: Some("icons/search.svg"),
             }));
         }
         let filter = self.sidebar_filter.to_lowercase();
@@ -1628,6 +1634,9 @@ impl WarpWindow {
                 let leaf = cx.new(|_| InputLeaf {
                     state: entity.clone(),
                     disabled: false,
+                    // a settings value is the prototype's `.field text`
+                    mono: true,
+                    icon: None,
                 });
                 fields.push((key, entity));
                 leafs.push((key, leaf));
@@ -1670,148 +1679,6 @@ impl WarpWindow {
             })
             .unwrap_or_else(|| div().into_any_element())
     }
-
-    fn settings_hint(&self, text: &str, fonts: &theme::FontTokens) -> gpui::AnyElement {
-        div()
-            .text_size(px(fonts.font_body))
-            .italic()
-            .text_color(theme::text_faint())
-            .child(text.to_string())
-            .into_any_element()
-    }
-
-    fn settings_card(&self, children: Vec<gpui::AnyElement>) -> gpui::AnyElement {
-        div()
-            .w_full()
-            .rounded_lg()
-            .border_1()
-            .border_color(theme::hairline())
-            .bg(theme::settings_card())
-            .p_3()
-            .flex()
-            .flex_col()
-            .gap_2()
-            .children(children)
-            .into_any_element()
-    }
-
-    fn check_row(
-        &self,
-        text: &str,
-        checked: bool,
-        fonts: &theme::FontTokens,
-        on_toggle: impl Fn(&mut SettingsBuffers) + 'static,
-        cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
-        let accent = self.store.read(cx).accent.accent;
-        let marker: gpui::AnyElement = if checked {
-            div()
-                .size(px(14.))
-                .rounded_sm()
-                .bg(accent)
-                .flex()
-                .items_center()
-                .justify_center()
-                .child(crate::ui::icon(
-                    "icons/check.svg",
-                    px(fonts.icon_nano),
-                    theme::surface(),
-                ))
-                .into_any_element()
-        } else {
-            div()
-                .size(px(14.))
-                .rounded_sm()
-                .border_1()
-                .border_color(theme::text_muted())
-                .into_any_element()
-        };
-        div()
-            .id(gpui::ElementId::NamedInteger(
-                "chk".into(),
-                TileView::hash(text),
-            ))
-            .role(Role::CheckBox)
-            .aria_label(text)
-            .aria_toggled(if checked {
-                Toggled::True
-            } else {
-                Toggled::False
-            })
-            .flex()
-            .items_center()
-            .gap_2()
-            .cursor_pointer()
-            .on_click(cx.listener(move |this, _, _, cx| {
-                on_toggle(&mut this.settings_buffers);
-                cx.notify();
-            }))
-            .child(marker)
-            .child(
-                div()
-                    .text_size(px(fonts.font_heading))
-                    .text_color(theme::text())
-                    .child(text.to_string()),
-            )
-            .into_any_element()
-    }
-
-    fn radio_row(
-        &self,
-        options: &[(&'static str, &'static str)],
-        selected: &str,
-        fonts: &theme::FontTokens,
-        on_pick: impl Fn(&mut SettingsBuffers, &'static str) + Copy + 'static,
-        cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
-        let mut row = div().flex().items_center().gap_3p5();
-        let accent = self.store.read(cx).accent.accent;
-        for (key_ref, label_text) in options {
-            let key: &'static str = key_ref;
-            let is_on = key == selected;
-            row = row.child(
-                div()
-                    .id(gpui::ElementId::NamedInteger(
-                        "radio".into(),
-                        TileView::hash(key),
-                    ))
-                    .role(Role::RadioButton)
-                    .aria_label(*label_text)
-                    .aria_selected(is_on)
-                    .flex()
-                    .items_center()
-                    .gap_1p5()
-                    .cursor_pointer()
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        on_pick(&mut this.settings_buffers, key);
-                        cx.notify();
-                    }))
-                    .child(if is_on {
-                        div()
-                            .size(px(11.))
-                            .rounded_full()
-                            .bg(accent)
-                            .into_any_element()
-                    } else {
-                        div()
-                            .size(px(11.))
-                            .rounded_full()
-                            .border_1()
-                            .border_color(theme::text_muted())
-                            .into_any_element()
-                    })
-                    .child(
-                        div()
-                            .text_size(px(fonts.font_heading))
-                            .text_color(theme::text())
-                            .child((*label_text).to_string()),
-                    ),
-            );
-        }
-        row.into_any_element()
-    }
-
-    // ---- main area -------------------------------------------------------------
 
     fn render_main(
         &mut self,
@@ -2074,6 +1941,10 @@ impl WarpWindow {
 
         let mut head = div()
             .flex_shrink_0()
+            // the row measures against the pane, not against its own content:
+            // without these a long hint widened it and pushed the actions off
+            .w_full()
+            .min_w_0()
             .flex()
             .flex_row()
             .items_center()
@@ -2132,15 +2003,7 @@ impl WarpWindow {
             );
         }
 
-        let mut cards = div()
-            .w_full()
-            .max_w(px(shell::READING_WIDTH))
-            .flex()
-            .flex_col()
-            .gap_3();
-        for card in self.settings_cards(active, &fonts, cx) {
-            cards = cards.child(card);
-        }
+        let rows = self.settings_rows(active, &fonts, cx);
 
         shell::panes()
             .child(list)
@@ -2152,292 +2015,273 @@ impl WarpWindow {
                         div()
                             .id("settings-scroll")
                             .flex_1()
+                            .w_full()
+                            .min_w_0()
                             .min_h_0()
                             .overflow_y_scroll()
                             .p(px(shell::DETAIL_PADDING))
-                            .child(cards),
+                            .child(
+                                // the design's `.measure`: rows, not cards
+                                div()
+                                    .w_full()
+                                    .min_w_0()
+                                    .max_w(px(shell::READING_WIDTH))
+                                    .child(warpui_kit_core::settings::rows(rows)),
+                            ),
                     ),
             )
             .into_any_element()
     }
 
-    /// One section's rows, grouped into the design's cards.
-    fn settings_cards(
+    /// One section's rows: the design's flat `.setting` list, not cards.
+    fn settings_rows(
         &mut self,
         active: SettingsSection,
         fonts: &theme::FontTokens,
         cx: &mut Context<Self>,
     ) -> Vec<gpui::AnyElement> {
         let buffers = self.settings_buffers.clone();
+        let mut rows: Vec<gpui::AnyElement> = Vec::new();
+        let entity = cx.entity();
+        macro_rules! field {
+            ($label:expr, $key:expr, $desc:expr) => {{
+                let desc: Option<&str> = $desc;
+                let control = div()
+                    .w(px(240.))
+                    .max_w(px(0.46 * warpui_kit_core::shell::READING_WIDTH))
+                    .min_w_0()
+                    .child(self.settings_field_wrap($key, cx));
+                rows.push(match desc {
+                    Some(desc) => kit::row_with_desc(
+                        format!("settings-row-{}", $label),
+                        $label,
+                        desc,
+                        control,
+                        rows.is_empty(),
+                    ),
+                    None => kit::row(
+                        format!("settings-row-{}", $label),
+                        $label,
+                        control,
+                        rows.is_empty(),
+                    ),
+                });
+            }};
+        }
+        macro_rules! toggle {
+            ($label:expr, $desc:expr, $checked:expr, $field:ident) => {{
+                let entity = entity.clone();
+                rows.push(match $desc {
+                    Some(desc) => kit::switch_row_with_desc(
+                        SharedString::from(format!("set-{}", $label)),
+                        $label,
+                        format!("settings-row-{}", $label),
+                        desc,
+                        $checked,
+                        rows.is_empty(),
+                        move |_, _, cx| {
+                            entity.update(cx, |this, cx| {
+                                this.settings_buffers.$field = !this.settings_buffers.$field;
+                                this.commit_settings(cx);
+                                cx.notify();
+                            });
+                        },
+                    ),
+                    None => kit::switch_row(
+                        SharedString::from(format!("set-{}", $label)),
+                        $label,
+                        format!("settings-row-{}", $label),
+                        $checked,
+                        rows.is_empty(),
+                        move |_, _, cx| {
+                            entity.update(cx, |this, cx| {
+                                this.settings_buffers.$field = !this.settings_buffers.$field;
+                                this.commit_settings(cx);
+                                cx.notify();
+                            });
+                        },
+                    ),
+                });
+            }};
+        }
         match active {
-            SettingsSection::Appearance => vec![
-                self.settings_card(vec![
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap_2p5()
-                        .child(settings_label("Text size", fonts))
-                        .child(warpui_kit_core::text_size_control())
-                        .into_any_element(),
-                    self.settings_hint(
-                        "Applied right away. The other Warp apps follow when they next open.",
-                        fonts,
-                    ),
-                    div().h(px(1.)).bg(theme::hairline()).into_any_element(),
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap_2p5()
-                        .child(settings_label("Palette", fonts))
-                        .child(warpui_kit_core::palette_control())
-                        .into_any_element(),
-                    self.settings_hint(
-                        "Applied right away. The other Warp apps follow when they next open.",
-                        fonts,
-                    ),
-                    div().h(px(1.)).bg(theme::hairline()).into_any_element(),
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap_2p5()
-                        .child(settings_label("Typeface", fonts))
-                        .child(
-                            div()
-                                .text_size(px(fonts.font_body))
-                                .text_color(theme::text())
-                                .child("Inter + JetBrains Mono"),
-                        )
-                        .into_any_element(),
-                    self.settings_hint(
-                        "The family's two faces, bundled with the app; code, paths and titles set in mono.",
-                        fonts,
-                    ),
-                ]),
-                self.settings_card(vec![
-                    self.appearance_check(
-                        "Reduce motion",
-                        buffers.reduce_motion,
-                        fonts,
-                        |b| b.reduce_motion = !b.reduce_motion,
-                        cx,
-                    ),
-                    self.appearance_check(
-                        "Show tooltips on hover",
-                        buffers.show_tool_tips,
-                        fonts,
-                        |b| b.show_tool_tips = !b.show_tool_tips,
-                        cx,
-                    ),
-                    self.settings_hint(
-                        "Reduce motion turns animation off, spinners included; busy labels stay.",
-                        fonts,
-                    ),
-                ]),
-            ],
-            SettingsSection::ChatDefaults => vec![
-                self.settings_card(vec![
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap_2p5()
-                        .child(settings_label("Harness", fonts))
-                        .child(self.radio_row(
-                            &crate::settings::HarnessKind::ALL
-                                .map(|h| (h.label(), h.option_label())),
-                            if buffers.default_harness_dsh { "dsh" } else { "opencode" },
-                            fonts,
-                            |b, key| b.default_harness_dsh = key == "dsh",
-                            cx,
-                        ))
-                        .into_any_element(),
-                    self.settings_hint(
-                        "Runs new chats until the composer's harness pill switches one before its first message.",
-                        fonts,
-                    ),
-                ]),
-                self.settings_card(vec![
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap_2p5()
-                        .child(settings_label("Model", fonts))
-                        .child(
-                            self.settings_model_picker
-                                .clone()
-                                .map(|picker| picker.into_any_element())
-                                .unwrap_or_else(|| div().into_any_element()),
-                        )
-                        .into_any_element(),
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap_2p5()
-                        .child(settings_label("Variant", fonts))
-                        .child(self.settings_field_wrap("variant", cx))
-                        .into_any_element(),
-                    self.check_row(
-                        "Always select the highest variant by default",
-                        buffers.variant_highest,
-                        fonts,
-                        |b| b.variant_highest = !b.variant_highest,
-                        cx,
-                    ),
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap_2p5()
-                        .child(settings_label("Agent", fonts))
-                        .child(self.settings_field_wrap("agent", cx))
-                        .into_any_element(),
-                ]),
-            ],
-            SettingsSection::Permissions => {
-                let mut perm_rows: Vec<gpui::AnyElement> = Vec::new();
-                perm_rows.push(self.check_row(
-                    "Auto-allow tool permissions (edit, bash, webfetch)",
-                    buffers.auto_allow,
-                    fonts,
-                    |b| b.auto_allow = !b.auto_allow,
-                    cx,
+            SettingsSection::Appearance => {
+                rows.push(kit::row_with_desc(
+                    "settings-row-Text size",
+                    "Text size",
+                    "Applied right away. The other Warp apps follow when they next open.",
+                    warpui_kit_core::text_size_control(),
+                    rows.is_empty(),
                 ));
-                if buffers.auto_allow {
-                    perm_rows.push(self.check_row(
-                        "Allow immediately (skip the random wait)",
-                        buffers.auto_allow_instant,
-                        fonts,
-                        |b| b.auto_allow_instant = !b.auto_allow_instant,
-                        cx,
+                rows.push(kit::row_with_desc(
+                    "settings-row-Palette",
+                    "Palette",
+                    "Shared by every app in the suite",
+                    warpui_kit_core::palette_control(),
+                    rows.is_empty(),
+                ));
+                rows.push(kit::row_with_desc(
+                    "settings-row-Typeface",
+                    "Typeface",
+                    "Interface and code fonts",
+                    div()
+                        .text_size(px(fonts.font_body))
+                        .text_color(theme::text())
+                        .child("Inter + JetBrains Mono"),
+                    rows.is_empty(),
+                ));
+                toggle!(
+                    "Reduce motion",
+                    Some("Turns off transitions and keeps spinners still. Busy labels stay"),
+                    buffers.reduce_motion,
+                    reduce_motion
+                );
+                toggle!(
+                    "Show tooltips on hover",
+                    None::<&str>,
+                    buffers.show_tool_tips,
+                    show_tool_tips
+                );
+            }
+            SettingsSection::ChatDefaults => {
+                rows.push(kit::row(
+                    "settings-row-Harness",
+                    "Harness",
+                    self.harness_choices_control(fonts, cx),
+                    rows.is_empty(),
+                ));
+                if let Some(picker) = self.settings_model_picker.clone() {
+                    rows.push(kit::row(
+                        "settings-row-Model",
+                        "Model",
+                        div().w(px(240.)).flex_shrink_0().child(picker),
+                        rows.is_empty(),
                     ));
+                }
+                field!("Variant", "variant", None::<&str>);
+                toggle!(
+                    "Always select the highest variant by default",
+                    None::<&str>,
+                    buffers.variant_highest,
+                    variant_highest
+                );
+                field!("Agent", "agent", None::<&str>);
+            }
+            SettingsSection::Permissions => {
+                toggle!(
+                    "Auto-allow tool permissions",
+                    Some("Edits, shell commands and the rest, answered after a short wait"),
+                    buffers.auto_allow,
+                    auto_allow
+                );
+                if buffers.auto_allow {
+                    toggle!(
+                        "Allow immediately",
+                        Some("Skips the random wait"),
+                        buffers.auto_allow_instant,
+                        auto_allow_instant
+                    );
                     if !buffers.auto_allow_instant {
-                        perm_rows.push(
-                            div()
+                        for (label, first_key, second_key, suffix) in [
+                            ("Working hours", "min", "max", Some("seconds")),
+                            ("Lunch", "lunchstart", "lunchend", None),
+                            ("Lunch and off hours", "awaymin", "awaymax", Some("seconds")),
+                        ] {
+                            let mut control = div()
                                 .flex()
                                 .items_center()
-                                .gap_2p5()
-                                .child(settings_label("Working hours", fonts))
-                                .child(self.settings_field_wrap("min", cx))
+                                .gap_2()
+                                .child(self.settings_field_wrap(first_key, cx))
                                 .child(div().text_color(theme::text_muted()).child("–"))
-                                .child(self.settings_field_wrap("max", cx))
-                                .child(self.settings_hint("seconds", fonts))
-                                .into_any_element(),
-                        );
-                        perm_rows.push(
+                                .child(self.settings_field_wrap(second_key, cx));
+                            if let Some(suffix) = suffix {
+                                control = control.child(
+                                    div()
+                                        .text_size(px(fonts.font_body))
+                                        .text_color(theme::text_faint())
+                                        .child(suffix),
+                                );
+                            }
+                            rows.push(kit::row(
+                                SharedString::from(format!("settings-row-{label}")),
+                                label,
+                                control,
+                                rows.is_empty(),
+                            ));
+                        }
+                        rows.push(kit::row(
+                            "settings-row-Off hours",
+                            "Off hours",
                             div()
                                 .flex()
                                 .items_center()
-                                .gap_2p5()
-                                .child(settings_label("Lunch", fonts))
-                                .child(self.settings_field_wrap("lunchstart", cx))
-                                .child(div().text_color(theme::text_muted()).child("–"))
-                                .child(self.settings_field_wrap("lunchend", cx))
-                                .into_any_element(),
-                        );
-                        perm_rows.push(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap_2p5()
-                                .child(settings_label("Off hours", fonts))
+                                .gap_2()
                                 .child(div().text_color(theme::text_muted()).child("→"))
-                                .child(self.settings_field_wrap("offstart", cx))
-                                .into_any_element(),
-                        );
-                        perm_rows.push(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap_2p5()
-                                .child(settings_label("Workday starts", fonts))
-                                .child(div().text_color(theme::text_muted()).child("→"))
-                                .child(self.settings_field_wrap("workdaystart", cx))
-                                .into_any_element(),
-                        );
-                        // one range for both away windows: Store::auto_allow_range
-                        perm_rows.push(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap_2p5()
-                                .child(settings_label("Lunch and off hours", fonts))
-                                .child(self.settings_field_wrap("awaymin", cx))
-                                .child(div().text_color(theme::text_muted()).child("–"))
-                                .child(self.settings_field_wrap("awaymax", cx))
-                                .child(self.settings_hint("seconds", fonts))
-                                .into_any_element(),
-                        );
-                        perm_rows.push(self.settings_hint(
-                            "Random wait before auto-allow, picked by local time.",
-                            fonts,
+                                .child(self.settings_field_wrap("offstart", cx)),
+                            rows.is_empty(),
                         ));
                     }
                 }
-                perm_rows.push(self.check_row(
+                toggle!(
                     "Disable MCP servers (all workspaces)",
+                    Some("Disconnects every workspace's MCP servers at once"),
                     buffers.mcp_disabled,
-                    fonts,
-                    |b| b.mcp_disabled = !b.mcp_disabled,
-                    cx,
-                ));
-                perm_rows.push(self.settings_hint(
-                    "Disconnects every workspace's MCP servers at once and overrides the composer's per-workspace toggle.",
-                    fonts,
-                ));
-                vec![self.settings_card(perm_rows)]
+                    mcp_disabled
+                );
             }
-            SettingsSection::Server => vec![self.settings_card(vec![
-                div()
+            SettingsSection::Server => {
+                field!("OpenCode executable", "executable", None::<&str>);
+                field!("DSH executable", "dsh_executable", None::<&str>);
+                let control = div()
                     .flex()
                     .items_center()
-                    .gap_2p5()
-                    .child(settings_label("OpenCode executable", fonts))
-                    .child(self.settings_field_wrap("executable", cx))
-                    .into_any_element(),
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_2p5()
-                    .child(settings_label("DSH executable", fonts))
-                    .child(self.settings_field_wrap("dsh_executable", cx))
-                    .into_any_element(),
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_2p5()
-                    .child(settings_label("Idle stop", fonts))
+                    .gap_2()
+                    .max_w(px(0.46 * warpui_kit_core::shell::READING_WIDTH))
                     .child(self.settings_field_wrap("idlemin", cx))
-                    .child(self.settings_hint("minutes", fonts))
-                    .into_any_element(),
-                self.settings_hint(
-                    "A workspace server with no running chat closes after this many idle minutes; the next chat restarts it. 0 keeps servers running.",
-                    fonts,
-                ),
-            ])],
+                    .child(
+                        div()
+                            .text_size(px(fonts.font_body))
+                            .text_color(theme::text_faint())
+                            .child("minutes"),
+                    );
+                rows.push(kit::row_with_desc(
+                    "settings-row-Idle stop",
+                    "Idle stop",
+                    "A workspace server with no running chat closes after this many idle minutes",
+                    control,
+                    rows.is_empty(),
+                ));
+            }
         }
+        rows
     }
 
-    /// An Appearance row: it applies the moment it is pressed, the design's
-    /// one exception to Save. The row itself reads the buffer, so the check
-    /// repaints from the same value the settings file gets.
-    fn appearance_check(
+    /// The harness picker as the design's segmented control.
+    fn harness_choices_control(
         &self,
-        text: &str,
-        checked: bool,
-        fonts: &theme::FontTokens,
-        flip: fn(&mut SettingsBuffers),
+        _fonts: &theme::FontTokens,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
-        div()
-            .id(gpui::ElementId::NamedInteger(
-                "appearance-check".into(),
-                TileView::hash(text),
-            ))
-            .on_click(cx.listener(move |this, _, _, cx| {
-                flip(&mut this.settings_buffers);
-                this.commit_settings(cx);
-                cx.notify();
-            }))
-            .child(self.check_row(text, checked, fonts, |_b| {}, cx))
-            .into_any_element()
+        let current_dsh = self.settings_buffers.default_harness_dsh;
+        let choices = crate::settings::HarnessKind::ALL
+            .iter()
+            .map(|harness| {
+                let dsh = harness.option_label() == "dsh";
+                kit::Choice::new(harness.option_label(), harness.label(), dsh == current_dsh)
+            })
+            .collect();
+        let entity = cx.entity();
+        kit::segmented(
+            "settings-harness",
+            choices,
+            move |key, _, cx: &mut gpui::App| {
+                entity.update(cx, |this, cx| {
+                    this.settings_buffers.default_harness_dsh = key.as_ref() == "dsh";
+                    this.commit_settings(cx);
+                    cx.notify();
+                });
+            },
+        )
     }
 
     /// Persists the settings page: text fields land in the buffers, then the
@@ -2469,17 +2313,6 @@ impl WarpWindow {
     }
 }
 
-/// Fixed-width label shared by the settings rows.
-fn settings_label(text: &str, fonts: &theme::FontTokens) -> gpui::AnyElement {
-    div()
-        .w(px(150.))
-        .flex_shrink_0()
-        .text_size(px(fonts.font_heading))
-        .text_color(theme::text_dim())
-        .child(SharedString::from(text.to_string()))
-        .into_any_element()
-}
-
 /// Leaf renderer for a plain settings/rename input: gpui re-renders every
 /// view that read an InputState during its own render, so rendering these
 /// inputs from WarpWindow made each keystroke repaint the whole window —
@@ -2488,16 +2321,40 @@ fn settings_label(text: &str, fonts: &theme::FontTokens) -> gpui::AnyElement {
 struct InputLeaf {
     state: Entity<InputState>,
     disabled: bool,
+    /// The prototype's `.field text`: a settings value (a path, an executable,
+    /// a model) is mono, while a filter or a chat title is the UI face.
+    mono: bool,
+    /// A leading icon inside the box — the sidebar filter's search.
+    icon: Option<&'static str>,
 }
 
 impl Render for InputLeaf {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        warpui_kit_core::shell::field(
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // the family's one field; the wrapper around this leaf owns the width
+        let handle = self.state.read(cx).focus_handle(cx);
+        let mono = self.mono;
+        let input = warpui_kit_core::field::input(&self.state).disabled(self.disabled);
+        let field = warpui_kit_core::field::boxed(
             "input-leaf",
-            Input::new(&self.state)
-                .with_size(theme::field_size())
-                .disabled(self.disabled),
+            &handle,
+            window,
+            warpui_kit_core::shell::field_height(),
         )
+        .when_some(self.icon, |field, path| {
+            field.child(crate::ui::icon(
+                path,
+                px(theme::active_tokens().icon_small),
+                theme::text_muted(),
+            ))
+        })
+        .child(if mono {
+            warpui_kit_core::field::mono_face(input)
+        } else {
+            input
+        });
+        // a disabled field keeps the box's edge and its fill (the widget
+        // already dims its own value), so it still reads as a field
+        field
     }
 }
 

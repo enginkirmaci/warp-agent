@@ -59,10 +59,8 @@ use gpui::{
     MouseButton, Pixels, Render, Role, ScrollHandle, SharedString, Toggled, Window, actions,
     canvas, div, img, px, relative,
 };
-use gpui_kit::component::Sizable as _;
 use gpui_kit::component::input::{
-    Enter, Escape, Input, InputEvent, InputState, MoveDown, MoveUp, Position, Textarea,
-    TextareaState,
+    Enter, Escape, InputEvent, InputState, MoveDown, MoveUp, Position, TextareaState,
 };
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -3511,10 +3509,14 @@ impl TileView {
                 div()
                     .rounded(px(6.))
                     .border_1()
+                    // the design's `textarea.area`: the default `line`, the
+                    // accent ink while it holds focus
                     .when(composer_focus_is, |d| d.border_color(accent_text))
-                    .when(!composer_focus_is, |d| d.border_color(theme::line_strong()))
+                    .when(!composer_focus_is, |d| d.border_color(theme::hairline()))
                     .bg(theme::well())
-                    .p_2()
+                    .pt(px(warpui_kit_core::shell::scaled(9.)))
+                    .pb(px(warpui_kit_core::shell::scaled(9.)))
+                    .px(px(warpui_kit_core::shell::scaled(10.)))
                     .flex()
                     // files dragged from the file manager land here as attachments
                     .drag_over::<gpui::ExternalPaths>(move |style, _, _, _| {
@@ -4485,7 +4487,7 @@ struct QuestionField {
 }
 
 impl Render for QuestionField {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // the kit Input has no a11y of its own — the wrapper carries the role;
         // an AT click lands at the wrapper's center, the input itself
         let focus = self.state.read(cx).focus_handle(cx);
@@ -4498,9 +4500,13 @@ impl Render for QuestionField {
             .track_focus(&focus)
             .aria_label("Custom answer")
             .aria_placeholder("custom answer…")
-            .child(warpui_kit_core::shell::field(
+            // the prototype's "Custom answer" is a `.field text`, so a value,
+            // not prose
+            .child(warpui_kit_core::field::mono(
                 "field-state",
-                Input::new(&self.state).with_size(theme::field_size()),
+                &self.state,
+                window,
+                cx,
             ))
     }
 }
@@ -4548,11 +4554,10 @@ impl Render for ComposerField {
             .self_start()
             .w_full()
             .child(
-                Textarea::new(&self.state)
-                    .with_size(theme::field_size())
-                    .appearance(false)
-                    .bordered(false)
-                    .on_paste(move |item: &gpui::ClipboardItem, _, cx| {
+                // the same chrome-less area the kit's own box seats, so the
+                // composer's text sits on the design's 10/9 padding
+                warpui_kit_core::field::bare_area(&self.state).on_paste(
+                    move |item: &gpui::ClipboardItem, _, cx| {
                         let image = item.entries().iter().find_map(|entry| match entry {
                             gpui::ClipboardEntry::Image(image) => Some(image),
                             _ => None,
@@ -4565,7 +4570,8 @@ impl Render for ComposerField {
                         } else {
                             false
                         }
-                    }),
+                    },
+                ),
             )
             .into_any_element()
     }

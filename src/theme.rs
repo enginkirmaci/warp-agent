@@ -4,7 +4,7 @@
 //! canvas < card < popup < chip; font/icon size tokens ride one factor so the
 //! shared text size rescales the whole UI.
 
-pub use warpui_kit_core::fonts::{FontTokens, active_tokens, code_font, field_size, ui_font};
+pub use warpui_kit_core::fonts::{FontTokens, active_tokens, code_font, ui_font};
 // every shared color const stays reachable as `theme::X`
 // the fixed semantic colors stay constants (they never follow the palette),
 // and the accent preset system rides along
@@ -122,9 +122,6 @@ pub fn overlay() -> gpui::Rgba {
 }
 pub fn q_opt_selected() -> gpui::Rgba {
     raised()
-}
-pub fn settings_card() -> gpui::Rgba {
-    panel()
 }
 pub fn text_faint() -> gpui::Rgba {
     text_muted()

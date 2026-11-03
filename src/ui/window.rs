@@ -10,11 +10,12 @@ use crate::ui::{BtnKind, menu_row, popover_card};
 use gpui::prelude::*;
 use gpui::{
     App, Context, Entity, Focusable, MouseButton, Render, Role, SharedString, StyleRefinement,
-    Toggled, Window, WindowControlArea, canvas, div, px,
+    Toggled, Window, WindowControlArea, canvas, div, px, uniform_list,
 };
 use gpui_kit::component::Sizable as _;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use std::collections::HashMap;
+use std::rc::Rc;
 use warpui_kit_core::A11y as _;
 use warpui_kit_core::shell;
 use warpui_kit_picker::{
@@ -24,6 +25,19 @@ use warpui_kit_picker::{
 
 /// The grid's gap, and its margin to the pane: the design's 12 gutter.
 const GRID_GAP: f32 = 12.;
+
+/// One sidebar row's pitch: a workspace or a chat, both one fixed line, so the
+/// virtualized list can size itself without measuring.
+const SIDEBAR_ROW_HEIGHT: f32 = 40.;
+
+/// One flattened sidebar row: the virtualized list renders these by index.
+#[derive(Clone)]
+enum SidebarRow {
+    Workspace(crate::store::WorkspaceItem),
+    Chat(crate::store::SessionItem),
+    /// The italic hint under a running workspace with no chats.
+    Placeholder(&'static str),
+}
 
 /// The Settings page's sections: the design's list of four, each with its own
 /// group of rows in the pane beside it.
@@ -635,6 +649,23 @@ impl WarpWindow {
                     .text_color(theme::text())
                     .child("Warp Agent"),
             )
+            // the family: the sibling apps this window can open, right after
+            // its own mark and name, behind one separator
+            .child(
+                shell::app_links().child(tip(
+                    shell::app_link(
+                        "launch-station",
+                        "icons/logo-station.svg",
+                        "Open Warp Station",
+                    )
+                    .on_click(|_, _, _| {
+                        if let Err(err) = crate::services::launch_sibling("warp-station") {
+                            tracing::warn!("could not launch warp-station: {err}");
+                        }
+                    }),
+                    "Open Warp Station",
+                )),
+            )
             .child(
                 div()
                     .id("titlebar-drag")
@@ -715,32 +746,6 @@ impl WarpWindow {
                         theme::text_muted(),
                     )
                 }),
-            )
-            .child(
-                tip(
-                    div()
-                        .id("launch-station")
-                        .role(Role::Button)
-                        .aria_label("Open Warp Station")
-                        .cursor_pointer()
-                        .w(px(36.))
-                        .h(px(shell::scaled(shell::TITLE_BAR_HEIGHT)))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .hover(|s| s.bg(theme::raised()))
-                        .on_click(|_, _, _| {
-                            if let Err(err) = crate::services::launch_sibling("warp-station") {
-                                tracing::warn!("could not launch warp-station: {err}");
-                            }
-                        }),
-                    "Open Warp Station",
-                )
-                .child(crate::ui::icon(
-                    "icons/logo-station.svg",
-                    px(fonts.icon_medium),
-                    theme::text_muted(),
-                )),
             )
             .child(div().w(px(1.)).h(px(20.)).mx_1().bg(theme::hairline()))
             .child(
@@ -841,46 +846,11 @@ impl WarpWindow {
         let filter = self.sidebar_filter.to_lowercase();
         let filter_leaf = self.sidebar_filter_leaf.clone().unwrap();
 
-        let mut workspaces = div().flex().flex_col().gap_2p5();
-        let ws_count = self.store.read(cx).workspaces.len();
-        let mut shown = 0usize;
-        for ws_index in 0..ws_count {
-            let ws = self.store.read(cx).workspaces[ws_index].clone();
-            if !filter.is_empty() && !ws.name.to_lowercase().contains(&filter) {
-                continue;
-            }
-            shown += 1;
-            workspaces = workspaces.child(self.render_workspace_row(&ws, cx));
-            if ws.is_expanded() {
-                if ws.show_empty_hint() {
-                    workspaces = workspaces.child(
-                        div()
-                            .pl(px(40.))
-                            .py_2()
-                            .text_size(px(fonts.font_meta))
-                            .italic()
-                            .text_color(theme::text_muted())
-                            .child("No chats yet"),
-                    );
-                }
-                // borrow the chats from the workspace clone: re-cloning each
-                // SessionItem here doubles the sidebar copy work per repaint
-                for chat in &ws.chats {
-                    workspaces = workspaces.child(self.render_session_row(chat, cx));
-                }
-            }
-        }
-        if !filter.is_empty() && shown == 0 {
-            workspaces = workspaces.child(
-                div()
-                    .pl(px(40.))
-                    .py_2()
-                    .text_size(px(fonts.font_meta))
-                    .italic()
-                    .text_color(theme::text_muted())
-                    .child("No matching workspace"),
-            );
-        }
+        // The sidebar flattened to its rows and virtualized: a workspace can
+        // hold hundreds of chats and every row here is one fixed line, so the
+        // old loop built the whole tree — each row's listeners, icons and
+        // menus — on every repaint. `uniform_list` builds a screenful.
+        let rows = Rc::new(self.sidebar_rows(&filter, cx));
 
         let (need, running, open) = {
             let store = self.store.read(cx);
@@ -985,17 +955,100 @@ impl WarpWindow {
                             .child(filter_leaf),
                     ),
             )
-            .child(
-                div()
+            .child({
+                // "nothing to show" is about real rows only: a placeholder
+                // hint inside the list is not a workspace, and with no
+                // workspaces at all (or none matching) the pane says so
+                // instead of drawing an empty virtualized list
+                let has_workspaces = rows.iter().any(|r| matches!(r, SidebarRow::Workspace(_)));
+                let hint = if filter.is_empty() {
+                    "No workspaces yet"
+                } else {
+                    "No matching workspace"
+                };
+                if !has_workspaces {
+                    div()
+                        .id("sidebar-list")
+                        .flex_1()
+                        .min_h_0()
+                        .overflow_y_scroll()
+                        .pt_1()
+                        .pb_3()
+                        .child(
+                            div()
+                                .pl(px(40.))
+                                .py_2()
+                                .text_size(px(fonts.font_meta))
+                                .italic()
+                                .text_color(theme::text_muted())
+                                .child(hint),
+                        )
+                        .into_any_element()
+                } else {
+                    uniform_list(
+                        SharedString::from("sidebar-rows"),
+                        rows.len(),
+                        cx.processor(move |this, range: std::ops::Range<usize>, _window, cx| {
+                            range
+                                .map(|ix| this.render_sidebar_row(&rows[ix], cx))
+                                .collect()
+                        }),
+                    )
                     .id("sidebar-list")
                     .flex_1()
                     .min_h_0()
-                    .overflow_y_scroll()
                     .pt_1()
                     .pb_3()
-                    .child(workspaces),
-            )
+                    .w_full()
+                    .into_any_element()
+                }
+            })
             .into_any_element()
+    }
+
+    /// The sidebar as one flat row list: a workspace, the hint under an empty
+    /// one, then its chats. Flattening keeps the virtualized list indexable
+    /// while the filter still hides whole workspaces.
+    fn sidebar_rows(&self, filter: &str, cx: &App) -> Vec<SidebarRow> {
+        let mut rows = Vec::new();
+        for ws in &self.store.read(cx).workspaces {
+            if !filter.is_empty() && !ws.name.to_lowercase().contains(filter) {
+                continue;
+            }
+            rows.push(SidebarRow::Workspace(ws.clone()));
+            if !ws.is_expanded() {
+                continue;
+            }
+            if ws.show_empty_hint() {
+                rows.push(SidebarRow::Placeholder("No chats yet"));
+            }
+            for chat in &ws.chats {
+                rows.push(SidebarRow::Chat(chat.clone()));
+            }
+        }
+        rows
+    }
+
+    /// One sidebar row, at the virtualized list's fixed pitch.
+    fn render_sidebar_row(&mut self, row: &SidebarRow, cx: &mut Context<Self>) -> gpui::AnyElement {
+        match row {
+            SidebarRow::Workspace(ws) => self.render_workspace_row(ws, cx),
+            SidebarRow::Chat(chat) => self.render_session_row(chat, cx),
+            SidebarRow::Placeholder(text) => {
+                let fonts = self.store.read(cx).fonts;
+                div()
+                    .flex_shrink_0()
+                    .h(px(SIDEBAR_ROW_HEIGHT))
+                    .pl(px(40.))
+                    .flex()
+                    .items_center()
+                    .text_size(px(fonts.font_meta))
+                    .italic()
+                    .text_color(theme::text_muted())
+                    .child(*text)
+                    .into_any_element()
+            }
+        }
     }
 
     fn render_workspace_row(
@@ -1052,7 +1105,7 @@ impl WarpWindow {
             .flex()
             .items_center()
             .w_full()
-            .min_h(px(40.))
+            .h(px(SIDEBAR_ROW_HEIGHT))
             .pl_4()
             .pr_3()
             .hover(|s| s.bg(theme::raised()))
@@ -1301,7 +1354,7 @@ impl WarpWindow {
             .group("chatrow")
             .flex()
             .items_center()
-            .min_h(px(40.))
+            .h(px(SIDEBAR_ROW_HEIGHT))
             .pl(px(24.))
             .pr_3()
             .when(chat.is_selected, |d| {

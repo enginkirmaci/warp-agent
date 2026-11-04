@@ -149,6 +149,10 @@ impl Store {
         }
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "one door request's fields, unpacked from the wire frame; a struct would only rename them"
+    )]
     fn ipc_run_prompt(
         &mut self,
         run: u64,
@@ -215,11 +219,11 @@ impl Store {
         reply: Reply,
         cx: &mut Context<Self>,
     ) {
-        if !self.workspaces.iter().any(|w| w.folder_path() == path) {
-            if !self.install_workspace(path, cx) {
-                let _ = reply.send(Err(format!("could not add workspace: {path}")));
-                return;
-            }
+        if !self.workspaces.iter().any(|w| w.folder_path() == path)
+            && !self.install_workspace(path, cx)
+        {
+            let _ = reply.send(Err(format!("could not add workspace: {path}")));
+            return;
         }
         // the server spins up if it must; until ServerStarted lands the
         // parked-runs pickup sends the tile on its own
@@ -234,7 +238,7 @@ impl Store {
         };
         // the picker's harness is applied before the model so switching
         // backends cannot leave a model the new harness never listed
-        if let Some(harness) = model.harness.clone() {
+        if let Some(harness) = model.harness {
             self.set_tile_harness(&tile_key, harness, cx);
         }
         self.ipc_seed_tile(&tile_key, prompt, model);
@@ -259,6 +263,9 @@ impl Store {
     pub fn retire_background_run(&mut self, session_id: &str, cx: &mut Context<Self>) {
         let ws_key = self.net_key_for_session(session_id);
         self.forget_session(session_id, cx);
+        // the deleted id must survive the restart too, or dsh's list would
+        // bring the retired background chat back
+        self.save_state();
         if let Some(ws_key) = ws_key {
             self.net.send(NetCommand::Request {
                 ws_key,
@@ -280,7 +287,9 @@ impl Store {
                     .unwrap_or_else(|| entry.workspace.clone());
                 self.net.send(NetCommand::Request {
                     ws_key,
-                    request: ApiRequest::Abort { session_id: session_id.clone() },
+                    request: ApiRequest::Abort {
+                        session_id: session_id.clone(),
+                    },
                 });
             }
             // the run entry is gone, so the idle watcher will not clean up

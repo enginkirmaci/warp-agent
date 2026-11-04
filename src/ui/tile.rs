@@ -238,9 +238,7 @@ impl TileView {
             if entry.fed == text {
                 return editor;
             }
-            editor.update(cx, |editor, cx| {
-                editor.set_value(text.clone(), window, cx)
-            });
+            editor.update(cx, |editor, cx| editor.set_value(text.clone(), window, cx));
             self.md_editors.insert(
                 item_id.to_string(),
                 MdEditor {
@@ -874,6 +872,7 @@ impl TileView {
                     .justify_start()
                     .child(
                         div()
+                            .w_full()
                             .min_w_0()
                             .max_w(px(MESSAGE_WIDTH))
                             .group("amsg")
@@ -3848,9 +3847,19 @@ impl Render for TileView {
                     }
                     let max = this.scroll.max_offset();
                     // wheel deltas are positive-up; the offset counts down
-                    let next = (-this.scroll.offset().y - delta).clamp(px(0.), max.y);
-                    this.pinned = next >= max.y - px(1.);
-                    this.scroll_to(next, cx);
+                    let before = -this.scroll.offset().y;
+                    let next = (before - delta).clamp(px(0.), max.y);
+                    let pinned = next >= max.y - px(1.);
+                    let turned = pinned != this.pinned;
+                    this.pinned = pinned;
+                    // a tick at either end changes nothing: repainting the
+                    // whole transcript for it is what made scrolling feel
+                    // heavy
+                    if next != before {
+                        this.scroll_to(next, cx);
+                    } else if turned {
+                        cx.notify();
+                    }
                     // the transcript consumed the tick: a scrollable inside a
                     // message (or a scrollbar hover over one) must not see the
                     // same tick scroll it too

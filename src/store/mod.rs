@@ -185,8 +185,12 @@ pub fn relative_time_label(updated_ms: i64) -> String {
         format!("{}h", span.num_hours())
     } else if span.num_days() < 7 {
         format!("{}d", span.num_days())
+    } else if span.num_days() < 30 {
+        format!("{}w", span.num_days() / 7)
+    } else if span.num_days() < 365 {
+        format!("{}mo", span.num_days() / 30)
     } else {
-        at.format("%Y-%m-%d").to_string()
+        format!("{}y", span.num_days() / 365)
     }
 }
 
@@ -1709,7 +1713,6 @@ pub struct SessionItem {
     pub updated_ms: i64,
     pub created_ms: i64,
     pub is_pinned: bool,
-    pub is_favorite: bool,
     pub is_selected: bool,
     pub is_running: bool,
     pub is_editing: bool,
@@ -1725,11 +1728,10 @@ impl SessionItem {
     }
 }
 
-/// Sidebar chat order: favorites first, then pinned, then newest first — by
-/// last activity, falling back to creation time when a server never fills
-/// `updated`.
-fn session_recency(s: &SessionItem) -> std::cmp::Reverse<(bool, bool, i64, i64)> {
-    std::cmp::Reverse((s.is_favorite, s.is_pinned, s.updated_ms, s.created_ms))
+/// Sidebar chat order: pinned first, then newest first — by last activity,
+/// falling back to creation time when a server never fills `updated`.
+fn session_recency(s: &SessionItem) -> std::cmp::Reverse<(bool, i64, i64)> {
+    std::cmp::Reverse((s.is_pinned, s.updated_ms, s.created_ms))
 }
 
 // ---- the store -----------------------------------------------------------
@@ -1856,6 +1858,10 @@ pub struct Store {
     /// sidebar section even when a server session list names them (their
     /// list refresh races the run), and forgotten when the run retires.
     hidden_sessions: HashSet<String>,
+    /// Chat ids the user deleted, persisted in ui.json. dsh's archive set is
+    /// per-process, so its `session/list` can still name a deleted chat after
+    /// the app restarts; these ids are filtered out of every list.
+    deleted_sessions: HashSet<String>,
     /// the door's models command parked while a server spins up, with the
     /// harness it asked for (None = any)
     ipc_models_waiter: Option<(Option<HarnessKind>, crate::ipc::Reply)>,
@@ -2007,6 +2013,7 @@ impl Store {
             tile_placeholder: None,
             ipc_runs: HashMap::new(),
             hidden_sessions: HashSet::new(),
+            deleted_sessions: ui.deleted_sessions.iter().cloned().collect(),
             ipc_models_waiter: None,
             commands: HashMap::new(),
             file_results: None,
@@ -2044,6 +2051,16 @@ impl Store {
             store.ui.workspaces.insert(0, general);
         }
         let _ = std::fs::create_dir_all(&general_path);
+
+        // favorites are workspace-level now; an old ui.json stored session ids
+        // in the same map (chats use pins), so drop everything that is not a
+        // known workspace path
+        let workspace_paths: HashSet<String> =
+            store.ui.workspaces.iter().map(|w| w.path.clone()).collect();
+        store
+            .ui
+            .favorites
+            .retain(|key, _| workspace_paths.contains(key));
 
         sort_workspaces(&mut store.ui.workspaces, &store.ui.favorites);
 
@@ -2125,6 +2142,11 @@ impl Store {
             let mut paths: Vec<String> = self.mcp_disabled.iter().cloned().collect();
             paths.sort();
             paths
+        };
+        self.ui.deleted_sessions = {
+            let mut ids: Vec<String> = self.deleted_sessions.iter().cloned().collect();
+            ids.sort();
+            ids
         };
         self.persist_tiles();
         self.persist_drafts();
@@ -2882,11 +2904,8 @@ impl Store {
         }
         self.ui.workspaces.retain(|w| w.path != path);
         self.workspaces.remove(index);
-        // the folder is gone; its star (and its chats') would sort nothing
+        // the folder is gone; its star would sort nothing
         self.ui.favorites.remove(path);
-        for sid in &session_ids {
-            self.ui.favorites.remove(sid);
-        }
         if was_selected {
             let next = self.workspaces.first().map(|w| w.folder_path().to_string());
             self.selected_workspace = next.clone();
@@ -3421,9 +3440,7 @@ impl Store {
                     if background {
                         self.hidden_sessions.insert(info.id.clone());
                     }
-                    if !background
-                        && let Some(ws) = self.workspace_by_path_mut(&ws_key)
-                    {
+                    if !background && let Some(ws) = self.workspace_by_path_mut(&ws_key) {
                         ws.state.sessions.insert(0, info.id.clone());
                     }
                     // only the selected workspace's sidebar mirror lives in
@@ -3436,7 +3453,6 @@ impl Store {
                             updated_ms: info.updated_ms,
                             created_ms: info.created_ms,
                             is_pinned: false,
-                            is_favorite: self.ui.favorites.contains_key(&info.id),
                             is_selected: false,
                             is_running: false,
                             is_editing: false,
@@ -3561,7 +3577,6 @@ impl Store {
                             updated_ms: info.updated_ms,
                             created_ms: info.created_ms,
                             is_pinned: false,
-                            is_favorite: self.ui.favorites.contains_key(&info.id),
                             is_selected: false,
                             is_running: false,
                             is_editing: false,
@@ -3613,7 +3628,12 @@ impl Store {
             } => {
                 if let Err(err) = result {
                     tracing::warn!("delete failed: {err:#}");
-                    self.announce(&format!("Delete failed: {err:#}"), true, cx);
+                    // the row is already gone locally (Delete unlinks at once)
+                    self.announce(
+                        &format!("Chat removed; the server could not delete it: {err:#}"),
+                        true,
+                        cx,
+                    );
                 } else {
                     self.forget_session(&session_id, cx);
                     self.save_state();
@@ -4178,7 +4198,10 @@ impl Store {
                 self.repaint(cx);
                 return;
             }
-        } else if draft_ws.as_ref().is_none_or(|ws| !self.runtimes.contains_key(ws)) {
+        } else if draft_ws
+            .as_ref()
+            .is_none_or(|ws| !self.runtimes.contains_key(ws))
+        {
             // no server for the draft's workspace yet: the prompt stays in
             // the tile until ServerStarted's parked-run pickup sends it
             return;
@@ -4746,6 +4769,12 @@ impl Store {
         is_dsh_list: bool,
         cx: &mut Context<Self>,
     ) {
+        // a deleted chat can still ride a server list (dsh archives per
+        // process); never let one back into a workspace after a restart
+        let sessions: Vec<SessionInfo> = sessions
+            .into_iter()
+            .filter(|s| !self.deleted_sessions.contains(&s.id))
+            .collect();
         // keep the subagent→parent map warm from the listing too
         for s in &sessions {
             if let Some(parent_id) = &s.parent_id {
@@ -4820,7 +4849,6 @@ impl Store {
                 }
             }
             let pins = &self.ui.pins;
-            let favorites = &self.ui.favorites;
             let mut chats: Vec<SessionItem> = sessions
                 .iter()
                 .filter(|s| known.contains(&s.id))
@@ -4830,7 +4858,6 @@ impl Store {
                     updated_ms: s.updated_ms,
                     created_ms: s.created_ms,
                     is_pinned: pins.contains_key(&s.id),
-                    is_favorite: favorites.contains_key(&s.id),
                     is_selected: false,
                     is_running: self.running_by_session.contains(&s.id),
                     is_editing: false,
@@ -4880,12 +4907,7 @@ impl Store {
             .filter(|s| state.sessions.contains(&s.id))
             .collect();
         mine.sort_by_key(|s| {
-            std::cmp::Reverse((
-                self.ui.favorites.contains_key(&s.id),
-                pins.contains_key(&s.id),
-                s.updated_ms,
-                s.created_ms,
-            ))
+            std::cmp::Reverse((pins.contains_key(&s.id), s.updated_ms, s.created_ms))
         });
         let alive: HashSet<String> = mine.iter().map(|s| s.id.clone()).collect();
         // drop chats that no longer exist on the server — only the ones this
@@ -4928,7 +4950,6 @@ impl Store {
                 updated_ms: s.updated_ms,
                 created_ms: s.created_ms,
                 is_pinned: self.ui.pins.contains_key(&s.id),
-                is_favorite: self.ui.favorites.contains_key(&s.id),
                 is_selected: false,
                 is_running: self.running_by_session.contains(&s.id),
                 is_editing: false,
@@ -4961,7 +4982,6 @@ impl Store {
                     && cur.title == s.title
                     && cur.updated_ms == s.updated_ms
                     && cur.is_pinned == s.is_pinned
-                    && cur.is_favorite == s.is_favorite
                     && cur.is_running == s.is_running
             });
         if unchanged {
@@ -5022,46 +5042,28 @@ impl Store {
         }
     }
 
-    /// The star of the station repos list, over both listable kinds: a chat
-    /// (by session id) or a workspace (by folder path). Favorites persist in
-    /// `ui.json` and sort to the top of every list that shows them.
-    pub fn toggle_session_favorite(&mut self, session_id: &str, cx: &mut Context<Self>) {
-        self.toggle_favorite_key(session_id.to_string());
-        self.sort_sessions();
-        self.sync_workspace_chats(cx);
-        self.repaint(cx);
-    }
-
+    /// The star of the station repos list, over workspaces only: chats are
+    /// kept by pins. Favorites persist in `ui.json` and sort to the top of the
+    /// workspace list.
     pub fn toggle_workspace_favorite(&mut self, path: &str, cx: &mut Context<Self>) {
-        self.toggle_favorite_key(path.to_string());
+        let is_favorite = !self.ui.favorites.contains_key(path);
+        if is_favorite {
+            self.ui.favorites.insert(path.to_string(), true);
+        } else {
+            self.ui.favorites.remove(path);
+        }
+        for ws in &mut self.workspaces {
+            if ws.folder_path() == path {
+                ws.is_favorite = is_favorite;
+            }
+        }
         // both lists sort favorites to the top: the serialized mirror for the
         // next launch, the runtime items for this session's sidebar
         sort_workspaces(&mut self.ui.workspaces, &self.ui.favorites);
         self.workspaces
             .sort_by_key(|w| workspace_order_key(w.folder_path(), &self.ui.favorites));
-        self.repaint(cx);
-    }
-
-    fn toggle_favorite_key(&mut self, key: String) {
-        let is_favorite = !self.ui.favorites.contains_key(&key);
-        if is_favorite {
-            self.ui.favorites.insert(key.clone(), true);
-        } else {
-            self.ui.favorites.remove(&key);
-        }
-        let by_id = |id: &str| id == key;
-        if let Some(item) = self.sessions.iter_mut().find(|s| by_id(&s.id)) {
-            item.is_favorite = is_favorite;
-        }
-        for ws in &mut self.workspaces {
-            if ws.folder_path() == key {
-                ws.is_favorite = is_favorite;
-            }
-            if let Some(chat) = ws.chats.iter_mut().find(|c| by_id(&c.id)) {
-                chat.is_favorite = is_favorite;
-            }
-        }
         self.save_state();
+        self.repaint(cx);
     }
 
     pub fn toggle_pin(&mut self, session_id: &str, cx: &mut Context<Self>) {
@@ -5110,10 +5112,21 @@ impl Store {
             .iter()
             .flat_map(|w| w.chats.iter())
             .find(|c| c.id == session_id)
-            .map(|c| (c.draft_title.trim().to_string(), c.title.clone()));
-        let Some((title, current)) = draft else {
+            .map(|c| {
+                (
+                    c.draft_title.trim().to_string(),
+                    c.title.clone(),
+                    c.is_editing,
+                )
+            });
+        let Some((title, current, editing)) = draft else {
             return;
         };
+        // Enter commits and also blurs the field: the blur that follows must
+        // not send a second rename for the already-closed edit
+        if !editing {
+            return;
+        }
         for ws in &mut self.workspaces {
             if let Some(chat) = ws.chats.iter_mut().find(|c| c.id == session_id) {
                 chat.is_editing = false;
@@ -5140,22 +5153,18 @@ impl Store {
             self.announce("Stop the running turn before deleting this chat.", true, cx);
             return;
         }
-        let Some(ws_key) = self.net_key_for_session(session_id) else {
-            return;
-        };
-        self.net.send(NetCommand::Request {
-            ws_key,
-            request: ApiRequest::DeleteSession {
-                session_id: session_id.to_string(),
-            },
-        });
-    }
-
-    /// Unlinks the chat from its workspace; the session itself survives on the server.
-    pub fn remove_from_workspace(&mut self, session_id: &str, cx: &mut Context<Self>) {
-        if self.is_busy(session_id) {
-            self.announce("Stop the running turn before removing this chat.", true, cx);
-            return;
+        // Delete absorbs the old Remove row: the chat leaves the sidebar at
+        // once (the local unlink Remove did) and the server is asked to delete
+        // the session behind it. Waiting for the round-trip kept a stale row on
+        // a server that had already gone away, so the list update comes first.
+        let ws_key = self.net_key_for_session(session_id);
+        if let Some(ws_key) = ws_key {
+            self.net.send(NetCommand::Request {
+                ws_key,
+                request: ApiRequest::DeleteSession {
+                    session_id: session_id.to_string(),
+                },
+            });
         }
         self.forget_session(session_id, cx);
         self.save_state();
@@ -5170,6 +5179,9 @@ impl Store {
         self.user_stopped_by_session.remove(id);
         self.workspace_by_session.remove(id);
         self.hidden_sessions.remove(id);
+        // dsh's `session/list` keeps naming archived chats after a restart;
+        // remembering the id here is what keeps a deleted chat deleted
+        self.deleted_sessions.insert(id.to_string());
         self.ui.harness_by_session.remove(id);
         for ws in &mut self.ui.workspaces {
             ws.sessions.retain(|s| s != id);
@@ -5182,8 +5194,6 @@ impl Store {
         self.title_by_session.remove(id);
         self.sessions.retain(|s| s.id != id);
         self.ui.pins.remove(id);
-        // a favorite of a chat that is gone would sort nothing anywhere
-        self.ui.favorites.remove(id);
         self.drop_queue(&[id.to_string()]);
         self.drop_pending(&[id.to_string()]);
         self.drop_retries(&[id.to_string()]);
@@ -7153,5 +7163,23 @@ mod suggest_tests {
         let auth = json!({"error": {"name": "ProviderAuthError", "message": "invalid api key"}});
         assert!(!read_error_info(&auth).1);
         assert!(!read_error_info(&json!({})).1);
+    }
+}
+
+#[cfg(test)]
+mod time_tests {
+    use super::relative_time_label;
+    use chrono::Local;
+
+    fn ago(days: i64) -> i64 {
+        (Local::now() - chrono::Duration::days(days)).timestamp_millis()
+    }
+
+    #[test]
+    fn ages_stay_relative() {
+        assert_eq!(relative_time_label(ago(3)), "3d");
+        assert_eq!(relative_time_label(ago(14)), "2w");
+        assert_eq!(relative_time_label(ago(60)), "2mo");
+        assert_eq!(relative_time_label(ago(400)), "1y");
     }
 }

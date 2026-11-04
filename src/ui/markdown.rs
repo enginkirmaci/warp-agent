@@ -30,6 +30,10 @@ use crate::ui::tile::TileView;
 /// the accent color for a second — the same animation as the message copy
 /// buttons, driven through TileView.copied_flash with keys
 /// "{flash_base}#code{n}" (n = fenced block order in this message).
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the render inputs are one message's transient state; a struct would be rebuilt per message anyway"
+)]
 pub fn render_markdown(
     editor: &Entity<LiveEditorState>,
     font_px: f32,
@@ -76,9 +80,8 @@ pub fn render_markdown(
                     .on_click(move |_, _, cx| {
                         cx.write_to_clipboard(gpui::ClipboardItem::new_string(code.to_string()));
                         // flash_copied owns the one-second revert timer
-                        let _ = click_view.update(cx, |this, cx| {
-                            this.flash_copied(click_key.clone(), cx)
-                        });
+                        let _ = click_view
+                            .update(cx, |this, cx| this.flash_copied(click_key.clone(), cx));
                     }),
                 "Copy code",
             )

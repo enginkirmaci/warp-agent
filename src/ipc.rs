@@ -777,7 +777,11 @@ mod tests {
         .await;
         assert_eq!(flags_rx.recv().await, Some(true));
 
-        say(&mut client, json!({"id": 2, "cmd": "run-prompt", "prompt": "hi"})).await;
+        say(
+            &mut client,
+            json!({"id": 2, "cmd": "run-prompt", "prompt": "hi"}),
+        )
+        .await;
         assert_eq!(flags_rx.recv().await, Some(false));
 
         drop(client);

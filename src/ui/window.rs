@@ -37,9 +37,105 @@ enum SidebarRow {
     Chat(crate::store::SessionItem),
     /// The italic hint under a running workspace with no chats.
     Placeholder(&'static str),
-    /// The quiet header over the folder workspaces; General sits above it
-    /// as a plain task entry, outside the section.
+    /// The quiet header over the folder workspaces; Tasks sits above it
+    /// outside the section.
     SectionLabel(&'static str),
+}
+
+/// The sidebar's scope chips: which rows the list keeps once a chip is active.
+/// All keeps the whole tree; the others narrow it to the chats (and starred
+/// workspaces, for Favorites) that match.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SidebarScope {
+    All,
+    NeedsYou,
+    Favorites,
+    Running,
+}
+
+impl SidebarScope {
+    fn label(self) -> &'static str {
+        match self {
+            SidebarScope::All => "All",
+            SidebarScope::NeedsYou => "Needs you",
+            SidebarScope::Favorites => "Favorites",
+            SidebarScope::Running => "Running",
+        }
+    }
+
+    fn key(self) -> &'static str {
+        match self {
+            SidebarScope::All => "all",
+            SidebarScope::NeedsYou => "needs-you",
+            SidebarScope::Favorites => "favorites",
+            SidebarScope::Running => "running",
+        }
+    }
+
+    /// The under-the-label line for a scope with nothing in it. All never
+    /// needs one (Tasks always leads), but the match keeps the call total.
+    fn empty_hint(self) -> &'static str {
+        match self {
+            SidebarScope::All => "No workspaces yet",
+            SidebarScope::NeedsYou => "Nothing needs you",
+            SidebarScope::Favorites => "No favorites yet",
+            SidebarScope::Running => "Nothing running",
+        }
+    }
+}
+
+/// Whether one chat row belongs to a scope. `waiting` is the store's answer,
+/// passed in so the rule stays pure and testable. Favorites is a
+/// workspace-level scope, so every chat of a favorite workspace belongs.
+fn chat_in_scope(chat: &crate::store::SessionItem, scope: SidebarScope, waiting: bool) -> bool {
+    match scope {
+        SidebarScope::All | SidebarScope::Favorites => true,
+        SidebarScope::NeedsYou => waiting,
+        SidebarScope::Running => chat.is_running,
+    }
+}
+
+/// A workspace row stays in a scoped list when it matches the scope itself
+/// (Favorites) or as the parent of matching chats (Needs you / Running).
+fn workspace_in_scope(
+    ws: &crate::store::WorkspaceItem,
+    scope: SidebarScope,
+    matched_chats: usize,
+) -> bool {
+    match scope {
+        SidebarScope::All => true,
+        SidebarScope::NeedsYou | SidebarScope::Running => matched_chats > 0,
+        SidebarScope::Favorites => ws.is_favorite,
+    }
+}
+
+/// The counts on the scope chips: every row for All, the favorite workspaces,
+/// and the chats each status scope keeps.
+fn sidebar_scope_counts(store: &Store) -> [(SidebarScope, usize); 4] {
+    let mut all = store.workspaces.len();
+    let mut need = 0;
+    let mut favorites = 0;
+    let mut running = 0;
+    for ws in &store.workspaces {
+        if ws.is_favorite {
+            favorites += 1;
+        }
+        all += ws.chats.len();
+        for chat in &ws.chats {
+            if store.session_waiting(&chat.id) {
+                need += 1;
+            }
+            if chat.is_running {
+                running += 1;
+            }
+        }
+    }
+    [
+        (SidebarScope::All, all),
+        (SidebarScope::NeedsYou, need),
+        (SidebarScope::Favorites, favorites),
+        (SidebarScope::Running, running),
+    ]
 }
 
 /// The Settings page's sections: the design's list of four, each with its own
@@ -91,12 +187,9 @@ pub enum SideMenuAction {
     RemoveWorkspace(String),
     FavoriteWorkspace(String),
     UnfavoriteWorkspace(String),
-    FavoriteChat(String),
-    UnfavoriteChat(String),
     PinChat(String),
     UnpinChat(String),
     RenameChat(String),
-    UnlinkChat(String),
     DeleteChat(String),
 }
 
@@ -105,16 +198,11 @@ impl SideMenuAction {
         match self {
             SideMenuAction::OpenFolder(_) => "Open folder",
             SideMenuAction::RemoveWorkspace(_) => "Remove workspace",
-            SideMenuAction::FavoriteWorkspace(_) | SideMenuAction::FavoriteChat(_) => {
-                "Add to favorites"
-            }
-            SideMenuAction::UnfavoriteWorkspace(_) | SideMenuAction::UnfavoriteChat(_) => {
-                "Remove from favorites"
-            }
+            SideMenuAction::FavoriteWorkspace(_) => "Add to favorites",
+            SideMenuAction::UnfavoriteWorkspace(_) => "Remove from favorites",
             SideMenuAction::PinChat(_) => "Pin",
             SideMenuAction::UnpinChat(_) => "Unpin",
             SideMenuAction::RenameChat(_) => "Rename",
-            SideMenuAction::UnlinkChat(_) => "Remove",
             SideMenuAction::DeleteChat(_) => "Delete",
         }
     }
@@ -127,6 +215,33 @@ pub struct MenuState {
     pub x: f32,
     pub y: f32,
     pub rows: Vec<SideMenuAction>,
+}
+
+/// Shaped width of one line in the UI face. The sidebar uses it to decide
+/// whether a row still has room for its optional harness label before the
+/// title has to truncate.
+fn line_width(window: &Window, text: &str, font_size: f32, weight: gpui::FontWeight) -> f32 {
+    // layout_line only lays out one line; a server title that slipped a
+    // newline in is measured up to that break (the row clips it anyway)
+    let text = text.split(['\n', '\r']).next().unwrap_or(text);
+    if text.is_empty() {
+        return 0.;
+    }
+    let mut font = gpui::font(theme::ui_font());
+    font.weight = weight;
+    let run = gpui::TextRun {
+        len: text.len(),
+        font,
+        color: gpui::Hsla::default(),
+        background_color: None,
+        underline: None,
+        strikethrough: None,
+    };
+    window
+        .text_system()
+        .layout_line(text, px(font_size), &[run], None)
+        .width
+        .as_f32()
 }
 
 /// The star of the station repos list, in a sidebar row's hover actions:
@@ -180,42 +295,35 @@ fn star_toggle(
 }
 
 /// Harness-independent workspace menu: servers are auto-managed (expanding a
-/// workspace connects them), so the only entries are the folder itself and
-/// removal. The built-in General workspace has neither — no menu at all.
+/// workspace connects them), so the entries are the star and the folder.
+/// Tasks is built in and always there, so only its removal is withheld.
 fn ws_menu_rows(store: &Store, path: &str) -> Vec<SideMenuAction> {
     let Some(ws) = store.workspaces.iter().find(|w| w.folder_path() == path) else {
         return Vec::new();
     };
-    if ws.is_general() {
-        return Vec::new();
-    }
-    vec![
+    let mut rows = vec![
         if ws.is_favorite {
             SideMenuAction::UnfavoriteWorkspace(path.into())
         } else {
             SideMenuAction::FavoriteWorkspace(path.into())
         },
         SideMenuAction::OpenFolder(path.to_string()),
-        SideMenuAction::RemoveWorkspace(path.to_string()),
-    ]
+    ];
+    if !ws.is_general() {
+        rows.push(SideMenuAction::RemoveWorkspace(path.to_string()));
+    }
+    rows
 }
 
 fn chat_menu_rows(store: &Store, id: &str) -> Vec<SideMenuAction> {
     let pinned = store.ui.pins.contains_key(id);
-    let favorite = store.ui.favorites.contains_key(id);
     vec![
-        if favorite {
-            SideMenuAction::UnfavoriteChat(id.into())
-        } else {
-            SideMenuAction::FavoriteChat(id.into())
-        },
         if pinned {
             SideMenuAction::UnpinChat(id.into())
         } else {
             SideMenuAction::PinChat(id.into())
         },
         SideMenuAction::RenameChat(id.into()),
-        SideMenuAction::UnlinkChat(id.into()),
         SideMenuAction::DeleteChat(id.into()),
     ]
 }
@@ -257,6 +365,10 @@ pub struct WarpWindow {
     /// leaf (InputLeaf) and only a Change event copies the text out and
     /// nudges the window to refilter the list
     sidebar_filter: String,
+    /// the scope chip under the filter field: All, Needs you, Favorites or
+    /// Running. Kept in the window, like the filter text, so it is a view
+    /// state and never touches the saved layout.
+    sidebar_scope: SidebarScope,
     /// the filter input isolated in a leaf so typing doesn't repaint the
     /// whole window (created on first sidebar render — InputState needs
     /// the window)
@@ -305,6 +417,7 @@ impl WarpWindow {
             settings_model_picker: None,
             rename: None,
             sidebar_filter: String::new(),
+            sidebar_scope: SidebarScope::All,
             sidebar_filter_leaf: None,
             sidebar_labels: HashMap::new(),
             sidebar_labels_minute: -1,
@@ -321,11 +434,8 @@ fn menu_action_key(action: &SideMenuAction) -> String {
         SideMenuAction::RemoveWorkspace(path) => format!("remove-workspace:{path}"),
         SideMenuAction::FavoriteWorkspace(path) => format!("favorite-ws:{path}"),
         SideMenuAction::UnfavoriteWorkspace(path) => format!("unfavorite-ws:{path}"),
-        SideMenuAction::FavoriteChat(id) => format!("favorite:{id}"),
-        SideMenuAction::UnfavoriteChat(id) => format!("unfavorite:{id}"),
         SideMenuAction::PinChat(id) | SideMenuAction::UnpinChat(id) => format!("pin:{id}"),
         SideMenuAction::RenameChat(id) => format!("rename:{id}"),
-        SideMenuAction::UnlinkChat(id) => format!("unlink:{id}"),
         SideMenuAction::DeleteChat(id) => format!("delete-chat:{id}"),
     }
 }
@@ -340,12 +450,9 @@ fn execute_menu_action(store: &Entity<Store>, action: &SideMenuAction, cx: &mut 
         SideMenuAction::RemoveWorkspace(path) => s.remove_workspace(path, cx),
         SideMenuAction::FavoriteWorkspace(path) => s.toggle_workspace_favorite(path, cx),
         SideMenuAction::UnfavoriteWorkspace(path) => s.toggle_workspace_favorite(path, cx),
-        SideMenuAction::FavoriteChat(id) => s.toggle_session_favorite(id, cx),
-        SideMenuAction::UnfavoriteChat(id) => s.toggle_session_favorite(id, cx),
         SideMenuAction::PinChat(id) => s.toggle_pin(id, cx),
         SideMenuAction::UnpinChat(id) => s.toggle_pin(id, cx),
         SideMenuAction::RenameChat(id) => s.begin_rename(id, cx),
-        SideMenuAction::UnlinkChat(id) => s.remove_from_workspace(id, cx),
         SideMenuAction::DeleteChat(id) => s.delete_session(id, cx),
     });
 }
@@ -362,6 +469,9 @@ impl Render for WarpWindow {
         }
         while let Ok(menu) = self.menu_receiver.try_recv() {
             self.menu = Some(menu);
+            // a fresh menu starts unarmed: an old Confirm state belongs to a
+            // menu that is no longer on screen
+            self.store.update(cx, |s, _| s.menu_armed = None);
         }
 
         // rename field lifecycle: create when a row enters edit, drop when it leaves
@@ -490,11 +600,24 @@ impl Render for WarpWindow {
                         cx.notify();
                     }))
                     .child(
-                        div()
-                            .absolute()
-                            .left(px(menu.x))
-                            .top(px(menu.y))
-                            .child(popover_card().min_w(px(180.)).child(rows)),
+                        div().absolute().left(px(menu.x)).top(px(menu.y)).child(
+                            popover_card()
+                                .id("menu-card")
+                                .min_w(px(180.))
+                                // A row click bubbles up here; stop it before
+                                // the full-screen catcher sees it. A destructive
+                                // row's first click only arms the row (Confirm),
+                                // so keep the menu mounted then; any other action
+                                // has run by now and the menu closes.
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    cx.stop_propagation();
+                                    if this.store.read(cx).menu_armed.is_none() {
+                                        this.menu = None;
+                                        cx.notify();
+                                    }
+                                }))
+                                .child(rows),
+                        ),
                     ),
             );
         }
@@ -577,7 +700,9 @@ impl WarpWindow {
                 let store_handle = self.store.clone();
                 let id_enter = id.clone();
                 cx.subscribe(&entity, move |_, field, event: &InputEvent, cx| {
-                    if matches!(event, InputEvent::PressEnter { .. }) {
+                    // Enter commits at once; losing focus commits too, so
+                    // clicking another row does not throw the edit away
+                    if matches!(event, InputEvent::PressEnter { .. } | InputEvent::Blur) {
                         let text = field.read(cx).value().to_string();
                         let id = id_enter.clone();
                         store_handle.update(cx, |s, cx| {
@@ -595,6 +720,10 @@ impl WarpWindow {
                     mono: false,
                     icon: None,
                 });
+                // editing starts focused: the row's ⋯ -> Rename should put the
+                // caret in the title, not ask for a second click
+                let focus = entity.read(cx).focus_handle(cx);
+                window.focus(&focus, cx);
                 self.rename = Some((id, entity, leaf));
             }
             (None, Some(_)) => {
@@ -607,7 +736,14 @@ impl WarpWindow {
     /// Below the compact width, a grid of two or more takes the list's room.
     fn grid_takes_the_list(&self, window: &Window, cx: &App) -> bool {
         window.viewport_size().width < px(shell::scaled(shell::COMPACT_WINDOW_WIDTH))
-            && self.store.read(cx).open_tiles.iter().filter(|t| !t.background).count() >= 2
+            && self
+                .store
+                .read(cx)
+                .open_tiles
+                .iter()
+                .filter(|t| !t.background)
+                .count()
+                >= 2
     }
 
     fn open_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -954,7 +1090,7 @@ impl WarpWindow {
         // hold hundreds of chats and every row here is one fixed line, so the
         // old loop built the whole tree — each row's listeners, icons and
         // menus — on every repaint. `uniform_list` builds a screenful.
-        let rows = Rc::new(self.sidebar_rows(&filter, cx));
+        let rows = Rc::new(self.sidebar_rows(&filter, self.sidebar_scope, cx));
 
         let (need, running, open) = {
             let store = self.store.read(cx);
@@ -991,6 +1127,9 @@ impl WarpWindow {
             summary = summary.child(format!("{running} running ·"));
         }
         summary = summary.child(format!("{open} open"));
+
+        let scope_counts = sidebar_scope_counts(self.store.read(cx));
+        let scope_strip = self.render_scope_strip(&fonts, scope_counts, cx);
 
         shell::list_pane(width)
             .debug_selector(|| "agent-list".into())
@@ -1031,7 +1170,10 @@ impl WarpWindow {
                             .w_full()
                             .min_w_0()
                             .child(filter_leaf),
-                    ),
+                    )
+                    // the design's repo filter strip, here over the chat tree:
+                    // one trough, a chip and count per scope
+                    .child(scope_strip),
             )
             .child({
                 // the row list is never empty: Tasks always leads, and an
@@ -1039,9 +1181,9 @@ impl WarpWindow {
                 uniform_list(
                     SharedString::from("sidebar-rows"),
                     rows.len(),
-                    cx.processor(move |this, range: std::ops::Range<usize>, _window, cx| {
+                    cx.processor(move |this, range: std::ops::Range<usize>, window, cx| {
                         range
-                            .map(|ix| this.render_sidebar_row(&rows[ix], cx))
+                            .map(|ix| this.render_sidebar_row(&rows[ix], window, cx))
                             .collect()
                     }),
                 )
@@ -1056,36 +1198,140 @@ impl WarpWindow {
             .into_any_element()
     }
 
+    /// The scope chips under the filter field: one trough, a chip and its
+    /// count per scope, the active one lifted onto `raised` with its count in
+    /// the accent — the design's repo filter strip.
+    fn render_scope_strip(
+        &self,
+        fonts: &theme::FontTokens,
+        counts: [(SidebarScope, usize); 4],
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let mut trough = div()
+            .id("sidebar-scopes")
+            .debug_selector(|| "sidebar-scopes".into())
+            .w_full()
+            .min_w_0()
+            .flex()
+            .flex_row()
+            .flex_wrap()
+            .items_center()
+            .gap(px(2.))
+            .p(px(2.))
+            .rounded(px(8.))
+            .bg(theme::well());
+        for (scope, count) in counts {
+            let active = self.sidebar_scope == scope;
+            let selector = format!("sidebar-scope-{}", scope.key());
+            trough = trough.child(
+                div()
+                    .id(gpui::ElementId::Name(selector.clone().into()))
+                    .debug_selector({
+                        let selector = selector.clone();
+                        move || selector.clone()
+                    })
+                    .a11y_toggle(format!("{} ({count})", scope.label()), active)
+                    .cursor_pointer()
+                    .h(px(26.))
+                    .px(px(4.))
+                    .rounded(px(6.))
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(4.))
+                    .text_size(px(fonts.font_row_meta))
+                    .font_weight(if active {
+                        gpui::FontWeight::SEMIBOLD
+                    } else {
+                        gpui::FontWeight::MEDIUM
+                    })
+                    .when(active, |d| d.bg(theme::raised()).text_color(theme::text()))
+                    .when(!active, |d| {
+                        d.text_color(theme::text_dim())
+                            .hover(|s| s.text_color(theme::text()))
+                    })
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if this.sidebar_scope != scope {
+                            this.sidebar_scope = scope;
+                            cx.notify();
+                        }
+                    }))
+                    .child(scope.label())
+                    .child(
+                        div()
+                            .text_size(px(fonts.font_micro))
+                            .text_color(if active {
+                                theme::accent_ink()
+                            } else {
+                                theme::text_muted()
+                            })
+                            .child(count.to_string()),
+                    ),
+            );
+        }
+        trough.into_any_element()
+    }
+
     /// The sidebar as one flat row list: Tasks on its own, the Workspaces
     /// label (with the add-folder button), then a workspace, the hint under
     /// an empty one, and its chats. Flattening keeps the virtualized list
-    /// indexable while the filter still hides whole workspaces.
-    fn sidebar_rows(&self, filter: &str, cx: &App) -> Vec<SidebarRow> {
+    /// indexable while the filter still hides whole workspaces and a scope
+    /// keeps only the rows it matches.
+    fn sidebar_rows(&self, filter: &str, scope: SidebarScope, cx: &App) -> Vec<SidebarRow> {
+        let store = self.store.read(cx);
         let mut rows = Vec::new();
         let mut section = Vec::new();
-        for ws in &self.store.read(cx).workspaces {
+        for ws in &store.workspaces {
             if !filter.is_empty() && !ws.name.to_lowercase().contains(filter) {
                 continue;
             }
+            if scope == SidebarScope::All {
+                if ws.is_general() {
+                    Self::push_workspace_rows(&mut rows, ws);
+                } else {
+                    section.push((ws, Vec::new()));
+                }
+                continue;
+            }
+            let matched: Vec<crate::store::SessionItem> = ws
+                .chats
+                .iter()
+                .filter(|chat| chat_in_scope(chat, scope, store.session_waiting(&chat.id)))
+                .cloned()
+                .collect();
+            if !workspace_in_scope(ws, scope, matched.len()) {
+                continue;
+            }
             if ws.is_general() {
-                Self::push_workspace_rows(&mut rows, ws);
+                Self::push_scoped_workspace(&mut rows, ws, &matched);
             } else {
-                section.push(ws.clone());
+                section.push((ws, matched));
             }
         }
+        let tasks_shown = !rows.is_empty();
         // the label always leads the section: its + is the only add-folder
         // affordance now, so a fresh install (no folder workspaces yet)
         // still shows it, with the hint under it
         rows.push(SidebarRow::SectionLabel("Workspaces"));
         if section.is_empty() {
-            rows.push(SidebarRow::Placeholder(if filter.is_empty() {
+            rows.push(SidebarRow::Placeholder(if scope != SidebarScope::All {
+                if tasks_shown {
+                    "No matching workspaces"
+                } else {
+                    scope.empty_hint()
+                }
+            } else if filter.is_empty() {
                 "No workspaces yet"
             } else {
                 "No matching workspace"
             }));
         } else {
-            for ws in &section {
-                Self::push_workspace_rows(&mut rows, ws);
+            for (ws, matched) in &section {
+                if scope == SidebarScope::All {
+                    Self::push_workspace_rows(&mut rows, ws);
+                } else {
+                    Self::push_scoped_workspace(&mut rows, ws, matched);
+                }
             }
         }
         rows
@@ -1105,11 +1351,34 @@ impl WarpWindow {
         }
     }
 
+    /// A workspace row in a scoped list. It reads open and carries only the
+    /// matching chats — the filter brought them into view even when the
+    /// folder itself is folded — and its count is the matches, not the
+    /// folder's total.
+    fn push_scoped_workspace(
+        rows: &mut Vec<SidebarRow>,
+        ws: &crate::store::WorkspaceItem,
+        matched: &[crate::store::SessionItem],
+    ) {
+        let mut row = ws.clone();
+        row.state.collapsed = false;
+        row.chats = matched.to_vec();
+        rows.push(SidebarRow::Workspace(row));
+        for chat in matched {
+            rows.push(SidebarRow::Chat(chat.clone()));
+        }
+    }
+
     /// One sidebar row, at the virtualized list's fixed pitch.
-    fn render_sidebar_row(&mut self, row: &SidebarRow, cx: &mut Context<Self>) -> gpui::AnyElement {
+    fn render_sidebar_row(
+        &mut self,
+        row: &SidebarRow,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
         match row {
             SidebarRow::Workspace(ws) => self.render_workspace_row(ws, cx),
-            SidebarRow::Chat(chat) => self.render_session_row(chat, cx),
+            SidebarRow::Chat(chat) => self.render_session_row(chat, window, cx),
             SidebarRow::Placeholder(text) => {
                 let fonts = self.store.read(cx).fonts;
                 div()
@@ -1176,29 +1445,18 @@ impl WarpWindow {
     ) -> gpui::AnyElement {
         let fonts = self.store.read(cx).fonts;
         let path = ws.folder_path().to_string();
-        // General is a plain task entry: no leading star, no icon — the
-        // folder glyphs are only for the Workspaces section below it
-        let glyph: Option<gpui::AnyElement> = if ws.is_general() {
-            None
-        } else if ws.is_expanded() {
-            Some(
-                crate::ui::icon(
-                    "icons/folder-open-outline.svg",
-                    px(fonts.icon_medium),
-                    theme::text_muted(),
-                )
-                .into_any_element(),
-            )
-        } else {
-            Some(
-                crate::ui::icon(
-                    "icons/folder-outline.svg",
-                    px(fonts.icon_medium),
-                    theme::text_muted(),
-                )
-                .into_any_element(),
-            )
-        };
+        // every top-level row — Tasks and folder workspaces alike — leads
+        // with the same folder glyph, open while its chats show
+        let glyph: gpui::AnyElement = crate::ui::icon(
+            if ws.is_expanded() {
+                "icons/folder-open-outline.svg"
+            } else {
+                "icons/folder-outline.svg"
+            },
+            px(fonts.icon_medium),
+            theme::text_muted(),
+        )
+        .into_any_element();
 
         let ws_store = self.store.clone();
         let path_click = path.clone();
@@ -1261,7 +1519,7 @@ impl WarpWindow {
                         ws_menu_rows(s, &menu_path)
                     };
                     if rows.is_empty() {
-                        return; // General: no workspace menu at all
+                        return; // the workspace left the list between frames
                     }
                     let _ = menu_tx.send_blocking(MenuState {
                         x: event.position.x.as_f32(),
@@ -1272,36 +1530,43 @@ impl WarpWindow {
                     menu_store.update(cx, |_, _| {});
                 },
             )
-            // the star leads the row like station's repos list: filled in
+            // the star leads every row like station's repos list: filled in
             // the accent while a favorite, dimmed until the row hover else.
-            // General has none — it is not favoritable
-            .when(!ws.is_general(), |d| {
-                d.child(star_toggle(
-                    gpui::ElementId::NamedInteger("ws-star".into(), TileView::hash(&path)),
-                    ws.is_favorite,
-                    fonts.icon_small,
-                    "wsrow",
-                    move |cx| {
-                        ws_store_fav.update(cx, |s, cx| {
-                            s.toggle_workspace_favorite(&path_fav, cx)
-                        });
-                    },
-                ))
-            })
-            .children(glyph)
+            // Tasks is favoritable too; it is the general workspace.
+            .child(star_toggle(
+                gpui::ElementId::NamedInteger("ws-star".into(), TileView::hash(&path)),
+                ws.is_favorite,
+                fonts.icon_small,
+                "wsrow",
+                move |cx| {
+                    ws_store_fav.update(cx, |s, cx| s.toggle_workspace_favorite(&path_fav, cx));
+                },
+            ))
+            .child(glyph)
             // no flex_1: the row packs left so the count hugs the name; a long
             // name shrinks (min_w_0) and truncates instead of pushing the
-            // count to the row's far edge
-            .child(
+            // count to the row's far edge. Tasks is the group label of the
+            // tree, so it uses the Workspaces label's quiet type rather than
+            // the folder rows' 15px name — icons and hover actions stay.
+            .child({
+                let group = ws.is_general();
                 div()
                     .min_w_0()
                     .ml_2()
-                    .text_size(px(fonts.font_name))
+                    .text_size(px(if group {
+                        fonts.font_meta
+                    } else {
+                        fonts.font_name
+                    }))
                     .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .text_color(theme::text())
+                    .text_color(if group {
+                        theme::text_dim()
+                    } else {
+                        theme::text()
+                    })
                     .truncate()
-                    .child(SharedString::from(ws.name.clone())),
-            )
+                    .child(SharedString::from(ws.name.clone()))
+            })
             .when(ws.has_chats(), |d| {
                 d.child(
                     div()
@@ -1370,53 +1635,51 @@ impl WarpWindow {
                             theme::text_dim(),
                         )),
                     )
-                    .when(!ws.is_general(), |d| {
-                        d.child(
-                            tip(
-                                div()
-                                    .id(gpui::ElementId::NamedInteger(
-                                        "ws-kebab".into(),
-                                        TileView::hash(&path),
-                                    ))
-                                    .role(Role::Button)
-                                    .aria_label(SharedString::from(format!(
-                                        "{} — workspace actions",
-                                        ws.name
-                                    )))
-                                    .cursor_pointer()
-                                    .p_1()
-                                    .rounded_sm()
-                                    .hover(|s| s.bg(theme::HOVER))
-                                    .on_click(move |event, _, cx| {
-                                        // menu only — the row must not toggle expansion
-                                        cx.stop_propagation();
-                                        let rows = {
-                                            let s = menu_store2.read(cx);
-                                            ws_menu_rows(s, &menu_path2)
-                                        };
-                                        if rows.is_empty() {
-                                            return;
-                                        }
-                                        let (x, y) = match event {
-                                            gpui::ClickEvent::Mouse(click) => (
-                                                click.up.position.x.as_f32(),
-                                                click.up.position.y.as_f32(),
-                                            ),
-                                            _ => (40.0, 60.0),
-                                        };
-                                        let _ = menu_tx2.send_blocking(MenuState { x, y, rows });
-                                        // menu paints on the next store-driven repaint — same nudge as right-click
-                                        menu_store2.update(cx, |_, _| {});
-                                    }),
-                                "Workspace actions",
-                            )
-                            .child(crate::ui::icon(
-                                "icons/kebab.svg",
-                                px(fonts.icon_medium),
-                                theme::text_muted(),
-                            )),
+                    .child(
+                        tip(
+                            div()
+                                .id(gpui::ElementId::NamedInteger(
+                                    "ws-kebab".into(),
+                                    TileView::hash(&path),
+                                ))
+                                .role(Role::Button)
+                                .aria_label(SharedString::from(format!(
+                                    "{} — workspace actions",
+                                    ws.name
+                                )))
+                                .cursor_pointer()
+                                .p_1()
+                                .rounded_sm()
+                                .hover(|s| s.bg(theme::HOVER))
+                                .on_click(move |event, _, cx| {
+                                    // menu only — the row must not toggle expansion
+                                    cx.stop_propagation();
+                                    let rows = {
+                                        let s = menu_store2.read(cx);
+                                        ws_menu_rows(s, &menu_path2)
+                                    };
+                                    if rows.is_empty() {
+                                        return;
+                                    }
+                                    let (x, y) = match event {
+                                        gpui::ClickEvent::Mouse(click) => (
+                                            click.up.position.x.as_f32(),
+                                            click.up.position.y.as_f32(),
+                                        ),
+                                        _ => (40.0, 60.0),
+                                    };
+                                    let _ = menu_tx2.send_blocking(MenuState { x, y, rows });
+                                    // menu paints on the next store-driven repaint — same nudge as right-click
+                                    menu_store2.update(cx, |_, _| {});
+                                }),
+                            "Workspace actions",
                         )
-                    }),
+                        .child(crate::ui::icon(
+                            "icons/kebab.svg",
+                            px(fonts.icon_medium),
+                            theme::text_muted(),
+                        )),
+                    ),
             )
             .into_any_element()
     }
@@ -1443,17 +1706,50 @@ impl WarpWindow {
     fn render_session_row(
         &mut self,
         chat: &crate::store::SessionItem,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
-        let (fonts, accent, harness_label, waiting) = {
+        let time_label = self.cached_time_label(chat);
+        let (fonts, accent, harness_label, waiting, row_width) = {
             let store = self.store.read(cx);
             (
                 store.fonts,
                 store.accent.accent,
                 store.session_harness(&chat.id).label(),
                 store.session_waiting(&chat.id),
+                store.sidebar_shown_width,
             )
         };
+        // The harness label is the row's optional metadata: as soon as the
+        // title no longer fits beside it, drop the harness and give its room
+        // to the title (the age stays — it is the row's timing signal).
+        let title_weight = if chat.is_selected {
+            gpui::FontWeight::SEMIBOLD
+        } else {
+            gpui::FontWeight::NORMAL
+        };
+        // pl 24 + pr 12 + the 16px gutter and its 4px gap, plus a little room
+        // for the list's overlay scrollbar before the row trims
+        let fixed = 24. + 12. + 16. + 4. + 8.;
+        let meta_overhead = 8. + 4.; // the meta's ml_2 and the gap before the age
+        let room_with_harness = row_width
+            - fixed
+            - meta_overhead
+            - line_width(
+                window,
+                harness_label,
+                fonts.font_meta,
+                gpui::FontWeight::NORMAL,
+            )
+            - line_width(
+                window,
+                &time_label,
+                fonts.font_meta,
+                gpui::FontWeight::NORMAL,
+            )
+            - 2.; // a pixel of cushion before truncation kicks in
+        let show_harness =
+            line_width(window, &chat.title, fonts.font_body, title_weight) <= room_with_harness;
         let id = chat.id.clone();
         let store_click = self.store.clone();
         let id_click = id.clone();
@@ -1465,6 +1761,10 @@ impl WarpWindow {
         let more_tx = self.menu_sender_cell.clone();
         let more_store = self.store.clone();
         let more_id = id.clone();
+        // the hover pin is the quick way to pin/unpin without opening the ⋯
+        let pin_store = self.store.clone();
+        let pin_id = id.clone();
+        let pinned = chat.is_pinned;
         let gutter: gpui::AnyElement = if waiting {
             crate::ui::icon("icons/shield.svg", px(fonts.icon_tiny), theme::CHANGES)
                 .into_any_element()
@@ -1474,18 +1774,6 @@ impl WarpWindow {
                 "icons/spinner.svg",
                 px(fonts.icon_tiny),
                 theme::BEHIND,
-            )
-        } else if chat.is_favorite {
-            star_toggle(
-                gpui::ElementId::NamedInteger("chat-star".into(), TileView::hash(&id)),
-                true,
-                fonts.icon_small,
-                "chatrow",
-                {
-                    let fav_store = self.store.clone();
-                    let fav_id = id.clone();
-                    move |cx| fav_store.update(cx, |s, cx| s.toggle_session_favorite(&fav_id, cx))
-                },
             )
         } else if chat.pin_visible() {
             crate::ui::icon("icons/pin.svg", px(fonts.icon_small), theme::text_muted())
@@ -1506,6 +1794,9 @@ impl WarpWindow {
             .group("chatrow")
             .flex()
             .items_center()
+            // the row owns the full list width: without this its hover and
+            // selected fill stopped at the text, not at the pane edge
+            .w_full()
             .h(px(SIDEBAR_ROW_HEIGHT))
             .pl(px(24.))
             .pr_3()
@@ -1555,7 +1846,19 @@ impl WarpWindow {
 
         if chat.is_editing {
             if let Some((_, _, leaf)) = &self.rename {
-                row = row.child(div().flex_1().min_w_0().child(leaf.clone()));
+                // the field owns the press: the row underneath must not select
+                // the chat (and steal focus back) while the title is edited
+                row = row.child(
+                    div()
+                        .id(gpui::ElementId::NamedInteger(
+                            "rename".into(),
+                            TileView::hash(&id),
+                        ))
+                        .flex_1()
+                        .min_w_0()
+                        .on_click(|_, _, cx| cx.stop_propagation())
+                        .child(leaf.clone()),
+                );
             }
         } else {
             row = row
@@ -1571,12 +1874,12 @@ impl WarpWindow {
                         .truncate()
                         .child(SharedString::from(chat.title.clone())),
                 )
-                // right meta cluster in flow: which backend the chat runs on,
-                // then the time. Hovering the row fades the cluster out and
-                // fades the delete button in at the same spot (absolute layer,
-                // so nothing shifts)
-                .child(
-                    div()
+                // right meta cluster in flow: which backend the chat runs on
+                // (dropped when the title needs its room), then the age.
+                // Hovering the row fades the cluster out and fades the pin and
+                // ⋯ actions in at the same spot (absolute layer, so nothing shifts)
+                .child({
+                    let mut meta = div()
                         .flex_shrink_0()
                         .flex()
                         .items_center()
@@ -1584,13 +1887,16 @@ impl WarpWindow {
                         .group_hover("chatrow", |s| s.opacity(0.))
                         .ml_2()
                         .text_size(px(fonts.font_meta))
-                        .text_color(theme::text_muted())
-                        .child(SharedString::from(harness_label))
-                        .child(self.cached_time_label(chat)),
-                )
-                // the design's ⋯: favorite (the star), Pin, Rename, Remove and
-                // Delete chat (which arms before it runs), the same menu the
-                // right-click opens
+                        .text_color(theme::text_muted());
+                    if show_harness {
+                        meta = meta.child(SharedString::from(harness_label));
+                    }
+                    meta.child(time_label.clone())
+                })
+                // the design's ⋯: favorite (the star), Pin, Rename and Delete
+                // chat (which arms before it runs, then deletes and unlinks),
+                // the same menu the right-click opens. The pin is a direct
+                // hover action beside it.
                 .child(
                     div()
                         .absolute()
@@ -1599,8 +1905,38 @@ impl WarpWindow {
                         .bottom_0()
                         .flex()
                         .items_center()
+                        .gap_0p5()
                         .opacity(0.)
                         .group_hover("chatrow", |s| s.opacity(1.))
+                        .child(
+                            tip(
+                                div()
+                                    .id(gpui::ElementId::NamedInteger(
+                                        "chat-pin".into(),
+                                        TileView::hash(&id),
+                                    ))
+                                    .role(Role::Button)
+                                    .aria_label(if pinned { "Unpin chat" } else { "Pin chat" })
+                                    .occlude()
+                                    .cursor_pointer()
+                                    .p_1()
+                                    .rounded_sm()
+                                    .hover(|s| s.bg(theme::HOVER))
+                                    .on_click(move |_, _, cx| {
+                                        // the row must not select behind the button
+                                        cx.stop_propagation();
+                                        pin_store.update(cx, |s, cx| {
+                                            s.toggle_pin(&pin_id, cx);
+                                        });
+                                    }),
+                                if pinned { "Unpin" } else { "Pin" },
+                            )
+                            .child(crate::ui::icon(
+                                "icons/pin.svg",
+                                px(fonts.icon_medium),
+                                if pinned { accent } else { theme::text_muted() },
+                            )),
+                        )
                         .child(
                             tip(
                                 div()
@@ -2668,5 +3004,82 @@ fn model_data(
         fonts,
         accent,
         show_tooltips: false,
+    }
+}
+
+#[cfg(test)]
+mod scope_tests {
+    use super::{SidebarScope, chat_in_scope, workspace_in_scope};
+    use crate::settings::WorkspaceState;
+    use crate::store::{SessionItem, WorkspaceItem};
+
+    fn chat(id: &str, running: bool) -> SessionItem {
+        SessionItem {
+            id: id.into(),
+            title: id.into(),
+            updated_ms: 0,
+            created_ms: 0,
+            is_pinned: false,
+            is_selected: false,
+            is_running: running,
+            is_editing: false,
+            draft_title: String::new(),
+        }
+    }
+
+    fn workspace(path: &str, favorite: bool, chats: Vec<SessionItem>) -> WorkspaceItem {
+        WorkspaceItem {
+            state: WorkspaceState {
+                path: path.into(),
+                ..Default::default()
+            },
+            name: path.rsplit('/').next().unwrap_or(path).into(),
+            is_running: false,
+            is_selected: false,
+            is_favorite: favorite,
+            chats,
+        }
+    }
+
+    #[test]
+    fn each_scope_keeps_its_own_chats() {
+        let plain = chat("plain", false);
+        let running = chat("running", true);
+
+        assert!(chat_in_scope(&plain, SidebarScope::All, false));
+        assert!(!chat_in_scope(&plain, SidebarScope::NeedsYou, false));
+
+        assert!(chat_in_scope(&plain, SidebarScope::NeedsYou, true));
+        assert!(!chat_in_scope(&running, SidebarScope::NeedsYou, false));
+
+        // favorites are workspace-level: every chat of a favorite workspace
+        // belongs to that scope
+        assert!(chat_in_scope(&plain, SidebarScope::Favorites, false));
+        assert!(chat_in_scope(&running, SidebarScope::Favorites, false));
+
+        assert!(chat_in_scope(&running, SidebarScope::Running, false));
+        assert!(!chat_in_scope(&plain, SidebarScope::Running, false));
+    }
+
+    #[test]
+    fn favorites_keep_a_starred_workspace_without_matching_chats() {
+        let starred = workspace("/tmp/starred", true, vec![chat("plain", false)]);
+        let other = workspace("/tmp/other", false, vec![chat("plain", false)]);
+
+        assert!(workspace_in_scope(&starred, SidebarScope::Favorites, 0));
+        // a chat-level match no longer pulls a non-favorite workspace in
+        assert!(!workspace_in_scope(&other, SidebarScope::Favorites, 1));
+    }
+
+    #[test]
+    fn attention_and_running_keep_only_parents_with_matches() {
+        let waiting = workspace("/tmp/waiting", false, vec![chat("waiting", false)]);
+        let idle = workspace("/tmp/idle", false, vec![chat("idle", false)]);
+
+        assert!(workspace_in_scope(&waiting, SidebarScope::NeedsYou, 1));
+        assert!(!workspace_in_scope(&idle, SidebarScope::NeedsYou, 0));
+        assert!(workspace_in_scope(&waiting, SidebarScope::Running, 1));
+        assert!(!workspace_in_scope(&idle, SidebarScope::Running, 0));
+        assert!(workspace_in_scope(&idle, SidebarScope::All, 0));
     }
 }

@@ -256,9 +256,9 @@ pub fn save_models_cache(models: &[crate::oc::ModelInfo]) {
 pub struct UiState {
     #[serde(rename = "Pins", default)]
     pub pins: std::collections::HashMap<String, bool>,
-    /// Favorites (the station repos list's star): session ids and workspace
-    /// folder paths in one map, mirroring the pins shape. Favorites sort to
-    /// the top of whatever list shows them.
+    /// Favorite workspace folder paths (the station repos list's star). Chats
+    /// are kept by pins, not favorites. Legacy files may still carry session
+    /// ids here; the store prunes everything that is not a workspace path.
     #[serde(rename = "Favorites", default)]
     pub favorites: std::collections::HashMap<String, bool>,
     #[serde(rename = "Workspaces", default)]
@@ -292,6 +292,11 @@ pub struct UiState {
     /// across restarts, so reopening routes to the right server.
     #[serde(rename = "HarnessBySession", default)]
     pub harness_by_session: std::collections::HashMap<String, HarnessKind>,
+    /// Chat ids the user deleted. dsh archives are per-process, so an archived
+    /// chat still rides `session/list` after the app restarts; these ids keep
+    /// it out of every list instead of letting it reappear.
+    #[serde(rename = "DeletedSessions", default)]
+    pub deleted_sessions: Vec<String>,
 }
 
 impl UiState {
@@ -355,11 +360,11 @@ fn write_json_pretty<T: Serialize>(path: std::path::PathBuf, value: &T) {
         .map(|d| d.as_nanos())
         .unwrap_or(0);
     let tmp = path.with_file_name(format!(
-        "{}.{}.tmp",
+        "{}.{nanos:x}-{}.tmp",
         path.file_name()
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| "file".into()),
-        format!("{nanos:x}-{}", std::process::id())
+        std::process::id()
     ));
     let write = fs::File::create(&tmp).and_then(|mut f| f.write_all(text.as_bytes()));
     if let Err(err) = write.and_then(|()| fs::rename(&tmp, &path)) {

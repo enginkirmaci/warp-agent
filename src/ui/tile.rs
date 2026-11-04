@@ -3839,36 +3839,34 @@ impl Render for TileView {
             .min_h_0()
             .overflow_hidden()
             .track_scroll(&self.scroll.clone())
-            .on_scroll_wheel(
-                cx.listener(|this, event: &gpui::ScrollWheelEvent, window, cx| {
-                    // the wheel no longer scrolls natively (overflow_hidden keeps
-                    // the handle-driven offset) — each delta applies straight to
-                    // the handle offset, no glide
-                    let delta = event.delta.pixel_delta(window.line_height()).y;
-                    if delta == px(0.) {
-                        return;
-                    }
-                    let max = this.scroll.max_offset();
-                    // wheel deltas are positive-up; the offset counts down
-                    let before = -this.scroll.offset().y;
-                    let next = (before - delta).clamp(px(0.), max.y);
-                    let pinned = next >= max.y - px(1.);
-                    let turned = pinned != this.pinned;
-                    this.pinned = pinned;
-                    // a tick at either end changes nothing: repainting the
-                    // whole transcript for it is what made scrolling feel
-                    // heavy
-                    if next != before {
-                        this.scroll_to(next, cx);
-                    } else if turned {
-                        cx.notify();
-                    }
-                    // the transcript consumed the tick: a scrollable inside a
-                    // message (or a scrollbar hover over one) must not see the
-                    // same tick scroll it too
-                    cx.stop_propagation();
-                }),
-            )
+            .on_scroll(cx.listener(|this, event: &gpui::ScrollEvent, window, cx| {
+                // the wheel no longer scrolls natively (overflow_hidden keeps
+                // the handle-driven offset) — each delta applies straight to
+                // the handle offset, no glide
+                let delta = event.delta.pixel_delta(window.line_height()).y;
+                if delta == px(0.) {
+                    return;
+                }
+                let max = this.scroll.max_offset();
+                // wheel deltas are positive-up; the offset counts down
+                let before = -this.scroll.offset().y;
+                let next = (before - delta).clamp(px(0.), max.y);
+                let pinned = next >= max.y - px(1.);
+                let turned = pinned != this.pinned;
+                this.pinned = pinned;
+                // a tick at either end changes nothing: repainting the
+                // whole transcript for it is what made scrolling feel
+                // heavy
+                if next != before {
+                    this.scroll_to(next, cx);
+                } else if turned {
+                    cx.notify();
+                }
+                // the transcript consumed the tick: a scrollable inside a
+                // message (or a scrollbar hover over one) must not see the
+                // same tick scroll it too
+                cx.stop_propagation();
+            }))
             // one 760 column centred in the tile, so a single tile filling the
             // pane reads at the same measure as four
             .w_full()

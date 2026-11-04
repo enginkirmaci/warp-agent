@@ -4,7 +4,7 @@
 //! itself never depends on a client — commands relay to the store through
 //! the UiEvent pump and answers ride a oneshot back to the wire.
 
-use rand::RngCore;
+use rand::Rng;
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 use std::time::Duration;

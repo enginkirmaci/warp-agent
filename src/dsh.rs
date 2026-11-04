@@ -1047,7 +1047,8 @@ pub fn fold_event(state: &mut DshSessionState, session_id: &str, event: &Value) 
         _ => {}
     }
     if seq > 0 {
-        for message in [&outcome.message_updated] {
+        {
+            let message = &outcome.message_updated;
             if let Some(updated) = message
                 && let Some(id) = updated.pointer("/info/id").and_then(Value::as_str)
             {
@@ -1676,7 +1677,7 @@ pub async fn run_pump(
                 frame = outbound.recv() => {
                     match frame {
                         Ok(frame) => {
-                            if sink.send(Message::Text(frame)).await.is_err() {
+                            if sink.send(Message::Text(frame.into())).await.is_err() {
                                 break;
                             }
                         }

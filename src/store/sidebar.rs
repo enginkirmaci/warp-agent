@@ -106,9 +106,6 @@ impl SessionItem {
     pub fn updated_label(&self) -> String {
         relative_time_label(self.updated_ms)
     }
-    pub fn pin_visible(&self) -> bool {
-        self.is_pinned && !self.is_running
-    }
 }
 
 /// Sidebar chat order: pinned first, then newest first — by last activity,

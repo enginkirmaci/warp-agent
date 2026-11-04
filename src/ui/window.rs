@@ -296,7 +296,8 @@ fn star_toggle(
 
 /// Harness-independent workspace menu: servers are auto-managed (expanding a
 /// workspace connects them), so the entries are the star and the folder.
-/// Tasks is built in and always there, so only its removal is withheld.
+/// Only folder rows open it — Tasks carries no menu — and the guard below
+/// keeps the built-in workspace unremovable should a caller slip through.
 fn ws_menu_rows(store: &Store, path: &str) -> Vec<SideMenuAction> {
     let Some(ws) = store.workspaces.iter().find(|w| w.folder_path() == path) else {
         return Vec::new();
@@ -383,6 +384,10 @@ pub struct WarpWindow {
     /// the paint-phase listener registration because window.on_mouse_event may
     /// only be called during paint in this gpui rev
     splitter_drag: std::rc::Rc<std::cell::Cell<Option<(gpui::Pixels, f32)>>>,
+    /// the chat row's trash button that is one click from deleting: its chat
+    /// id. First click arms (the icon turns red), the second deletes — the
+    /// same arm-then-run dance the ⋯ menu's Delete row plays.
+    delete_armed: Option<String>,
 }
 
 impl WarpWindow {
@@ -422,6 +427,7 @@ impl WarpWindow {
             sidebar_labels: HashMap::new(),
             sidebar_labels_minute: -1,
             splitter_drag: std::rc::Rc::new(std::cell::Cell::new(None)),
+            delete_armed: None,
         }
     }
 }
@@ -470,7 +476,9 @@ impl Render for WarpWindow {
         while let Ok(menu) = self.menu_receiver.try_recv() {
             self.menu = Some(menu);
             // a fresh menu starts unarmed: an old Confirm state belongs to a
-            // menu that is no longer on screen
+            // menu that is no longer on screen. The row trash's arm resets
+            // with it — an armed button behind an open menu is a trap.
+            self.delete_armed = None;
             self.store.update(cx, |s, _| s.menu_armed = None);
         }
 
@@ -625,53 +633,6 @@ impl Render for WarpWindow {
         // tooltips paint above everything, menus included
         root.child(self.tooltip_overlay.clone())
     }
-}
-
-/// Windows-style window-state glyph for the titlebar zoom button: a single
-/// square while windowed, overlapping squares (restore) while maximized. The
-/// stroke doubles as the server-health gauge: its color follows the running
-/// workspaces (amber reconnecting, salmon unhealthy, neutral otherwise).
-fn zoom_icon(maximized: bool, color: gpui::Rgba) -> gpui::AnyElement {
-    let stroke = 1.1_f32;
-    let s = 9.5_f32;
-    // one Bounds per painted edge: [x, y, w, h] in the 14x14 icon box
-    let mut edges: Vec<(f32, f32, f32, f32)> = Vec::new();
-    if maximized {
-        // back square offset up-right; only its top and right edges peek out
-        edges.push((3.5, 1., s, stroke));
-        edges.push((3.5 + s - stroke, 1., stroke, s));
-        // front square offset down-left
-        let (fx, fy) = (1.25, 4.);
-        edges.push((fx, fy, s, stroke));
-        edges.push((fx, fy + s - stroke, s, stroke));
-        edges.push((fx, fy, stroke, s));
-        edges.push((fx + s - stroke, fy, stroke, s));
-    } else {
-        let (x, y) = (2.25, 2.25);
-        edges.push((x, y, s, stroke));
-        edges.push((x, y + s - stroke, s, stroke));
-        edges.push((x, y, stroke, s));
-        edges.push((x + s - stroke, y, stroke, s));
-    }
-    let gauge = canvas(
-        move |_, _, _| edges,
-        move |bounds, edges, window, _| {
-            for (ex, ey, ew, eh) in edges {
-                window.paint_quad(gpui::quad(
-                    gpui::Bounds {
-                        origin: gpui::point(bounds.origin.x + px(ex), bounds.origin.y + px(ey)),
-                        size: gpui::size(px(ew), px(eh)),
-                    },
-                    gpui::Corners::all(px(0.)),
-                    color,
-                    gpui::Edges::all(px(0.)),
-                    gpui::transparent_black(),
-                    gpui::BorderStyle::default(),
-                ));
-            }
-        },
-    );
-    div().size(px(14.)).child(gauge).into_any_element()
 }
 
 /// The settings-page composer state: labeled buffers, labeled leaves and the
@@ -868,9 +829,8 @@ impl WarpWindow {
                     .size(px(28.))
                     .rounded(px(6.))
                     .bg(theme::brand_bg())
-                    .border_1()
-                    .border_color(theme::BRAND_BORDER)
-                    // the app's own mark, in the family's currentColor glyph
+                    // the app's own mark, in the family's currentColor glyph —
+                    // a plain accent tile like the siblings', no ring
                     .child(crate::ui::icon(
                         "icons/logo.svg",
                         px(fonts.icon_small),
@@ -1027,7 +987,10 @@ impl WarpWindow {
                         })),
                     "Zoom · server health",
                 )
-                .child(zoom_icon(window.is_maximized(), gauge_color)),
+                // the family's window-state glyph; its stroke doubles as the
+                // server-health gauge: amber reconnecting, salmon unhealthy,
+                // neutral otherwise
+                .child(shell::zoom_glyph(window.is_maximized(), gauge_color)),
             )
             .child(
                 tip(
@@ -1445,18 +1408,23 @@ impl WarpWindow {
     ) -> gpui::AnyElement {
         let fonts = self.store.read(cx).fonts;
         let path = ws.folder_path().to_string();
-        // every top-level row — Tasks and folder workspaces alike — leads
-        // with the same folder glyph, open while its chats show
-        let glyph: gpui::AnyElement = crate::ui::icon(
-            if ws.is_expanded() {
-                "icons/folder-open-outline.svg"
-            } else {
-                "icons/folder-outline.svg"
-            },
-            px(fonts.icon_medium),
-            theme::text_muted(),
-        )
-        .into_any_element();
+        // Tasks is the tree's group label, not a folder: no star, no glyph,
+        // no actions menu — its new chat button is the one affordance, and
+        // it never hides
+        let general = ws.is_general();
+        // folder rows lead with the folder glyph, open while their chats show
+        let glyph: Option<gpui::AnyElement> = (!general).then(|| {
+            crate::ui::icon(
+                if ws.is_expanded() {
+                    "icons/folder-open-outline.svg"
+                } else {
+                    "icons/folder-outline.svg"
+                },
+                px(fonts.icon_medium),
+                theme::text_muted(),
+            )
+            .into_any_element()
+        });
 
         let ws_store = self.store.clone();
         let path_click = path.clone();
@@ -1511,48 +1479,53 @@ impl WarpWindow {
                     cx.notify();
                 });
             })
-            .on_mouse_down(
-                MouseButton::Right,
-                move |event: &gpui::MouseDownEvent, _, cx| {
-                    let rows = {
-                        let s = menu_store.read(cx);
-                        ws_menu_rows(s, &menu_path)
-                    };
-                    if rows.is_empty() {
-                        return; // the workspace left the list between frames
-                    }
-                    let _ = menu_tx.send_blocking(MenuState {
-                        x: event.position.x.as_f32(),
-                        y: event.position.y.as_f32(),
-                        rows,
-                    });
-                    // right-click alone doesn't repaint — nudge the store so the menu shows now
-                    menu_store.update(cx, |_, _| {});
-                },
-            )
-            // the star leads every row like station's repos list: filled in
-            // the accent while a favorite, dimmed until the row hover else.
-            // Tasks is favoritable too; it is the general workspace.
-            .child(star_toggle(
-                gpui::ElementId::NamedInteger("ws-star".into(), TileView::hash(&path)),
-                ws.is_favorite,
-                fonts.icon_small,
-                "wsrow",
-                move |cx| {
-                    ws_store_fav.update(cx, |s, cx| s.toggle_workspace_favorite(&path_fav, cx));
-                },
-            ))
-            .child(glyph)
+            .when(!general, |row| {
+                row.on_mouse_down(
+                    MouseButton::Right,
+                    move |event: &gpui::MouseDownEvent, _, cx| {
+                        let rows = {
+                            let s = menu_store.read(cx);
+                            ws_menu_rows(s, &menu_path)
+                        };
+                        if rows.is_empty() {
+                            return; // the workspace left the list between frames
+                        }
+                        let _ = menu_tx.send_blocking(MenuState {
+                            x: event.position.x.as_f32(),
+                            y: event.position.y.as_f32(),
+                            rows,
+                        });
+                        // right-click alone doesn't repaint — nudge the store so the menu shows now
+                        menu_store.update(cx, |_, _| {});
+                    },
+                )
+            })
+            // folder rows keep the star, station's repos-list style: filled
+            // in the accent while a favorite, dimmed until the row hover else
+            .when(!general, |row| {
+                row.child(star_toggle(
+                    gpui::ElementId::NamedInteger("ws-star".into(), TileView::hash(&path)),
+                    ws.is_favorite,
+                    fonts.icon_small,
+                    "wsrow",
+                    move |cx| {
+                        ws_store_fav.update(cx, |s, cx| s.toggle_workspace_favorite(&path_fav, cx));
+                    },
+                ))
+            })
+            .when_some(glyph, |row, glyph| row.child(glyph))
             // no flex_1: the row packs left so the count hugs the name; a long
             // name shrinks (min_w_0) and truncates instead of pushing the
             // count to the row's far edge. Tasks is the group label of the
             // tree, so it uses the Workspaces label's quiet type rather than
-            // the folder rows' 15px name — icons and hover actions stay.
+            // the folder rows' 15px name.
             .child({
                 let group = ws.is_general();
                 div()
                     .min_w_0()
-                    .ml_2()
+                    // the margin spaced the name from the star/glyph; Tasks
+                    // has neither, so it aligns flush with the Workspaces label
+                    .when(!group, |d| d.ml_2())
                     .text_size(px(if group {
                         fonts.font_meta
                     } else {
@@ -1577,24 +1550,28 @@ impl WarpWindow {
                         .child(SharedString::from(format!("{}", ws.chats.len()))),
                 )
             })
-            // running dot pinned to the right edge; hovering the row fades it
-            // out while the kebab/new-chat buttons fade in at the same spot.
-            // Lit by RUNNING sessions in this workspace — server-up alone
-            // must not read as "work in progress"
-            .child(
-                div()
-                    .absolute()
-                    .right_3()
-                    .top_0()
-                    .bottom_0()
-                    .flex()
-                    .items_center()
-                    .gap_1p5()
-                    .group_hover("wsrow", |s| s.opacity(0.))
-                    .when(ws.chats.iter().any(|c| c.is_running), |d| {
-                        d.child(div().size(px(6.)).rounded_full().bg(theme::RUNNING))
-                    }),
-            )
+            // folder rows pin the running dot to the right edge; hovering the
+            // row fades it out while the kebab/new-chat buttons fade in at
+            // the same spot. Tasks has no hover actions left, so its dot
+            // lives beside the always-visible new chat instead (cluster
+            // below). Lit by RUNNING sessions in this workspace — server-up
+            // alone must not read as "work in progress"
+            .when(!general, |row| {
+                row.child(
+                    div()
+                        .absolute()
+                        .right_3()
+                        .top_0()
+                        .bottom_0()
+                        .flex()
+                        .items_center()
+                        .gap_1p5()
+                        .group_hover("wsrow", |s| s.opacity(0.))
+                        .when(ws.chats.iter().any(|c| c.is_running), |d| {
+                            d.child(div().size(px(6.)).rounded_full().bg(theme::RUNNING))
+                        }),
+                )
+            })
             .child(
                 div()
                     .absolute()
@@ -1604,8 +1581,16 @@ impl WarpWindow {
                     .flex()
                     .items_center()
                     .gap_0p5()
-                    .opacity(0.)
-                    .group_hover("wsrow", |s| s.opacity(1.))
+                    // Tasks: dot + new chat, never hidden. Folder rows: the
+                    // whole cluster waits for the hover.
+                    .when(general, |d| {
+                        d.when(ws.chats.iter().any(|c| c.is_running), |d| {
+                            d.child(div().size(px(6.)).rounded_full().bg(theme::RUNNING))
+                        })
+                    })
+                    .when(!general, |d| {
+                        d.opacity(0.).group_hover("wsrow", |s| s.opacity(1.))
+                    })
                     .child(
                         tip(
                             div()
@@ -1635,51 +1620,53 @@ impl WarpWindow {
                             theme::text_dim(),
                         )),
                     )
-                    .child(
-                        tip(
-                            div()
-                                .id(gpui::ElementId::NamedInteger(
-                                    "ws-kebab".into(),
-                                    TileView::hash(&path),
-                                ))
-                                .role(Role::Button)
-                                .aria_label(SharedString::from(format!(
-                                    "{} — workspace actions",
-                                    ws.name
-                                )))
-                                .cursor_pointer()
-                                .p_1()
-                                .rounded_sm()
-                                .hover(|s| s.bg(theme::HOVER))
-                                .on_click(move |event, _, cx| {
-                                    // menu only — the row must not toggle expansion
-                                    cx.stop_propagation();
-                                    let rows = {
-                                        let s = menu_store2.read(cx);
-                                        ws_menu_rows(s, &menu_path2)
-                                    };
-                                    if rows.is_empty() {
-                                        return;
-                                    }
-                                    let (x, y) = match event {
-                                        gpui::ClickEvent::Mouse(click) => (
-                                            click.up.position.x.as_f32(),
-                                            click.up.position.y.as_f32(),
-                                        ),
-                                        _ => (40.0, 60.0),
-                                    };
-                                    let _ = menu_tx2.send_blocking(MenuState { x, y, rows });
-                                    // menu paints on the next store-driven repaint — same nudge as right-click
-                                    menu_store2.update(cx, |_, _| {});
-                                }),
-                            "Workspace actions",
+                    .when(!general, |row| {
+                        row.child(
+                            tip(
+                                div()
+                                    .id(gpui::ElementId::NamedInteger(
+                                        "ws-kebab".into(),
+                                        TileView::hash(&path),
+                                    ))
+                                    .role(Role::Button)
+                                    .aria_label(SharedString::from(format!(
+                                        "{} — workspace actions",
+                                        ws.name
+                                    )))
+                                    .cursor_pointer()
+                                    .p_1()
+                                    .rounded_sm()
+                                    .hover(|s| s.bg(theme::HOVER))
+                                    .on_click(move |event, _, cx| {
+                                        // menu only — the row must not toggle expansion
+                                        cx.stop_propagation();
+                                        let rows = {
+                                            let s = menu_store2.read(cx);
+                                            ws_menu_rows(s, &menu_path2)
+                                        };
+                                        if rows.is_empty() {
+                                            return;
+                                        }
+                                        let (x, y) = match event {
+                                            gpui::ClickEvent::Mouse(click) => (
+                                                click.up.position.x.as_f32(),
+                                                click.up.position.y.as_f32(),
+                                            ),
+                                            _ => (40.0, 60.0),
+                                        };
+                                        let _ = menu_tx2.send_blocking(MenuState { x, y, rows });
+                                        // menu paints on the next store-driven repaint — same nudge as right-click
+                                        menu_store2.update(cx, |_, _| {});
+                                    }),
+                                "Workspace actions",
+                            )
+                            .child(crate::ui::icon(
+                                "icons/kebab.svg",
+                                px(fonts.icon_medium),
+                                theme::text_muted(),
+                            )),
                         )
-                        .child(crate::ui::icon(
-                            "icons/kebab.svg",
-                            px(fonts.icon_medium),
-                            theme::text_muted(),
-                        )),
-                    ),
+                    }),
             )
             .into_any_element()
     }
@@ -1761,10 +1748,16 @@ impl WarpWindow {
         let more_tx = self.menu_sender_cell.clone();
         let more_store = self.store.clone();
         let more_id = id.clone();
-        // the hover pin is the quick way to pin/unpin without opening the ⋯
+        // the gutter pin is the row's pin/unpin switch — accent while pinned
+        // like the star's favorite state, dim until the row hover else — so
+        // the ⋯ menu's Pin entry is the fallback, not the primary affordance
         let pin_store = self.store.clone();
         let pin_id = id.clone();
         let pinned = chat.is_pinned;
+        // the trash beside the ⋯ arms red on the first click, deletes on the
+        // second (window state — the arm must survive the repaint that shows it)
+        let delete_armed = self.delete_armed.as_deref() == Some(id.as_str());
+        let id_del = id.clone();
         let gutter: gpui::AnyElement = if waiting {
             crate::ui::icon("icons/shield.svg", px(fonts.icon_tiny), theme::CHANGES)
                 .into_any_element()
@@ -1775,11 +1768,34 @@ impl WarpWindow {
                 px(fonts.icon_tiny),
                 theme::BEHIND,
             )
-        } else if chat.pin_visible() {
-            crate::ui::icon("icons/pin.svg", px(fonts.icon_small), theme::text_muted())
-                .into_any_element()
         } else {
-            div().into_any_element()
+            tip(
+                div()
+                    .id(gpui::ElementId::NamedInteger(
+                        "chat-pin".into(),
+                        TileView::hash(&id),
+                    ))
+                    .a11y_toggle(if pinned { "Unpin chat" } else { "Pin chat" }, pinned)
+                    .cursor_pointer()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .when(!pinned, |pin| {
+                        pin.opacity(0.62).group_hover("chatrow", |s| s.opacity(1.))
+                    })
+                    .on_click(move |_, _, cx| {
+                        // the row must not select behind the button
+                        cx.stop_propagation();
+                        pin_store.update(cx, |s, cx| s.toggle_pin(&pin_id, cx));
+                    })
+                    .child(crate::ui::icon(
+                        "icons/pin.svg",
+                        px(fonts.icon_small),
+                        if pinned { accent } else { theme::text_muted() },
+                    )),
+                if pinned { "Unpin" } else { "Pin" },
+            )
+            .into_any_element()
         };
 
         let mut row = div()
@@ -1813,10 +1829,14 @@ impl WarpWindow {
             })
             .hover(|s| s.bg(theme::raised()))
             .cursor_pointer()
-            .on_click(move |_, _, cx| {
+            .on_click(cx.listener(move |this, _, _, cx| {
                 tracing::info!("chat-row clicked {}", id_click);
+                // a click anywhere else in the row stands a pending delete down
+                if this.delete_armed.take().is_some() {
+                    cx.notify();
+                }
                 store_click.update(cx, |s, cx| s.select_session(&id_click, cx));
-            })
+            }))
             .on_mouse_down(
                 MouseButton::Right,
                 move |event: &gpui::MouseDownEvent, _, cx| {
@@ -1876,8 +1896,8 @@ impl WarpWindow {
                 )
                 // right meta cluster in flow: which backend the chat runs on
                 // (dropped when the title needs its room), then the age.
-                // Hovering the row fades the cluster out and fades the pin and
-                // ⋯ actions in at the same spot (absolute layer, so nothing shifts)
+                // Hovering the row fades the cluster out and fades the ⋯ in
+                // at the same spot (absolute layer, so nothing shifts)
                 .child({
                     let mut meta = div()
                         .flex_shrink_0()
@@ -1894,9 +1914,12 @@ impl WarpWindow {
                     meta.child(time_label.clone())
                 })
                 // the design's ⋯: favorite (the star), Pin, Rename and Delete
-                // chat (which arms before it runs, then deletes and unlinks),
-                // the same menu the right-click opens. The pin is a direct
-                // hover action beside it.
+                // chat, the same menu the right-click opens. Pinning lives on
+                // the row's gutter pin; deleting has a direct hover button
+                // beside the ⋯ — first click arms it red, the second deletes.
+                // No occlude on the buttons: an occluding hitbox drops the
+                // row's group hover, which fades this whole cluster out under
+                // the cursor.
                 .child(
                     div()
                         .absolute()
@@ -1912,29 +1935,44 @@ impl WarpWindow {
                             tip(
                                 div()
                                     .id(gpui::ElementId::NamedInteger(
-                                        "chat-pin".into(),
+                                        "chat-del".into(),
                                         TileView::hash(&id),
                                     ))
-                                    .role(Role::Button)
-                                    .aria_label(if pinned { "Unpin chat" } else { "Pin chat" })
-                                    .occlude()
+                                    .a11y_button(if delete_armed {
+                                        "Confirm delete"
+                                    } else {
+                                        "Delete chat"
+                                    })
                                     .cursor_pointer()
                                     .p_1()
                                     .rounded_sm()
                                     .hover(|s| s.bg(theme::HOVER))
-                                    .on_click(move |_, _, cx| {
+                                    .on_click(cx.listener(move |this, _, _, cx| {
                                         // the row must not select behind the button
                                         cx.stop_propagation();
-                                        pin_store.update(cx, |s, cx| {
-                                            s.toggle_pin(&pin_id, cx);
-                                        });
-                                    }),
-                                if pinned { "Unpin" } else { "Pin" },
+                                        if this.delete_armed.as_deref() == Some(id_del.as_str()) {
+                                            this.delete_armed = None;
+                                            let store = this.store.clone();
+                                            store.update(cx, |s, cx| s.delete_session(&id_del, cx));
+                                        } else {
+                                            this.delete_armed = Some(id_del.clone());
+                                            cx.notify();
+                                        }
+                                    })),
+                                if delete_armed {
+                                    "Confirm delete"
+                                } else {
+                                    "Delete chat"
+                                },
                             )
                             .child(crate::ui::icon(
-                                "icons/pin.svg",
+                                "icons/trash.svg",
                                 px(fonts.icon_medium),
-                                if pinned { accent } else { theme::text_muted() },
+                                if delete_armed {
+                                    theme::DEL
+                                } else {
+                                    theme::text_muted()
+                                },
                             )),
                         )
                         .child(
@@ -1949,7 +1987,6 @@ impl WarpWindow {
                                         "{} — chat actions",
                                         chat.title
                                     )))
-                                    .occlude()
                                     .cursor_pointer()
                                     .p_1()
                                     .rounded_sm()

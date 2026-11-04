@@ -5,14 +5,12 @@
 //! shared text size rescales the whole UI.
 
 pub use warpui_kit_core::fonts::{FontTokens, active_tokens, code_font, ui_font};
-// every shared color const stays reachable as `theme::X`
-// the fixed semantic colors stay constants (they never follow the palette),
-// and the accent preset system rides along
-// the fixed semantic colors stay constants (they never follow the palette),
-// and the accent preset system rides along
+// every shared color const stays reachable as `theme::X`; the fixed semantic
+// colors stay constants (they never follow the palette), and the accent
+// preset system rides along
 pub use warpui_kit_core::palette::{
     ADD, AccentColors, BEHIND, BRAND_BORDER, CHANGES, DANGER, DEL, HOVER, RUNNING, SUCCESS_BRIGHT,
-    WARN, WORKING, current_ramp, normalize_accent, tint,
+    WARN, WORKING, normalize_accent, tint,
 };
 // ---- gpui-kit theme mapping ------------------------------------------------
 
@@ -37,64 +35,13 @@ pub const SPLITTER_WIDTH: f32 = 4.0;
 // ---- the live palette ------------------------------------------------------
 // Every surface comes through here, so switching the palette in one settings
 // page moves all of them. These were constants; they are functions now for
-// exactly that reason, and the names stay the apps' own vocabulary.
+// exactly that reason, and the names stay the apps' own vocabulary — the
+// readers themselves are the kit's, re-exported.
 
-/// The accent as ink: links, focus rings, active pills.
-pub fn accent_ink() -> gpui::Rgba {
-    current_ramp().accent_ink
-}
-/// The tinted tile behind the brand mark.
-pub fn accent_soft() -> gpui::Rgba {
-    current_ramp().accent_soft
-}
-/// Quiet dividers.
-pub fn border_light() -> gpui::Rgba {
-    current_ramp().line_soft
-}
-/// The default separator.
-pub fn hairline() -> gpui::Rgba {
-    current_ramp().line
-}
-/// Control borders.
-pub fn line_strong() -> gpui::Rgba {
-    current_ramp().line_strong
-}
-/// A card, a tile, the detail pane.
-pub fn panel() -> gpui::Rgba {
-    current_ramp().panel
-}
-/// Menus, dialogs and tooltips.
-pub fn popup() -> gpui::Rgba {
-    current_ramp().overlay
-}
-/// The selected row, hover fills, active segments.
-pub fn raised() -> gpui::Rgba {
-    current_ramp().raised
-}
-/// The window canvas.
-pub fn surface() -> gpui::Rgba {
-    current_ramp().base
-}
-/// Names and values.
-pub fn text() -> gpui::Rgba {
-    current_ramp().text
-}
-/// Secondary copy.
-pub fn text_dim() -> gpui::Rgba {
-    current_ramp().text_dim
-}
-/// Timestamps and hints.
-pub fn text_muted() -> gpui::Rgba {
-    current_ramp().text_muted
-}
-/// Fields, diffs and code: the recessed step.
-pub fn well() -> gpui::Rgba {
-    current_ramp().well
-}
-/// The titlebar, the rail and the chrome.
-pub fn window_chrome() -> gpui::Rgba {
-    current_ramp().chrome
-}
+pub use warpui_kit_core::palette::{
+    accent_ink, accent_soft, border_light, hairline, line_strong, panel, popup, raised, surface,
+    text, text_dim, text_muted, well, window_chrome,
+};
 
 // the app's older spellings, one-liners over the readers above
 pub fn brand_bg() -> gpui::Rgba {

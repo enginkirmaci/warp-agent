@@ -5,7 +5,6 @@
 use crate::paths::AppPaths;
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::io::Write;
 
 pub const DEFAULT_EXECUTABLE: &str = "opencode";
 pub const DEFAULT_DSH_EXECUTABLE: &str = "dsh";
@@ -346,33 +345,9 @@ fn read_json<T: serde::de::DeserializeOwned>(path: std::path::PathBuf) -> Option
 }
 
 fn write_json_pretty<T: Serialize>(path: std::path::PathBuf, value: &T) {
-    if let Some(parent) = path.parent() {
-        let _ = fs::create_dir_all(parent);
-    }
-    let Ok(text) = serde_json::to_string_pretty(value) else {
-        return;
-    };
-    // unique temp file + rename over the target (the notes app's atomic
-    // write): a crash mid-write leaves the old file, never a truncated one,
-    // and two writers can never share a temp name
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    let tmp = path.with_file_name(format!(
-        "{}.{nanos:x}-{}.tmp",
-        path.file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_else(|| "file".into()),
-        std::process::id()
-    ));
-    let write = fs::File::create(&tmp).and_then(|mut f| f.write_all(text.as_bytes()));
-    if let Err(err) = write.and_then(|()| fs::rename(&tmp, &path)) {
-        // a destination held open without FILE_SHARE_DELETE (an editor on
-        // Windows) — drop it and retry once before giving up
-        if fs::remove_file(&path).is_ok() && fs::rename(&tmp, &path).is_ok() {
-            return;
-        }
+    // the platform kit's atomic replace (unique temp file + rename): a crash
+    // mid-write leaves the old file, never a truncated one
+    if let Err(err) = warpui_kit_platform::io::write_json(&path, value) {
         tracing::warn!("could not write {}: {err}", path.display());
     }
 }

@@ -44,12 +44,33 @@ fn main() {
     application()
         .with_assets(assets::EmbedAssets::new())
         .run(|cx: &mut App| {
-            // kit components (input decorations, popovers) + our palette mapped
-            // onto their theme tokens — must run before any kit component renders
-            gpui_kit::init(cx);
+            let (_net_handle, net_sender, event_rx) = oc::spawn_net_thread();
+            let store = Store::new(cx, net_sender);
 
-            // composer key overrides: bound after gpui_kit::init so our later
-            // bindings win the "Input" context ties (up/down history, shift-tab)
+            // the shared startup: kit init, the shared text size (seeded from
+            // this app's old setting) and palette, follow hooks, the first
+            // kit-theme pass and reduced motion. The retheme closure re-derives
+            // the font tokens first — the text size adopted inside may have
+            // rescaled the type.
+            let (text_size, reduce_motion) = {
+                let s = store.read(cx);
+                (s.settings.font_scale.clone(), s.settings.reduce_motion)
+            };
+            warpui_kit_core::bootstrap::init(cx, text_size.as_deref(), reduce_motion, {
+                let store = store.clone();
+                move |cx: &mut gpui::App| {
+                    store.update(cx, |s, _| s.fonts = theme::active_tokens());
+                    let (accent, fonts) = {
+                        let s = store.read(cx);
+                        (s.accent, s.fonts)
+                    };
+                    theme::apply_kit_theme(accent, &fonts, cx);
+                }
+            });
+
+            // composer key overrides: bound after gpui_kit::init (inside the
+            // bootstrap) so our later bindings win the "Input" context ties
+            // (up/down history, shift-tab)
             cx.bind_keys([
                 gpui::KeyBinding::new("up", ui::tile::ComposerUp, Some("Input")),
                 gpui::KeyBinding::new("down", ui::tile::ComposerDown, Some("Input")),
@@ -78,9 +99,6 @@ fn main() {
                 ),
             ]);
 
-            let (_net_handle, net_sender, event_rx) = oc::spawn_net_thread();
-            let store = Store::new(cx, net_sender);
-
             // workspaces named on the launch command open right away
             if let Some(folders) = LAUNCH_FOLDERS.get() {
                 let folders = folders.clone();
@@ -97,41 +115,6 @@ fn main() {
                 })
                 .detach();
             }
-
-            // the shared text size, seeded once from this app's old setting
-            warpui_kit_core::adopt_text_size(store.read(cx).settings.font_scale.as_deref());
-            // the shared palette, before the first kit theme pass so the
-            // first frame already draws in it
-            warpui_kit_core::adopt_palette(None);
-            // a palette switch re-maps the kit and repaints every window; the
-            // store entity carries the app context, so the hook never has to
-            // hold the `&mut App` from this closure
-            warpui_kit_core::follow_palette({
-                let store = store.clone();
-                move |cx: &mut gpui::App| {
-                    let (accent, fonts) = {
-                        let s = store.read(cx);
-                        (s.accent, s.fonts)
-                    };
-                    theme::apply_kit_theme(accent, &fonts, cx);
-                    cx.refresh_windows();
-                }
-            });
-            // the family motion setting, or the desktop's preference, applies
-            // before the first frame
-            warpui_kit_core::motion::set_reduced(
-                store.read(cx).settings.reduce_motion
-                    || warpui_kit_core::motion::system_prefers_reduced(),
-            );
-            store.update(cx, |s, _| s.fonts = theme::active_tokens());
-
-            // kit theme after the store so the saved accent preset (not the
-            // blue default) drives input selection/ring/primary from launch
-            let (accent, fonts) = {
-                let snap = store.read(cx);
-                (snap.accent, snap.fonts)
-            };
-            theme::apply_kit_theme(accent, &fonts, cx);
 
             // network events → store. Polled with a timer fallback: this gpui rev
             // does not service cross-thread channel wakeups on foreground tasks,

@@ -9,8 +9,8 @@ pub use warpui_kit_core::fonts::{FontTokens, active_tokens, code_font, ui_font};
 // colors stay constants (they never follow the palette), and the accent
 // preset system rides along
 pub use warpui_kit_core::palette::{
-    ADD, AccentColors, BEHIND, BRAND_BORDER, CHANGES, DANGER, DEL, HOVER, RUNNING, SUCCESS_BRIGHT,
-    WARN, WORKING, normalize_accent, tint,
+    ADD, AccentColors, BEHIND, BRANCH, CHANGES, DANGER, DEL, HOVER, RUNNING, SUCCESS_BRIGHT, WARN,
+    WORKING, normalize_accent, tint,
 };
 // ---- gpui-kit theme mapping ------------------------------------------------
 

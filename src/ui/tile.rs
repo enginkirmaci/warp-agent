@@ -3549,8 +3549,11 @@ impl TileView {
                                 }),
                             "Toggle MCP servers",
                         )
+                        // the lit plug gets its own hue like the shield's
+                        // WARN: teal, unused elsewhere in this app, so the
+                        // three composer toggles read apart at a glance
                         .child(if snap.mcp_on {
-                            crate::ui::icon("icons/plug.svg", px(fonts.icon_small), theme::text())
+                            crate::ui::icon("icons/plug.svg", px(fonts.icon_small), theme::BRANCH)
                         } else {
                             crate::ui::icon(
                                 "icons/plug.svg",

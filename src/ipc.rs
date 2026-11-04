@@ -13,49 +13,17 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{broadcast, oneshot};
+use warpui_kit_platform::door::{self, ANSWER_TIMEOUT, MAX_LINE, cmd, token_matches};
 
 use crate::oc::UiEvent;
 use crate::paths::AppPaths;
 use crate::settings::HarnessKind;
 
-pub const PROTOCOL: u32 = 2;
-/// Prompts ride whole on one line; repository trees inside them grow large.
-const MAX_LINE: usize = 8 * 1024 * 1024;
-/// How long a door client waits for a command answer. run-prompt is exempt:
-/// its answer lands when the turn idles, minutes later.
-const ANSWER_TIMEOUT: Duration = Duration::from_secs(60);
-
-pub fn port_file() -> PathBuf {
-    port_file_in(&AppPaths::config_dir())
-}
-
-pub fn token_file() -> PathBuf {
-    token_file_in(&AppPaths::config_dir())
-}
-
-fn port_file_in(dir: &Path) -> PathBuf {
-    dir.join("ipc.port")
-}
-
-fn token_file_in(dir: &Path) -> PathBuf {
-    dir.join("ipc.token")
-}
+pub use warpui_kit_platform::door::PROTOCOL;
 
 /// The door endpoint as currently published; None until an instance binds.
 pub fn read_endpoint() -> Option<(u16, String)> {
-    let port = std::fs::read_to_string(port_file())
-        .ok()?
-        .trim()
-        .parse()
-        .ok()?;
-    let token = std::fs::read_to_string(token_file())
-        .ok()?
-        .trim()
-        .to_string();
-    if token.is_empty() {
-        return None;
-    }
-    Some((port, token))
+    door::read_endpoint_in(&AppPaths::config_dir())
 }
 
 /// Completes a command's wire response: Ok carries the response payload
@@ -148,11 +116,11 @@ pub async fn start_in(
     // files are created 0o600 — restricting after a default-mode write leaves
     // a window where the token is world-readable (restrict_perms stays as
     // belt-and-braces and now reports if it cannot confirm).
-    let token_path = token_file_in(&dir);
-    write_private(&token_path, &token)?;
-    restrict_perms(&token_path);
-    write_private(&port_file_in(&dir), &format!("{port}\n"))?;
-    restrict_perms(&port_file_in(&dir));
+    let token_path = door::token_file_in(&dir);
+    door::write_private(&token_path, &token)?;
+    door::restrict_perms(&token_path);
+    door::write_private(&door::port_file_in(&dir), &format!("{port}\n"))?;
+    door::restrict_perms(&door::port_file_in(&dir));
     tokio::spawn(accept_loop(listener, event_tx, events, token.clone()));
     Ok(Door { port, token, dir })
 }
@@ -162,44 +130,13 @@ pub fn unpublish(door: &Door) {
     let ours = |file: &Path, value: &str| {
         std::fs::read_to_string(file).is_ok_and(|current| current.trim() == value)
     };
-    if ours(&port_file_in(&door.dir), &door.port.to_string()) {
-        let _ = std::fs::remove_file(port_file_in(&door.dir));
+    if ours(&door::port_file_in(&door.dir), &door.port.to_string()) {
+        let _ = std::fs::remove_file(door::port_file_in(&door.dir));
     }
-    if ours(&token_file_in(&door.dir), &door.token) {
-        let _ = std::fs::remove_file(token_file_in(&door.dir));
-    }
-}
-
-/// Creates `path` with 0o600 already in place on Unix — the mode is set on
-/// the open, so no world-readable window exists before a later chmod.
-#[cfg(unix)]
-fn write_private(path: &Path, data: &str) -> std::io::Result<()> {
-    use std::io::Write as _;
-    use std::os::unix::fs::OpenOptionsExt as _;
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(path)?;
-    file.write_all(data.as_bytes())
-}
-
-#[cfg(not(unix))]
-fn write_private(path: &Path, data: &str) -> std::io::Result<()> {
-    std::fs::write(path, data)
-}
-
-#[cfg(unix)]
-fn restrict_perms(path: &Path) {
-    use std::os::unix::fs::PermissionsExt;
-    if let Err(err) = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)) {
-        tracing::warn!("could not restrict {}: {err}", path.display());
+    if ours(&door::token_file_in(&door.dir), &door.token) {
+        let _ = std::fs::remove_file(door::token_file_in(&door.dir));
     }
 }
-
-#[cfg(not(unix))]
-fn restrict_perms(_path: &Path) {}
 
 async fn accept_loop(
     listener: TcpListener,
@@ -220,17 +157,8 @@ async fn accept_loop(
     }
 }
 
-/// Length-checked, byte-folded compare: no early exit on content, so the
-/// auth response's timing carries no prefix information about the token.
-fn token_matches(provided: &str, token: &str) -> bool {
-    provided.len() == token.len()
-        && provided
-            .bytes()
-            .zip(token.bytes())
-            .fold(0u8, |acc, (x, y)| acc | (x ^ y))
-            == 0
-}
-
+/// Length-checked token compare lives in the protocol crate (the timing
+/// guarantee travels with the contract).
 async fn handle_conn(
     stream: TcpStream,
     event_tx: async_channel::Sender<UiEvent>,
@@ -364,7 +292,7 @@ async fn serve_request(
     let (reply_tx, reply_rx) = oneshot::channel();
 
     let command = match cmd.as_str() {
-        "ping" => {
+        cmd::PING => {
             let _ = reply(
                 &lines,
                 id,
@@ -373,7 +301,7 @@ async fn serve_request(
             .await;
             return;
         }
-        "open-workspace" => match required("path") {
+        cmd::OPEN_WORKSPACE => match required("path") {
             Some(path) => Some(IpcCommand::OpenWorkspace {
                 path,
                 reply: reply_tx,
@@ -383,7 +311,7 @@ async fn serve_request(
                 return;
             }
         },
-        "new-chat" => {
+        cmd::NEW_CHAT => {
             let workspace = field("workspace").unwrap_or_else(|| "general".into());
             let auto_send = request
                 .get("auto_send")
@@ -408,7 +336,7 @@ async fn serve_request(
                 reply: reply_tx,
             })
         }
-        "run-prompt" => match required("prompt") {
+        cmd::RUN_PROMPT => match required("prompt") {
             Some(prompt) => {
                 let harness = match parse_harness(&request) {
                     Ok(harness) => harness,
@@ -438,7 +366,7 @@ async fn serve_request(
                 return;
             }
         },
-        "cancel" => match request.get("run").and_then(Value::as_u64) {
+        cmd::CANCEL => match request.get("run").and_then(Value::as_u64) {
             Some(run) => Some(IpcCommand::CancelRun {
                 run,
                 reply: reply_tx,
@@ -448,7 +376,7 @@ async fn serve_request(
                 return;
             }
         },
-        "models" => {
+        cmd::MODELS => {
             let harness = match parse_harness(&request) {
                 Ok(harness) => harness,
                 Err(err) => {
@@ -461,7 +389,7 @@ async fn serve_request(
                 reply: reply_tx,
             })
         }
-        "status" => Some(IpcCommand::Status { reply: reply_tx }),
+        cmd::STATUS => Some(IpcCommand::Status { reply: reply_tx }),
         other => {
             let _ = reply(&lines, id, Err(format!("unknown command: {other}"))).await;
             return;
@@ -473,7 +401,7 @@ async fn serve_request(
         let _ = reply(&lines, id, Err("app is shutting down".into())).await;
         return;
     }
-    let answer = if cmd == "run-prompt" {
+    let answer = if cmd == cmd::RUN_PROMPT {
         match reply_rx.await {
             Ok(result) => result,
             // the store dropped the sender (cancelled run, closing app)
@@ -494,23 +422,9 @@ async fn reply(
     id: u64,
     result: Result<Value, String>,
 ) -> Result<(), tokio::sync::mpsc::error::SendError<String>> {
-    let frame = match result {
-        Ok(payload) => {
-            let mut frame = json!({"id": id, "ok": true});
-            if let (Some(target), Some(extra)) = (frame.as_object_mut(), payload.as_object()) {
-                for (key, value) in extra {
-                    // id/ok are the reserved framing fields — a payload that
-                    // ever grew one would corrupt the answer for every client
-                    if key != "id" && key != "ok" {
-                        target.insert(key.clone(), value.clone());
-                    }
-                }
-            }
-            frame
-        }
-        Err(error) => json!({"id": id, "ok": false, "error": error}),
-    };
-    lines.send(frame.to_string()).await
+    // frame building (reserved id/ok fields, error envelope) is the protocol
+    // crate's
+    lines.send(door::answer_frame(id, result).to_string()).await
 }
 
 // ---- second-launch handoff (blocking, pre-runtime) -------------------------
@@ -561,7 +475,7 @@ pub fn try_forward(folders: &[String]) -> bool {
         return false;
     }
     // ping: the port could belong to some other loopback listener
-    if !say(&mut stream, &json!({"id": 1, "cmd": "ping"})) {
+    if !say(&mut stream, &json!({"id": 1, "cmd": cmd::PING})) {
         return false;
     }
     let Some(Some(true)) = hear(&mut stream).map(|v| v.get("ok").and_then(Value::as_bool)) else {
@@ -659,7 +573,7 @@ mod tests {
         say(&mut good, json!({"auth": door.token})).await;
         assert!(hear(&mut good).await["ok"].as_bool().unwrap());
 
-        say(&mut good, json!({"id": 1, "cmd": "ping"})).await;
+        say(&mut good, json!({"id": 1, "cmd": cmd::PING})).await;
         let ping = hear(&mut good).await;
         assert_eq!(ping["id"], 1);
         assert!(ping["ok"].as_bool().unwrap());
@@ -667,7 +581,7 @@ mod tests {
 
         say(
             &mut good,
-            json!({"id": 2, "cmd": "open-workspace", "path": "/tmp"}),
+            json!({"id": 2, "cmd": cmd::OPEN_WORKSPACE, "path": "/tmp"}),
         )
         .await;
         let opened = hear(&mut good).await;
@@ -675,7 +589,7 @@ mod tests {
         assert!(opened["ok"].as_bool().unwrap());
         assert_eq!(opened["workspace"], "/tmp");
 
-        say(&mut good, json!({"id": 3, "cmd": "status"})).await;
+        say(&mut good, json!({"id": 3, "cmd": cmd::STATUS})).await;
         let status = hear(&mut good).await;
         assert_eq!(status["id"], 3);
         assert!(status["ok"].as_bool().unwrap());
@@ -684,7 +598,7 @@ mod tests {
         // unknown id is refused instead of silently becoming opencode
         say(
             &mut good,
-            json!({"id": 4, "cmd": "models", "harness": "dsh"}),
+            json!({"id": 4, "cmd": cmd::MODELS, "harness": "dsh"}),
         )
         .await;
         let models = hear(&mut good).await;
@@ -694,7 +608,7 @@ mod tests {
 
         say(
             &mut good,
-            json!({"id": 5, "cmd": "models", "harness": "not-a-harness"}),
+            json!({"id": 5, "cmd": cmd::MODELS, "harness": "not-a-harness"}),
         )
         .await;
         let refused = hear(&mut good).await;
@@ -716,8 +630,8 @@ mod tests {
 
         drop(good);
         unpublish(&door);
-        assert!(!port_file_in(&dir).exists());
-        assert!(!token_file_in(&dir).exists());
+        assert!(!door::port_file_in(&dir).exists());
+        assert!(!door::token_file_in(&dir).exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -729,15 +643,19 @@ mod tests {
         let old = start_in(dir.clone(), event_tx, broadcast_tx).await.unwrap();
 
         // a newer instance overwrote the files
-        std::fs::write(port_file_in(&dir), "59999\n").unwrap();
-        std::fs::write(token_file_in(&dir), "newer-token\n").unwrap();
+        std::fs::write(door::port_file_in(&dir), "59999\n").unwrap();
+        std::fs::write(door::token_file_in(&dir), "newer-token\n").unwrap();
         unpublish(&old);
         assert_eq!(
-            std::fs::read_to_string(port_file_in(&dir)).unwrap().trim(),
+            std::fs::read_to_string(door::port_file_in(&dir))
+                .unwrap()
+                .trim(),
             "59999"
         );
         assert_eq!(
-            std::fs::read_to_string(token_file_in(&dir)).unwrap().trim(),
+            std::fs::read_to_string(door::token_file_in(&dir))
+                .unwrap()
+                .trim(),
             "newer-token"
         );
         let _ = std::fs::remove_dir_all(&dir);
@@ -772,14 +690,14 @@ mod tests {
 
         say(
             &mut client,
-            json!({"id": 1, "cmd": "run-prompt", "prompt": "hi", "background": true}),
+            json!({"id": 1, "cmd": cmd::RUN_PROMPT, "prompt": "hi", "background": true}),
         )
         .await;
         assert_eq!(flags_rx.recv().await, Some(true));
 
         say(
             &mut client,
-            json!({"id": 2, "cmd": "run-prompt", "prompt": "hi"}),
+            json!({"id": 2, "cmd": cmd::RUN_PROMPT, "prompt": "hi"}),
         )
         .await;
         assert_eq!(flags_rx.recv().await, Some(false));

@@ -189,7 +189,7 @@ fn main() {
             // system text scale (gsettings) with live updates
             services::init_font_scale(&store, cx);
 
-            let bounds = Bounds::centered(None, size(px(1180.), px(800.)), cx);
+            let bounds = Bounds::centered(None, size(px(1500.), px(960.)), cx);
             gpui_kit::open_window(
                 WindowOptions {
                     window_bounds: Some(WindowBounds::Windowed(bounds)),

@@ -1,6 +1,9 @@
 //! Store side of the DevTools door: every [`IpcCommand`] the net thread
 //! relays lands here. Runs ride the normal chat flow — a real tile the user
 //! can watch — with a watcher that answers the door when the turn idles.
+//! A background run executes on the same pipeline but holds a hidden tile:
+//! the UI never renders it, no workspace is selected, and when the turn
+//! settles the tile and its session are retired so nothing surfaces.
 
 use gpui::Context;
 use serde_json::{Value, json};
@@ -17,6 +20,7 @@ pub struct IpcRun {
     pub workspace: String,
     pub tile_key: String,
     pub session_id: Option<String>,
+    pub background: bool,
     pub reply: Reply,
 }
 
@@ -41,12 +45,13 @@ impl Store {
                 workspace,
                 prompt,
                 model,
+                background,
                 reply,
             } => {
-                self.ipc_run_prompt(run, &workspace, prompt, model, reply, cx);
+                self.ipc_run_prompt(run, &workspace, prompt, model, background, reply, cx);
             }
             IpcCommand::CancelRun { run, reply } => {
-                let _ = reply.send(self.ipc_cancel_run(run));
+                let _ = reply.send(self.ipc_cancel_run(run, cx));
             }
             IpcCommand::Models { harness, reply } => self.ipc_models(harness, reply, cx),
             IpcCommand::Status { reply } => {
@@ -150,6 +155,7 @@ impl Store {
         workspace: &str,
         prompt: String,
         model: DoorModel,
+        background: bool,
         reply: Reply,
         cx: &mut Context<Self>,
     ) {
@@ -160,9 +166,25 @@ impl Store {
                 return;
             }
         };
-        // reuse the new-chat flow: a real, visible tile the run happens in;
-        // when the server is not up yet the ServerStarted pickup sends it
-        if let Err(err) = self.ipc_new_chat(&path, prompt, true, model, cx) {
+        if background {
+            self.ipc_run_prompt_background(run, &path, prompt, model, reply, cx);
+        } else {
+            self.ipc_run_prompt_visible(run, &path, prompt, model, reply, cx);
+        }
+    }
+
+    /// The visible flow: reuse the new-chat flow, a real tile the user can
+    /// watch; when the server is not up yet the ServerStarted pickup sends it.
+    fn ipc_run_prompt_visible(
+        &mut self,
+        run: u64,
+        path: &str,
+        prompt: String,
+        model: DoorModel,
+        reply: Reply,
+        cx: &mut Context<Self>,
+    ) {
+        if let Err(err) = self.ipc_new_chat(path, prompt, true, model, cx) {
             let _ = reply.send(Err(err));
             return;
         }
@@ -170,29 +192,105 @@ impl Store {
         self.ipc_runs.insert(
             run,
             IpcRun {
-                workspace: path,
+                workspace: path.to_string(),
                 tile_key,
                 session_id: None,
+                background: false,
                 reply,
             },
         );
         self.ipc_run_log(run, "prompt queued");
     }
 
-    fn ipc_cancel_run(&mut self, run: u64) -> Result<Value, String> {
+    /// The silent flow: the same draft → send → session pipeline, but the
+    /// draft tile is flagged hidden so it never renders, the workspace is
+    /// joined without being selected, and nothing focuses. The session is
+    /// retired when the turn settles (or the run is cancelled).
+    fn ipc_run_prompt_background(
+        &mut self,
+        run: u64,
+        path: &str,
+        prompt: String,
+        model: DoorModel,
+        reply: Reply,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.workspaces.iter().any(|w| w.folder_path() == path) {
+            if !self.install_workspace(path, cx) {
+                let _ = reply.send(Err(format!("could not add workspace: {path}")));
+                return;
+            }
+        }
+        // the server spins up if it must; until ServerStarted lands the
+        // parked-runs pickup sends the tile on its own
+        if !self.runtimes.contains_key(path) {
+            self.start_workspace(path, cx);
+        }
+        let tile_key = {
+            // create_tile never focuses or touches the sidebar — new_chat's
+            // visible fanfare is exactly what a background run leaves out
+            let tile = self.create_tile(cx);
+            tile.key.clone()
+        };
+        // the picker's harness is applied before the model so switching
+        // backends cannot leave a model the new harness never listed
+        if let Some(harness) = model.harness.clone() {
+            self.set_tile_harness(&tile_key, harness, cx);
+        }
+        self.ipc_seed_tile(&tile_key, prompt, model);
+        self.ipc_runs.insert(
+            run,
+            IpcRun {
+                workspace: path.to_string(),
+                tile_key: tile_key.clone(),
+                session_id: None,
+                background: true,
+                reply,
+            },
+        );
+        self.ipc_run_log(run, "prompt queued");
+        self.send_from_tile(&tile_key, cx);
+    }
+
+    /// Tears a background run's chat down: the hidden tile leaves the store,
+    /// every session map forgets the id, and the server-side session is
+    /// deleted so no later list refresh can surface the run in the sidebar.
+    /// Idempotent — several runs may watch one session.
+    pub fn retire_background_run(&mut self, session_id: &str, cx: &mut Context<Self>) {
+        let ws_key = self.net_key_for_session(session_id);
+        self.forget_session(session_id, cx);
+        if let Some(ws_key) = ws_key {
+            self.net.send(NetCommand::Request {
+                ws_key,
+                request: ApiRequest::DeleteSession {
+                    session_id: session_id.to_string(),
+                },
+            });
+        }
+    }
+
+    fn ipc_cancel_run(&mut self, run: u64, cx: &mut Context<Self>) -> Result<Value, String> {
         let Some(entry) = self.ipc_runs.remove(&run) else {
             return Ok(json!({"cancelled": false}));
         };
-        if let Some(session_id) = entry.session_id.clone()
-            && self.running_by_session.contains(&session_id)
-        {
-            let ws_key = self
-                .net_key_for_session(&session_id)
-                .unwrap_or_else(|| entry.workspace.clone());
-            self.net.send(NetCommand::Request {
-                ws_key,
-                request: ApiRequest::Abort { session_id },
-            });
+        if let Some(session_id) = entry.session_id.clone() {
+            if self.running_by_session.contains(&session_id) {
+                let ws_key = self
+                    .net_key_for_session(&session_id)
+                    .unwrap_or_else(|| entry.workspace.clone());
+                self.net.send(NetCommand::Request {
+                    ws_key,
+                    request: ApiRequest::Abort { session_id: session_id.clone() },
+                });
+            }
+            // the run entry is gone, so the idle watcher will not clean up
+            // behind this chat: retire it here
+            if entry.background {
+                self.retire_background_run(&session_id, cx);
+            }
+        } else if entry.background {
+            // still a parked draft: the tile holds the prompt and nothing else
+            self.detach_tile(&entry.tile_key, cx);
         }
         // dropping the run's reply sender reads as "cancelled" on the wire
         Ok(json!({"cancelled": true}))
@@ -290,8 +388,9 @@ impl Store {
     }
 
     /// Fails every run still parked on a workspace whose server just died
-    /// before their session ever existed.
-    pub fn ipc_fail_parked_runs(&mut self, workspace: &str, error: &str) {
+    /// before their session ever existed. A background run's parked tile
+    /// leaves with it — nothing visible should linger behind a dead run.
+    pub fn ipc_fail_parked_runs(&mut self, workspace: &str, error: &str, cx: &mut Context<Self>) {
         let doomed: Vec<u64> = self
             .ipc_runs
             .iter()
@@ -301,6 +400,9 @@ impl Store {
         for run in doomed {
             if let Some(entry) = self.ipc_runs.remove(&run) {
                 let _ = entry.reply.send(Err(error.to_string()));
+                if entry.background {
+                    self.detach_tile(&entry.tile_key, cx);
+                }
             }
         }
     }

@@ -39,10 +39,6 @@ pub const SPLITTER_WIDTH: f32 = 4.0;
 // page moves all of them. These were constants; they are functions now for
 // exactly that reason, and the names stay the apps' own vocabulary.
 
-/// The primary fill.
-pub fn accent() -> gpui::Rgba {
-    current_ramp().accent
-}
 /// The accent as ink: links, focus rings, active pills.
 pub fn accent_ink() -> gpui::Rgba {
     current_ramp().accent_ink
@@ -62,10 +58,6 @@ pub fn hairline() -> gpui::Rgba {
 /// Control borders.
 pub fn line_strong() -> gpui::Rgba {
     current_ramp().line_strong
-}
-/// Text on a filled `accent()`.
-pub fn on_accent() -> gpui::Rgba {
-    current_ramp().on_accent
 }
 /// A card, a tile, the detail pane.
 pub fn panel() -> gpui::Rgba {

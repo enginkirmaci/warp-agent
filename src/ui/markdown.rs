@@ -1,60 +1,51 @@
-//! Chat-answer markdown rendering via gpui-kit's TextView: markdown-rs
-//! (mdast) parsing + the kit text layout/render pipeline, with optional
-//! tree-sitter syntax highlighting for fenced code blocks (enabled per
-//! language via the gpui-kit cargo features).
+//! Chat-answer markdown rendering through the suite's own live markdown
+//! engine (warpui-kit-markdown) in read-only mode: the same rendered surface
+//! the notes editor shows, with the syntax parked everywhere, no caret, no
+//! text input, no formatting — but text selection and copy, clickable links
+//! and tree-sitter-highlighted code blocks (enabled per language via the
+//! kit's cargo features) stay.
 //!
-//! The kit keys a TextViewState to the element and only re-parses when the
-//! handed-over allocation changes, so the tile feeds a cached, pointer-stable
-//! SharedString per message (TileView.md_text) — streaming edits swap the
-//! string, everything else skips straight through.
+//! The editor entity per message lives in TileView.md_editors, created on
+//! first render and fed new text as the message streams. Two pitfalls from
+//! the TextView era still apply and are honored here:
+//!
+//! - element ids must be unique per message: a constant id gave every
+//!   assistant message in the transcript the SAME global element id, and
+//!   their states collided — selection only worked with a single message.
+//!   The overlay copy button keys off "{flash_base}#code{n}" (= item id).
+//! - the kit re-lays-out only what changed, so the tile feeds a cached,
+//!   pointer-stable SharedString per message (TileView.md_text) and the
+//!   editor only sees set_value when the text actually moved.
 
-use gpui::{
-    AnyElement, ElementId, InteractiveElement, IntoElement, ParentElement, SharedString,
-    StatefulInteractiveElement, Styled, WeakEntity, div, px,
-};
-use gpui_kit::base::text::TextView;
+use gpui::prelude::*;
+use gpui::{AnyElement, Entity, div, px};
+use warpui_kit_markdown::{CodeBlock, LiveEditor, LiveEditorState};
 
 use crate::ui::tile::TileView;
 
-/// Renders a full markdown document as a selectable TextView. Every fenced
-/// code block gets a boxed copy button in its top-right corner (the kit
-/// positions and scopes the element). Clicking flashes the check icon in the
-/// accent color for a second — the same animation as the message copy
+/// Renders one assistant message's markdown. The read-only editor sizes
+/// itself to its content (the transcript scrolls as a whole; the editor
+/// never becomes an inner scroll area), and every fenced code block hosts a
+/// copy button in its top-right corner: clicking flashes the check icon in
+/// the accent color for a second — the same animation as the message copy
 /// buttons, driven through TileView.copied_flash with keys
 /// "{flash_base}#code{n}" (n = fenced block order in this message).
-///
-/// Built on the base-layer TextView (not the component facade) because the
-/// facade doesn't forward the per-instance code-block highlighter that styles
-/// diff fences; the global TextViewDefaults style still applies to it.
 pub fn render_markdown(
-    text: SharedString,
+    editor: &Entity<LiveEditorState>,
+    font_px: f32,
     icon_px: f32,
     flash_base: String,
     flash_active: Option<&str>,
-    view: WeakEntity<TileView>,
+    view: gpui::WeakEntity<TileView>,
     accent: gpui::Rgba,
     cx: &gpui::App,
 ) -> AnyElement {
     let flash_active = flash_active.map(str::to_string);
-    // the kit's Fn(+Send+Sync) closure can't own a mutable counter — and the
-    // keys only stay stable because the tile re-calls render_markdown on every
-    // render, giving each pass a fresh counter fed in fenced-block order
-    let block_index = std::sync::atomic::AtomicUsize::new(0);
-    // flash_base (= transcript item id) makes the element id unique per
-    // message: a constant id here gave every assistant TextView in the
-    // transcript the SAME global element id, so their kit states and
-    // selection participants collided — selection only worked with a
-    // single message
-    TextView::markdown(
-        ElementId::NamedInteger("md".into(), TileView::hash(&flash_base)),
-        text,
-    )
-    .selectable(true)
-    .shared_code_block_highlighter(warpui_kit_diff::shared_highlighter(cx))
-    .code_block_actions(move |block, _, _| {
-        let code = block.code();
-        let n = block_index.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let key = format!("{flash_base}#code{n}");
+    // the overlay closure is re-run on every render of the message, so the
+    // flash state reads fresh each time and the per-block counter of the
+    // TextView era is replaced by the kit's stable block indices
+    let overlay = move |block: &CodeBlock| -> Option<AnyElement> {
+        let key = format!("{flash_base}#code{}", block.index);
         let flashed = flash_active.as_deref() == Some(key.as_str());
         let (icon_path, icon_color, border) = if flashed {
             ("icons/check.svg", accent, accent)
@@ -65,27 +56,48 @@ pub fn render_markdown(
                 crate::theme::hairline(),
             )
         };
+        let code = block.code.clone();
         let click_view = view.clone();
         let click_key = key.clone();
-        crate::ui::tooltip::tip(
-            div()
-                .id("copy-code")
-                .cursor_pointer()
-                .p_1()
-                .rounded_sm()
-                .border_1()
-                .border_color(border)
-                .bg(crate::theme::chip())
-                .hover(|s| s.bg(crate::theme::HOVER))
-                .on_click(move |_, _, cx| {
-                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(code.to_string()));
-                    // flash_copied owns the one-second revert timer
-                    let _ =
-                        click_view.update(cx, |this, cx| this.flash_copied(click_key.clone(), cx));
-                }),
-            "Copy code",
+        Some(
+            crate::ui::tooltip::tip(
+                div()
+                    .id(gpui::ElementId::NamedInteger(
+                        "mdcopy".into(),
+                        TileView::hash(&key),
+                    ))
+                    .cursor_pointer()
+                    .p_1()
+                    .rounded_sm()
+                    .border_1()
+                    .border_color(border)
+                    .bg(crate::theme::chip())
+                    .hover(|s| s.bg(crate::theme::HOVER))
+                    .on_click(move |_, _, cx| {
+                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(code.to_string()));
+                        // flash_copied owns the one-second revert timer
+                        let _ = click_view.update(cx, |this, cx| {
+                            this.flash_copied(click_key.clone(), cx)
+                        });
+                    }),
+                "Copy code",
+            )
+            .child(crate::ui::icon(icon_path, px(icon_px), icon_color))
+            .into_any_element(),
         )
-        .child(crate::ui::icon(icon_path, px(icon_px), icon_color))
-    })
-    .into_any_element()
+    };
+    // the wrapper carries the laid-out content height (fit_content): the
+    // editor notifies on moves, and TileView re-renders on that notify
+    let height = editor.read(cx).content_height().max(1.);
+    div()
+        .w_full()
+        .h(px(height))
+        .child(
+            LiveEditor::new(editor)
+                .read_only(true)
+                .fit_content(true)
+                .text_size(px(font_px))
+                .code_block_overlay(overlay),
+        )
+        .into_any_element()
 }

@@ -62,10 +62,13 @@ use gpui::{
 use gpui_kit::component::input::{
     Enter, Escape, InputEvent, InputState, MoveDown, MoveUp, Position, TextareaState,
 };
+use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
 use std::sync::Arc;
 use warpui_kit_core::{motion, shell};
 use warpui_kit_diff::{render_code, render_diff, sniff_lang};
+use warpui_kit_markdown::LiveEditorState;
 
 // composer-only key overrides, bound in the "Input" context after
 // gpui_kit::init so the later binding wins over the editor's own up/down
@@ -117,6 +120,15 @@ enum ContextMenu {
     CopyImage { png: Arc<Vec<u8>> },
 }
 
+/// One cached assistant-message editor: the entity, the text it was last
+/// fed, and the content height the tile last saw (the tile re-renders only
+/// on real height moves — see `md_editor`).
+struct MdEditor {
+    fed: SharedString,
+    editor: Entity<LiveEditorState>,
+    seen_height: Rc<Cell<f32>>,
+}
+
 pub struct TileView {
     pub key: String,
     store: Entity<Store>,
@@ -163,6 +175,10 @@ pub struct TileView {
     /// text view recognizes the same allocation across frames and skips
     /// re-parsing; entries are replaced when a message's text changes
     md_cache: HashMap<String, SharedString>,
+    /// the read-only live editor per assistant message, with the text it was
+    /// last fed — an unchanged message (the common case) skips set_value,
+    /// which would reset the document; entries die with their transcript item
+    md_editors: HashMap<String, MdEditor>,
     /// decoded images by item id / attachment key — PNG decode is far too
     /// expensive to repeat on every repaint; evicted with the transcript
     img_cache: HashMap<String, Arc<gpui::RenderImage>>,
@@ -207,6 +223,68 @@ impl TileView {
         fresh
     }
 
+    /// The read-only live editor for one assistant message: created on first
+    /// render, then fed new text only when the message actually changed —
+    /// set_value rebuilds the document, so an unchanged render must skip it.
+    fn md_editor(
+        &mut self,
+        item_id: &str,
+        text: SharedString,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Entity<LiveEditorState> {
+        if let Some(entry) = self.md_editors.get(item_id) {
+            let editor = entry.editor.clone();
+            if entry.fed == text {
+                return editor;
+            }
+            editor.update(cx, |editor, cx| {
+                editor.set_value(text.clone(), window, cx)
+            });
+            self.md_editors.insert(
+                item_id.to_string(),
+                MdEditor {
+                    fed: text,
+                    editor: editor.clone(),
+                    seen_height: entry.seen_height.clone(),
+                },
+            );
+            return editor;
+        }
+        let editor = cx.new(|cx| {
+            let mut editor = LiveEditorState::new(window, cx);
+            editor.set_read_only(true, cx);
+            editor.set_value(text.clone(), window, cx);
+            editor
+        });
+        // the tile is a cached view: it re-renders only when it is notified,
+        // and plain reads register no dependency — so the height the message
+        // wrapper sizes itself from must be chased explicitly. Only real
+        // moves notify: the editor fires on every selection drag too, and a
+        // repaint per mouse move would rebuild the transcript for nothing.
+        let seen_height = Rc::new(Cell::new(f32::NAN));
+        {
+            let seen_height = seen_height.clone();
+            cx.observe(&editor, move |_, editor, cx| {
+                let height = editor.read(cx).content_height();
+                if height != seen_height.get() {
+                    seen_height.set(height);
+                    cx.notify();
+                }
+            })
+            .detach();
+        }
+        self.md_editors.insert(
+            item_id.to_string(),
+            MdEditor {
+                fed: text,
+                editor: editor.clone(),
+                seen_height,
+            },
+        );
+        editor
+    }
+
     /// Selectable markdown text for a transcript sub-surface (tool title /
     /// details, question text, notes): pointer-stable text through md_text
     /// plus a stable per-surface element id, so the kit neither re-parses on
@@ -246,6 +324,7 @@ impl TileView {
         cx: &mut Context<Self>,
     ) {
         self.md_cache.retain(|k, _| live.contains(k));
+        self.md_editors.retain(|k, _| live.contains(k));
         // evicted decoded images must also leave the window's sprite atlas —
         // atlas tiles persist until drop_image, so without this every image
         // ever shown in the session would stay on the GPU forever
@@ -536,6 +615,7 @@ impl TileView {
             last_spring_seen: false,
             copied_flash: None,
             md_cache: HashMap::new(),
+            md_editors: HashMap::new(),
             img_cache: HashMap::new(),
         }
     }
@@ -779,7 +859,8 @@ impl TileView {
                     ("icons/copy.svg", theme::text_muted(), theme::hairline())
                 };
                 let markdown = render_markdown(
-                    text,
+                    &self.md_editor(item_id, text, window, cx),
+                    fonts.font_body,
                     fonts.icon_medium,
                     item_id.to_string(),
                     self.copied_flash.as_deref(),
@@ -3770,6 +3851,10 @@ impl Render for TileView {
                     let next = (-this.scroll.offset().y - delta).clamp(px(0.), max.y);
                     this.pinned = next >= max.y - px(1.);
                     this.scroll_to(next, cx);
+                    // the transcript consumed the tick: a scrollable inside a
+                    // message (or a scrollbar hover over one) must not see the
+                    // same tick scroll it too
+                    cx.stop_propagation();
                 }),
             )
             // one 760 column centred in the tile, so a single tile filling the

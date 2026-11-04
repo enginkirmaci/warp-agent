@@ -18,7 +18,7 @@ use crate::oc::UiEvent;
 use crate::paths::AppPaths;
 use crate::settings::HarnessKind;
 
-pub const PROTOCOL: u32 = 1;
+pub const PROTOCOL: u32 = 2;
 /// Prompts ride whole on one line; repository trees inside them grow large.
 const MAX_LINE: usize = 8 * 1024 * 1024;
 /// How long a door client waits for a command answer. run-prompt is exempt:
@@ -88,12 +88,15 @@ pub enum IpcCommand {
         reply: Reply,
     },
     /// `run` is the wire request id. The reply fires only when the turn
-    /// idles (or dies), not when the prompt is accepted.
+    /// idles (or dies), not when the prompt is accepted. `background` keeps
+    /// the run out of the app's own UI — no tile, no focus, no sidebar row —
+    /// for clients that consume the answer themselves (protocol 2).
     RunPrompt {
         run: u64,
         workspace: String,
         prompt: String,
         model: DoorModel,
+        background: bool,
         reply: Reply,
     },
     CancelRun {
@@ -423,6 +426,10 @@ async fn serve_request(
                         harness,
                         variant: field("variant"),
                     },
+                    background: request
+                        .get("background")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false),
                     reply: reply_tx,
                 })
             }
@@ -733,6 +740,48 @@ mod tests {
             std::fs::read_to_string(token_file_in(&dir)).unwrap().trim(),
             "newer-token"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// run-prompt reaches the store with the background flag parsed off the
+    /// wire: sent it reads true, absent it stays false (protocol-1 clients).
+    #[tokio::test]
+    async fn run_prompt_carries_the_background_flag() {
+        let dir = scratch_dir("background");
+        let (event_tx, event_rx) = async_channel::unbounded::<UiEvent>();
+        let (broadcast_tx, _) = broadcast::channel::<String>(16);
+        let door = start_in(dir.clone(), event_tx, broadcast_tx).await.unwrap();
+        let (flags_tx, mut flags_rx) = tokio::sync::mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            while let Ok(UiEvent::Ipc { command }) = event_rx.recv().await {
+                if let IpcCommand::RunPrompt {
+                    background, reply, ..
+                } = command
+                {
+                    // the flag rides to the test; the run stays parked, like
+                    // a real turn waiting to idle
+                    let _ = flags_tx.send(background);
+                    std::mem::forget(reply);
+                }
+            }
+        });
+
+        let mut client = connect(door.port).await;
+        say(&mut client, json!({"auth": door.token})).await;
+        assert!(hear(&mut client).await["ok"].as_bool().unwrap());
+
+        say(
+            &mut client,
+            json!({"id": 1, "cmd": "run-prompt", "prompt": "hi", "background": true}),
+        )
+        .await;
+        assert_eq!(flags_rx.recv().await, Some(true));
+
+        say(&mut client, json!({"id": 2, "cmd": "run-prompt", "prompt": "hi"})).await;
+        assert_eq!(flags_rx.recv().await, Some(false));
+
+        drop(client);
+        unpublish(&door);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

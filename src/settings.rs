@@ -256,6 +256,11 @@ pub fn save_models_cache(models: &[crate::oc::ModelInfo]) {
 pub struct UiState {
     #[serde(rename = "Pins", default)]
     pub pins: std::collections::HashMap<String, bool>,
+    /// Favorites (the station repos list's star): session ids and workspace
+    /// folder paths in one map, mirroring the pins shape. Favorites sort to
+    /// the top of whatever list shows them.
+    #[serde(rename = "Favorites", default)]
+    pub favorites: std::collections::HashMap<String, bool>,
     #[serde(rename = "Workspaces", default)]
     pub workspaces: Vec<WorkspaceState>,
     #[serde(rename = "ActiveWorkspace", default)]
@@ -339,14 +344,30 @@ fn write_json_pretty<T: Serialize>(path: std::path::PathBuf, value: &T) {
     if let Some(parent) = path.parent() {
         let _ = fs::create_dir_all(parent);
     }
-    if let Ok(text) = serde_json::to_string_pretty(value) {
-        let tmp = path.with_extension("json.tmp");
-        match fs::File::create(&tmp)
-            .and_then(|mut f| f.write_all(text.as_bytes()))
-            .and_then(|()| fs::rename(&tmp, &path))
-        {
-            Ok(()) => {}
-            Err(err) => tracing::warn!("could not write {}: {err}", path.display()),
+    let Ok(text) = serde_json::to_string_pretty(value) else {
+        return;
+    };
+    // unique temp file + rename over the target (the notes app's atomic
+    // write): a crash mid-write leaves the old file, never a truncated one,
+    // and two writers can never share a temp name
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let tmp = path.with_file_name(format!(
+        "{}.{}.tmp",
+        path.file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| "file".into()),
+        format!("{nanos:x}-{}", std::process::id())
+    ));
+    let write = fs::File::create(&tmp).and_then(|mut f| f.write_all(text.as_bytes()));
+    if let Err(err) = write.and_then(|()| fs::rename(&tmp, &path)) {
+        // a destination held open without FILE_SHARE_DELETE (an editor on
+        // Windows) — drop it and retry once before giving up
+        if fs::remove_file(&path).is_ok() && fs::rename(&tmp, &path).is_ok() {
+            return;
         }
+        tracing::warn!("could not write {}: {err}", path.display());
     }
 }

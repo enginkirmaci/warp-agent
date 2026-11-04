@@ -86,6 +86,10 @@ fn tile_track_width(grid_width: f32, columns: usize) -> f32 {
 pub enum SideMenuAction {
     OpenFolder(String),
     RemoveWorkspace(String),
+    FavoriteWorkspace(String),
+    UnfavoriteWorkspace(String),
+    FavoriteChat(String),
+    UnfavoriteChat(String),
     PinChat(String),
     UnpinChat(String),
     RenameChat(String),
@@ -98,6 +102,12 @@ impl SideMenuAction {
         match self {
             SideMenuAction::OpenFolder(_) => "Open folder",
             SideMenuAction::RemoveWorkspace(_) => "Remove workspace",
+            SideMenuAction::FavoriteWorkspace(_) | SideMenuAction::FavoriteChat(_) => {
+                "Add to favorites"
+            }
+            SideMenuAction::UnfavoriteWorkspace(_) | SideMenuAction::UnfavoriteChat(_) => {
+                "Remove from favorites"
+            }
             SideMenuAction::PinChat(_) => "Pin",
             SideMenuAction::UnpinChat(_) => "Unpin",
             SideMenuAction::RenameChat(_) => "Rename",
@@ -116,6 +126,56 @@ pub struct MenuState {
     pub rows: Vec<SideMenuAction>,
 }
 
+/// The star of the station repos list, in a sidebar row's hover actions:
+/// filled in the accent when the item is a favorite, quiet and dimmed until
+/// the row is hovered otherwise. The click must stop propagation — the press
+/// is not on the row.
+fn star_toggle(
+    id: gpui::ElementId,
+    favorite: bool,
+    icon_px: f32,
+    row_group: &'static str,
+    on_toggle: impl Fn(&mut gpui::App) + 'static,
+) -> gpui::AnyElement {
+    let label = if favorite {
+        "Remove from favorites"
+    } else {
+        "Add to favorites"
+    };
+    tip(
+        div()
+            .id(id)
+            .a11y_toggle(label, favorite)
+            .cursor_pointer()
+            .p_1()
+            .rounded_sm()
+            .hover(|s| s.bg(theme::HOVER))
+            .when(!favorite, |star| {
+                star.opacity(0.62).group_hover(row_group, |s| s.opacity(1.))
+            })
+            .on_click(move |_, _, cx| {
+                // the star is not a press on the row
+                cx.stop_propagation();
+                on_toggle(cx);
+            })
+            .child(crate::ui::icon(
+                if favorite {
+                    "icons/star-filled.svg"
+                } else {
+                    "icons/star.svg"
+                },
+                px(icon_px),
+                if favorite {
+                    theme::accent_ink()
+                } else {
+                    theme::text_muted()
+                },
+            )),
+        label,
+    )
+    .into_any_element()
+}
+
 /// Harness-independent workspace menu: servers are auto-managed (expanding a
 /// workspace connects them), so the only entries are the folder itself and
 /// removal. The built-in General workspace has neither — no menu at all.
@@ -127,6 +187,11 @@ fn ws_menu_rows(store: &Store, path: &str) -> Vec<SideMenuAction> {
         return Vec::new();
     }
     vec![
+        if ws.is_favorite {
+            SideMenuAction::UnfavoriteWorkspace(path.into())
+        } else {
+            SideMenuAction::FavoriteWorkspace(path.into())
+        },
         SideMenuAction::OpenFolder(path.to_string()),
         SideMenuAction::RemoveWorkspace(path.to_string()),
     ]
@@ -134,7 +199,13 @@ fn ws_menu_rows(store: &Store, path: &str) -> Vec<SideMenuAction> {
 
 fn chat_menu_rows(store: &Store, id: &str) -> Vec<SideMenuAction> {
     let pinned = store.ui.pins.contains_key(id);
+    let favorite = store.ui.favorites.contains_key(id);
     vec![
+        if favorite {
+            SideMenuAction::UnfavoriteChat(id.into())
+        } else {
+            SideMenuAction::FavoriteChat(id.into())
+        },
         if pinned {
             SideMenuAction::UnpinChat(id.into())
         } else {
@@ -165,6 +236,12 @@ pub struct WarpWindow {
     /// cannot reach a hidden window, and probes need the page).
     open_settings_on_first_render: Option<SettingsSection>,
     settings_fields: Vec<(&'static str, Entity<InputState>)>,
+    /// The pending debounced settings commit: every field keystroke bumps it,
+    /// the task that fired for an older sequence stands down.
+    settings_commit_seq: usize,
+    /// The last sequence a commit actually landed for: leaving the settings
+    /// page flushes only a commit that is still pending.
+    settings_committed_seq: usize,
     /// leaf renderers for the plain settings fields — keystrokes repaint
     /// only the field, never the window (see InputLeaf below)
     settings_leafs: Vec<(&'static str, Entity<InputLeaf>)>,
@@ -219,6 +296,8 @@ impl WarpWindow {
                 _ => None,
             },
             settings_fields: Vec::new(),
+            settings_commit_seq: 0,
+            settings_committed_seq: 0,
             settings_leafs: Vec::new(),
             settings_model_picker: None,
             rename: None,
@@ -237,6 +316,10 @@ fn menu_action_key(action: &SideMenuAction) -> String {
     match action {
         SideMenuAction::OpenFolder(path) => format!("open-folder:{path}"),
         SideMenuAction::RemoveWorkspace(path) => format!("remove-workspace:{path}"),
+        SideMenuAction::FavoriteWorkspace(path) => format!("favorite-ws:{path}"),
+        SideMenuAction::UnfavoriteWorkspace(path) => format!("unfavorite-ws:{path}"),
+        SideMenuAction::FavoriteChat(id) => format!("favorite:{id}"),
+        SideMenuAction::UnfavoriteChat(id) => format!("unfavorite:{id}"),
         SideMenuAction::PinChat(id) | SideMenuAction::UnpinChat(id) => format!("pin:{id}"),
         SideMenuAction::RenameChat(id) => format!("rename:{id}"),
         SideMenuAction::UnlinkChat(id) => format!("unlink:{id}"),
@@ -252,6 +335,10 @@ fn execute_menu_action(store: &Entity<Store>, action: &SideMenuAction, cx: &mut 
             }
         }
         SideMenuAction::RemoveWorkspace(path) => s.remove_workspace(path, cx),
+        SideMenuAction::FavoriteWorkspace(path) => s.toggle_workspace_favorite(path, cx),
+        SideMenuAction::UnfavoriteWorkspace(path) => s.toggle_workspace_favorite(path, cx),
+        SideMenuAction::FavoriteChat(id) => s.toggle_session_favorite(id, cx),
+        SideMenuAction::UnfavoriteChat(id) => s.toggle_session_favorite(id, cx),
         SideMenuAction::PinChat(id) => s.toggle_pin(id, cx),
         SideMenuAction::UnpinChat(id) => s.toggle_pin(id, cx),
         SideMenuAction::RenameChat(id) => s.begin_rename(id, cx),
@@ -517,7 +604,7 @@ impl WarpWindow {
     /// Below the compact width, a grid of two or more takes the list's room.
     fn grid_takes_the_list(&self, window: &Window, cx: &App) -> bool {
         window.viewport_size().width < px(shell::scaled(shell::COMPACT_WINDOW_WIDTH))
-            && self.store.read(cx).open_tiles.len() >= 2
+            && self.store.read(cx).open_tiles.iter().filter(|t| !t.background).count() >= 2
     }
 
     fn open_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -535,11 +622,15 @@ impl WarpWindow {
         cx.notify();
     }
 
-    /// Leaving the page discards unsaved edits: the design gives Settings a
-    /// Save button, and Appearance applies on its own.
+    /// Leaving the page flushes a pending field commit — the page has no
+    /// Save, so the debounced write must not be lost to the section switch.
     fn close_settings(&mut self, cx: &mut Context<Self>) {
         if !self.store.read(cx).is_settings_open {
             return;
+        }
+        if self.settings_commit_seq != self.settings_committed_seq {
+            self.commit_settings(cx);
+            self.settings_committed_seq = self.settings_commit_seq;
         }
         self.store.update(cx, |s, _| s.is_settings_open = false);
         cx.notify();
@@ -617,7 +708,11 @@ impl WarpWindow {
         let store_handle = self.store.clone();
         let running = {
             let store = self.store.read(cx);
-            store.open_tiles.iter().filter(|t| t.is_busy(store)).count()
+            store
+                .open_tiles
+                .iter()
+                .filter(|t| !t.background && t.is_busy(store))
+                .count()
         };
         shell::title_bar()
             .pl_3()
@@ -862,8 +957,12 @@ impl WarpWindow {
             let store = self.store.read(cx);
             (
                 store.tiles_waiting(),
-                store.open_tiles.iter().filter(|t| t.is_busy(store)).count(),
-                store.open_tiles.len(),
+                store
+                    .open_tiles
+                    .iter()
+                    .filter(|t| !t.background && t.is_busy(store))
+                    .count(),
+                store.open_tiles.iter().filter(|t| !t.background).count(),
             )
         };
         let mut summary = div()
@@ -1097,6 +1196,8 @@ impl WarpWindow {
         let menu_path2 = path.clone();
         let ws_store_new = self.store.clone();
         let path_new = path.clone();
+        let ws_store_fav = self.store.clone();
+        let path_fav = path.clone();
 
         div()
             .id(gpui::ElementId::NamedInteger(
@@ -1132,6 +1233,9 @@ impl WarpWindow {
                             s.connect_expanded_workspace(&connect_path, cx);
                         }
                     }
+                    // the section's open/closed state is a toggled panel: it
+                    // restores as it was left, so it saves when it flips
+                    s.save_state();
                     cx.notify();
                 });
             })
@@ -1154,6 +1258,19 @@ impl WarpWindow {
                     menu_store.update(cx, |_, _| {});
                 },
             )
+            // the star leads the row like station's repos list: filled in
+            // the accent while a favorite, dimmed until the row hover else
+            .child(star_toggle(
+                gpui::ElementId::NamedInteger("ws-star".into(), TileView::hash(&path)),
+                ws.is_favorite,
+                fonts.icon_small,
+                "wsrow",
+                move |cx| {
+                    ws_store_fav.update(cx, |s, cx| {
+                        s.toggle_workspace_favorite(&path_fav, cx)
+                    });
+                },
+            ))
             .child(glyph)
             // no flex_1: the row packs left so the count hugs the name; a long
             // name shrinks (min_w_0) and truncates instead of pushing the
@@ -1341,6 +1458,18 @@ impl WarpWindow {
                 px(fonts.icon_tiny),
                 theme::BEHIND,
             )
+        } else if chat.is_favorite {
+            star_toggle(
+                gpui::ElementId::NamedInteger("chat-star".into(), TileView::hash(&id)),
+                true,
+                fonts.icon_small,
+                "chatrow",
+                {
+                    let fav_store = self.store.clone();
+                    let fav_id = id.clone();
+                    move |cx| fav_store.update(cx, |s, cx| s.toggle_session_favorite(&fav_id, cx))
+                },
+            )
         } else if chat.pin_visible() {
             crate::ui::icon("icons/pin.svg", px(fonts.icon_small), theme::text_muted())
                 .into_any_element()
@@ -1442,8 +1571,9 @@ impl WarpWindow {
                         .child(SharedString::from(harness_label))
                         .child(self.cached_time_label(chat)),
                 )
-                // the design's ⋯: Pin, Rename, Remove and Delete chat (which
-                // arms before it runs), the same menu the right-click opens
+                // the design's ⋯: favorite (the star), Pin, Rename, Remove and
+                // Delete chat (which arms before it runs), the same menu the
+                // right-click opens
                 .child(
                     div()
                         .absolute()
@@ -1621,6 +1751,14 @@ impl WarpWindow {
                         .placeholder("")
                         .default_value(value)
                 });
+                // the design has no Save on the page anymore: a keystroke
+                // schedules the debounced commit that parses and persists
+                cx.subscribe(&state, |this, _, event: &InputEvent, cx| {
+                    if matches!(event, InputEvent::Change) {
+                        this.schedule_settings_commit(cx);
+                    }
+                })
+                .detach();
                 let store = self.store.clone();
                 let picker = settings_model_picker(state.clone(), store, window, cx);
                 fields.push((key, state));
@@ -1631,6 +1769,12 @@ impl WarpWindow {
                         .placeholder("")
                         .default_value(value)
                 });
+                cx.subscribe(&entity, |this, _, event: &InputEvent, cx| {
+                    if matches!(event, InputEvent::Change) {
+                        this.schedule_settings_commit(cx);
+                    }
+                })
+                .detach();
                 let leaf = cx.new(|_| InputLeaf {
                     state: entity.clone(),
                     disabled: false,
@@ -1643,6 +1787,27 @@ impl WarpWindow {
             }
         }
         (fields, leafs, model_picker)
+    }
+
+    /// One commit a beat after the last keystroke: the buffers re-parse on
+    /// every schedule but only the last one lands, so typing costs one
+    /// settings write and the page never asks for a Save press.
+    fn schedule_settings_commit(&mut self, cx: &mut Context<Self>) {
+        self.settings_commit_seq += 1;
+        let seq = self.settings_commit_seq;
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(600))
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if this.settings_commit_seq == seq {
+                    this.commit_settings(cx);
+                    this.settings_committed_seq = seq;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
     }
 
     fn settings_field_wrap(&self, key: &str, cx: &mut App) -> gpui::AnyElement {
@@ -1705,6 +1870,9 @@ impl WarpWindow {
             .read(cx)
             .open_tiles
             .iter()
+            // a background door run's tile executes hidden — it never
+            // mounts a view, and dropping the mapping frees nothing it holds
+            .filter(|t| !t.background)
             .map(|t| t.key.clone())
             .collect();
         for key in &keys {
@@ -1945,7 +2113,7 @@ impl WarpWindow {
             )
             .child(rows);
 
-        let mut head = div()
+        let head = div()
             .flex_shrink_0()
             // the row measures against the pane, not against its own content:
             // without these a long hint widened it and pushed the actions off
@@ -1978,37 +2146,9 @@ impl WarpWindow {
                             .child(active.hint()),
                     ),
             );
-        if active == SettingsSection::Appearance {
-            head = head.child(
-                div()
-                    .text_size(px(fonts.font_meta))
-                    .text_color(theme::text_faint())
-                    .child("Applied at once"),
-            );
-        } else {
-            head = head.child(
-                div()
-                    .id("settings-save")
-                    .a11y_button("Save settings")
-                    .cursor_pointer()
-                    .h(px(shell::scaled(shell::CONTROL_HEIGHT)))
-                    .px_4()
-                    .rounded(px(6.))
-                    .flex()
-                    .items_center()
-                    .text_size(px(fonts.font_control))
-                    .font_weight(gpui::FontWeight::MEDIUM)
-                    .bg(theme::accent())
-                    .text_color(theme::on_accent())
-                    .hover(|s| s.opacity(0.9))
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.commit_settings(cx);
-                        cx.notify();
-                    }))
-                    .child("Save"),
-            );
-        }
-
+        // no Save on the page: every section applies as its controls change
+        // (toggles commit at once, fields commit a beat after the last
+        // keystroke), so the head stays just the section title
         let rows = self.settings_rows(active, &fonts, cx);
 
         shell::panes()
@@ -2291,8 +2431,9 @@ impl WarpWindow {
     }
 
     /// Persists the settings page: text fields land in the buffers, then the
-    /// buffers parse and push into live state. Runs from the design's Save
-    /// button; Appearance rows call it themselves so they apply at once.
+    /// buffers parse and push into live state. Runs debounced from field
+    /// keystrokes and at once from the toggles, so every mutation lands on
+    /// disk without a Save press.
     fn commit_settings(&self, cx: &mut App) {
         let mut buffers = self.settings_buffers.clone();
         for (key, field) in &self.settings_fields {

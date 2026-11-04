@@ -556,6 +556,10 @@ pub struct ChatTile {
     pub tasks: Vec<TaskItem>,
     pub queue_rows: Vec<usize>, // QueueEntry keys pinned above the composer
     pub is_focused: bool,
+    /// A door-run's chat that must not surface: the tile stays out of every
+    /// render and sidebar list, and the run retires it when the turn settles.
+    /// Always false for tiles the user opened.
+    pub background: bool,
     /// Notified only when THIS tile's content changed: its cached view
     /// (Entity::cached) re-renders on this and nothing else, so one tile's
     /// stream doesn't rebuild every open transcript. None on the with_tile
@@ -656,6 +660,7 @@ impl ChatTile {
             tasks: Vec::new(),
             queue_rows: Vec::new(),
             is_focused: false,
+            background: false,
             rev: None,
             role_by_message: HashMap::new(),
             created_by_message: HashMap::new(),
@@ -1624,16 +1629,27 @@ fn workspace_display_name(path: &str) -> String {
         .to_string()
 }
 
-/// Sort key: General leads, the rest alphabetical by name (case-insensitive).
-/// Single-sourced so every workspace-list sort keeps General on top.
-fn workspace_order_key(path: &str) -> (bool, String) {
+/// Sort key: General leads, then favorites, the rest alphabetical by name
+/// (case-insensitive). Single-sourced so every workspace-list sort keeps
+/// General on top.
+fn workspace_order_key(
+    path: &str,
+    favorites: &std::collections::HashMap<String, bool>,
+) -> (bool, bool, String) {
     let general = path == crate::paths::AppPaths::general_workspace_path().to_string_lossy();
-    (!general, workspace_display_name(path).to_lowercase())
+    (
+        !general,
+        !favorites.contains_key(path),
+        workspace_display_name(path).to_lowercase(),
+    )
 }
 
-/// Sidebar order: General leads, the rest alphabetical by name (case-insensitive).
-fn sort_workspaces(workspaces: &mut [WorkspaceState]) {
-    workspaces.sort_by_key(|w| workspace_order_key(&w.path));
+/// Sidebar order: General leads, then favorites, the rest alphabetical.
+fn sort_workspaces(
+    workspaces: &mut [WorkspaceState],
+    favorites: &std::collections::HashMap<String, bool>,
+) {
+    workspaces.sort_by_key(|w| workspace_order_key(&w.path, favorites));
 }
 
 #[derive(Clone)]
@@ -1642,17 +1658,20 @@ pub struct WorkspaceItem {
     pub name: String,
     pub is_running: bool,
     pub is_selected: bool,
+    pub is_favorite: bool,
     pub chats: Vec<crate::store::SessionItem>,
 }
 
 impl WorkspaceItem {
-    pub fn new(state: WorkspaceState) -> Self {
+    pub fn new(state: WorkspaceState, favorites: &std::collections::HashMap<String, bool>) -> Self {
         let name = workspace_display_name(&state.path);
+        let is_favorite = favorites.contains_key(&state.path);
         Self {
             state,
             name,
             is_running: false,
             is_selected: false,
+            is_favorite,
             chats: Vec::new(),
         }
     }
@@ -1689,6 +1708,7 @@ pub struct SessionItem {
     pub updated_ms: i64,
     pub created_ms: i64,
     pub is_pinned: bool,
+    pub is_favorite: bool,
     pub is_selected: bool,
     pub is_running: bool,
     pub is_editing: bool,
@@ -1704,10 +1724,11 @@ impl SessionItem {
     }
 }
 
-/// Sidebar chat order: pinned first, then newest first — by last activity,
-/// falling back to creation time when a server never fills `updated`.
-fn session_recency(s: &SessionItem) -> std::cmp::Reverse<(bool, i64, i64)> {
-    std::cmp::Reverse((s.is_pinned, s.updated_ms, s.created_ms))
+/// Sidebar chat order: favorites first, then pinned, then newest first — by
+/// last activity, falling back to creation time when a server never fills
+/// `updated`.
+fn session_recency(s: &SessionItem) -> std::cmp::Reverse<(bool, bool, i64, i64)> {
+    std::cmp::Reverse((s.is_favorite, s.is_pinned, s.updated_ms, s.created_ms))
 }
 
 // ---- the store -----------------------------------------------------------
@@ -1830,6 +1851,10 @@ pub struct Store {
     stream_dirty: Vec<String>,
     /// one-shot prompts DevTools runs through the door, keyed by wire id
     ipc_runs: HashMap<u64, ipc::IpcRun>,
+    /// Sessions a background door run owns: never listed in a workspace's
+    /// sidebar section even when a server session list names them (their
+    /// list refresh races the run), and forgotten when the run retires.
+    hidden_sessions: HashSet<String>,
     /// the door's models command parked while a server spins up, with the
     /// harness it asked for (None = any)
     ipc_models_waiter: Option<(Option<HarnessKind>, crate::ipc::Reply)>,
@@ -1980,6 +2005,7 @@ impl Store {
             stream_dirty: Vec::new(),
             tile_placeholder: None,
             ipc_runs: HashMap::new(),
+            hidden_sessions: HashSet::new(),
             ipc_models_waiter: None,
             commands: HashMap::new(),
             file_results: None,
@@ -2018,12 +2044,10 @@ impl Store {
         }
         let _ = std::fs::create_dir_all(&general_path);
 
-        sort_workspaces(&mut store.ui.workspaces);
+        sort_workspaces(&mut store.ui.workspaces, &store.ui.favorites);
 
-        // every launch starts with the workspace sections collapsed, whatever was saved
+        // saved open-tile ids of chats that no longer exist could never restore
         for ws in &mut store.ui.workspaces {
-            ws.collapsed = true;
-            // saved open-tile ids of chats that no longer exist could never restore
             ws.open_sessions.retain(|id| ws.sessions.contains(id));
         }
         let pending_tiles: usize = store
@@ -2044,7 +2068,7 @@ impl Store {
             .workspaces
             .clone()
             .into_iter()
-            .map(WorkspaceItem::new)
+            .map(|state| WorkspaceItem::new(state, &store.ui.favorites))
             .collect();
         for ws in &store.workspaces {
             for sid in &ws.state.sessions {
@@ -2148,6 +2172,9 @@ impl Store {
             let ids: Vec<String> = self
                 .open_tiles
                 .iter()
+                // a background run's chat is never a tile the next launch
+                // should restore
+                .filter(|t| !t.background)
                 .filter_map(|t| t.session_id.clone())
                 .filter(|sid| {
                     self.workspace_by_session
@@ -2242,6 +2269,18 @@ impl Store {
         self.tile_by_key(tile_key)
             .and_then(|t| t.session_id.clone())
             .and_then(|sid| self.workspace_by_session.get(&sid).cloned())
+            .or_else(|| self.selected_workspace.clone())
+    }
+
+    /// The workspace an unsent draft will create its session on: the
+    /// selected one, unless the draft belongs to a background door run —
+    /// that run's own workspace, so a hidden send never rides the user's
+    /// selection.
+    fn draft_workspace(&self, tile_key: &str) -> Option<String> {
+        self.ipc_runs
+            .values()
+            .find(|run| run.tile_key == tile_key)
+            .map(|run| run.workspace.clone())
             .or_else(|| self.selected_workspace.clone())
     }
 
@@ -2398,11 +2437,12 @@ impl Store {
     }
 
     pub fn tile_columns(&self) -> usize {
-        ((self.open_tiles.len() as f64).sqrt().ceil() as usize).max(1)
+        let visible = self.open_tiles.iter().filter(|t| !t.background).count();
+        ((visible as f64).sqrt().ceil() as usize).max(1)
     }
 
     pub fn has_tiles(&self) -> bool {
-        !self.open_tiles.is_empty()
+        self.open_tiles.iter().any(|t| !t.background)
     }
 
     pub fn has_no_workspace(&self) -> bool {
@@ -2429,11 +2469,13 @@ impl Store {
         self.tiles_waiting() > 0 || self.running_agents.iter().any(|r| r.needs_attention)
     }
 
-    /// Open chats that hold a card only a person can answer.
+    /// Open chats that hold a card only a person can answer. Background
+    /// runs stay out: their client cannot answer a card, and an invisible
+    /// tile must not light the attention badge.
     pub fn tiles_waiting(&self) -> usize {
         self.open_tiles
             .iter()
-            .filter(|tile| tile.is_waiting())
+            .filter(|tile| !tile.background && tile.is_waiting())
             .count()
     }
 
@@ -2747,13 +2789,26 @@ impl Store {
     // ---- workspaces ----
 
     pub fn add_workspace(&mut self, path: &str, cx: &mut Context<Self>) {
-        if path.trim().is_empty() {
+        if !self.install_workspace(path, cx) {
             return;
+        }
+        let normalized = normalize_dir(path);
+        self.select_workspace(&normalized, cx);
+        self.ipc_push_status();
+    }
+
+    /// Adds a workspace to the lists without selecting it: the shared body of
+    /// [`add_workspace`]. A background door run needs the workspace's server,
+    /// but the user's sidebar selection must stay where it was. False when
+    /// the folder is missing, empty, or already a workspace.
+    fn install_workspace(&mut self, path: &str, cx: &mut Context<Self>) -> bool {
+        if path.trim().is_empty() {
+            return false;
         }
         let normalized = normalize_dir(path);
         if !std::path::Path::new(&normalized).exists() {
             self.announce(&format!("Folder does not exist: {normalized}"), true, cx);
-            return;
+            return false;
         }
         if self
             .workspaces
@@ -2761,22 +2816,21 @@ impl Store {
             .any(|w| w.folder_path() == normalized)
         {
             self.announce("That folder is already a workspace.", false, cx);
-            return;
+            return false;
         }
         let state = WorkspaceState {
             path: normalized.clone(),
             ..Default::default()
         };
         self.ui.workspaces.push(state.clone());
-        let item = WorkspaceItem::new(state);
-        let path_key = item.folder_path().to_string();
+        let item = WorkspaceItem::new(state, &self.ui.favorites);
         self.workspaces.push(item);
-        sort_workspaces(&mut self.ui.workspaces);
+        sort_workspaces(&mut self.ui.workspaces, &self.ui.favorites);
         self.workspaces
-            .sort_by_key(|w| workspace_order_key(w.folder_path()));
+            .sort_by_key(|w| workspace_order_key(w.folder_path(), &self.ui.favorites));
         self.save_state();
-        self.select_workspace(&path_key, cx);
         self.ipc_push_status();
+        true
     }
 
     pub fn remove_workspace(&mut self, path: &str, cx: &mut Context<Self>) {
@@ -2827,6 +2881,11 @@ impl Store {
         }
         self.ui.workspaces.retain(|w| w.path != path);
         self.workspaces.remove(index);
+        // the folder is gone; its star (and its chats') would sort nothing
+        self.ui.favorites.remove(path);
+        for sid in &session_ids {
+            self.ui.favorites.remove(sid);
+        }
         if was_selected {
             let next = self.workspaces.first().map(|w| w.folder_path().to_string());
             self.selected_workspace = next.clone();
@@ -3109,7 +3168,11 @@ impl Store {
                         let _ = reply.send(Err(format!("server failed to start: {err:#}")));
                     }
                     self.announce(&format!("Failed to start: {err:#}"), true, cx);
-                    self.ipc_fail_parked_runs(&ws_key, &format!("server failed to start: {err:#}"));
+                    self.ipc_fail_parked_runs(
+                        &ws_key,
+                        &format!("server failed to start: {err:#}"),
+                        cx,
+                    );
                     self.ipc_push_status();
                 }
             },
@@ -3348,19 +3411,31 @@ impl Store {
                         tile.title = title;
                         tile.auto_title_pending = true;
                     }
-                    if let Some(ws) = self.workspace_by_path_mut(&ws_key) {
+                    // a background run's chat stays out of the sidebar and the
+                    // persisted session list entirely — the door client owns
+                    // its result, and the run retires the session itself
+                    let background = self
+                        .tile_by_key(&draft_key)
+                        .is_some_and(|tile| tile.background);
+                    if background {
+                        self.hidden_sessions.insert(info.id.clone());
+                    }
+                    if !background
+                        && let Some(ws) = self.workspace_by_path_mut(&ws_key)
+                    {
                         ws.state.sessions.insert(0, info.id.clone());
                     }
                     // only the selected workspace's sidebar mirror lives in
                     // self.sessions; other workspaces refill from their own
                     // session list (session.idle triggers that refresh)
-                    if self.selected_workspace.as_deref() == Some(ws_key.as_str()) {
+                    if !background && self.selected_workspace.as_deref() == Some(ws_key.as_str()) {
                         self.sessions.push(SessionItem {
                             id: info.id.clone(),
                             title: info.title.clone(),
                             updated_ms: info.updated_ms,
                             created_ms: info.created_ms,
                             is_pinned: false,
+                            is_favorite: self.ui.favorites.contains_key(&info.id),
                             is_selected: false,
                             is_running: false,
                             is_editing: false,
@@ -3415,6 +3490,11 @@ impl Store {
                                 let _ = entry
                                     .reply
                                     .send(Err(format!("could not create a session: {err:#}")));
+                                // the draft this run parked on never became a
+                                // chat: a background tile leaves with the run
+                                if entry.background {
+                                    self.detach_tile(&entry.tile_key, cx);
+                                }
                             }
                         }
                     }
@@ -3480,6 +3560,7 @@ impl Store {
                             updated_ms: info.updated_ms,
                             created_ms: info.created_ms,
                             is_pinned: false,
+                            is_favorite: self.ui.favorites.contains_key(&info.id),
                             is_selected: false,
                             is_running: false,
                             is_editing: false,
@@ -4044,6 +4125,10 @@ impl Store {
         };
         let existing_session = tile.session_id.clone();
         let is_dsh_draft = existing_session.is_none() && tile.harness == HarnessKind::Dsh;
+        // a draft talks to the selected workspace's server — except a
+        // background run's draft, which belongs to the workspace its door run
+        // named; the run's registration answers that lookup
+        let draft_ws = self.draft_workspace(tile_key);
         if let Some(session_id) = &existing_session {
             if !self.has_runtime(session_id) {
                 // the server idled out: restart it and flow the send when
@@ -4073,7 +4158,7 @@ impl Store {
         } else if is_dsh_draft {
             // a dsh draft needs the shared dsh server, not the workspace's
             if !self.runtimes.contains_key(DSH_SERVER_KEY) {
-                let folder = self.selected_workspace.clone().unwrap_or_default();
+                let folder = draft_ws.clone().unwrap_or_default();
                 let attachments =
                     std::mem::take(&mut self.tile_by_key_mut(tile_key).unwrap().attachments);
                 self.pending_dsh_drafts.push((
@@ -4092,7 +4177,9 @@ impl Store {
                 self.repaint(cx);
                 return;
             }
-        } else if !self.is_server_running || self.selected_workspace.is_none() {
+        } else if draft_ws.as_ref().is_none_or(|ws| !self.runtimes.contains_key(ws)) {
+            // no server for the draft's workspace yet: the prompt stays in
+            // the tile until ServerStarted's parked-run pickup sends it
             return;
         }
 
@@ -4134,7 +4221,7 @@ impl Store {
 
         if session_id.is_none() {
             // create the session first; the send continues when the reply lands
-            let ws_key = self.selected_workspace.clone().unwrap();
+            let ws_key = draft_ws.expect("the draft's server was checked above");
             let harness = self
                 .tile_by_key(tile_key)
                 .map(|tile| tile.harness)
@@ -4677,7 +4764,9 @@ impl Store {
                     .unwrap_or_default();
                 sessions
                     .iter()
-                    .filter(|s| !known.contains(&s.id))
+                    // a background run's chat is revealed by cwd here — it
+                    // must stay hidden until its run retires it
+                    .filter(|s| !known.contains(&s.id) && !self.hidden_sessions.contains(&s.id))
                     .cloned()
                     .collect()
             };
@@ -4730,6 +4819,7 @@ impl Store {
                 }
             }
             let pins = &self.ui.pins;
+            let favorites = &self.ui.favorites;
             let mut chats: Vec<SessionItem> = sessions
                 .iter()
                 .filter(|s| known.contains(&s.id))
@@ -4739,6 +4829,7 @@ impl Store {
                     updated_ms: s.updated_ms,
                     created_ms: s.created_ms,
                     is_pinned: pins.contains_key(&s.id),
+                    is_favorite: favorites.contains_key(&s.id),
                     is_selected: false,
                     is_running: self.running_by_session.contains(&s.id),
                     is_editing: false,
@@ -4788,7 +4879,12 @@ impl Store {
             .filter(|s| state.sessions.contains(&s.id))
             .collect();
         mine.sort_by_key(|s| {
-            std::cmp::Reverse((pins.contains_key(&s.id), s.updated_ms, s.created_ms))
+            std::cmp::Reverse((
+                self.ui.favorites.contains_key(&s.id),
+                pins.contains_key(&s.id),
+                s.updated_ms,
+                s.created_ms,
+            ))
         });
         let alive: HashSet<String> = mine.iter().map(|s| s.id.clone()).collect();
         // drop chats that no longer exist on the server — only the ones this
@@ -4831,6 +4927,7 @@ impl Store {
                 updated_ms: s.updated_ms,
                 created_ms: s.created_ms,
                 is_pinned: self.ui.pins.contains_key(&s.id),
+                is_favorite: self.ui.favorites.contains_key(&s.id),
                 is_selected: false,
                 is_running: self.running_by_session.contains(&s.id),
                 is_editing: false,
@@ -4863,6 +4960,7 @@ impl Store {
                     && cur.title == s.title
                     && cur.updated_ms == s.updated_ms
                     && cur.is_pinned == s.is_pinned
+                    && cur.is_favorite == s.is_favorite
                     && cur.is_running == s.is_running
             });
         if unchanged {
@@ -4921,6 +5019,48 @@ impl Store {
                 chat.is_selected = focused_session.as_deref() == Some(chat.id.as_str());
             }
         }
+    }
+
+    /// The star of the station repos list, over both listable kinds: a chat
+    /// (by session id) or a workspace (by folder path). Favorites persist in
+    /// `ui.json` and sort to the top of every list that shows them.
+    pub fn toggle_session_favorite(&mut self, session_id: &str, cx: &mut Context<Self>) {
+        self.toggle_favorite_key(session_id.to_string());
+        self.sort_sessions();
+        self.sync_workspace_chats(cx);
+        self.repaint(cx);
+    }
+
+    pub fn toggle_workspace_favorite(&mut self, path: &str, cx: &mut Context<Self>) {
+        self.toggle_favorite_key(path.to_string());
+        // both lists sort favorites to the top: the serialized mirror for the
+        // next launch, the runtime items for this session's sidebar
+        sort_workspaces(&mut self.ui.workspaces, &self.ui.favorites);
+        self.workspaces
+            .sort_by_key(|w| workspace_order_key(w.folder_path(), &self.ui.favorites));
+        self.repaint(cx);
+    }
+
+    fn toggle_favorite_key(&mut self, key: String) {
+        let is_favorite = !self.ui.favorites.contains_key(&key);
+        if is_favorite {
+            self.ui.favorites.insert(key.clone(), true);
+        } else {
+            self.ui.favorites.remove(&key);
+        }
+        let by_id = |id: &str| id == key;
+        if let Some(item) = self.sessions.iter_mut().find(|s| by_id(&s.id)) {
+            item.is_favorite = is_favorite;
+        }
+        for ws in &mut self.workspaces {
+            if ws.folder_path() == key {
+                ws.is_favorite = is_favorite;
+            }
+            if let Some(chat) = ws.chats.iter_mut().find(|c| by_id(&c.id)) {
+                chat.is_favorite = is_favorite;
+            }
+        }
+        self.save_state();
     }
 
     pub fn toggle_pin(&mut self, session_id: &str, cx: &mut Context<Self>) {
@@ -5028,6 +5168,7 @@ impl Store {
         self.turn_start_by_session.remove(id);
         self.user_stopped_by_session.remove(id);
         self.workspace_by_session.remove(id);
+        self.hidden_sessions.remove(id);
         self.ui.harness_by_session.remove(id);
         for ws in &mut self.ui.workspaces {
             ws.sessions.retain(|s| s != id);
@@ -5040,6 +5181,8 @@ impl Store {
         self.title_by_session.remove(id);
         self.sessions.retain(|s| s.id != id);
         self.ui.pins.remove(id);
+        // a favorite of a chat that is gone would sort nothing anywhere
+        self.ui.favorites.remove(id);
         self.drop_queue(&[id.to_string()]);
         self.drop_pending(&[id.to_string()]);
         self.drop_retries(&[id.to_string()]);
@@ -5227,7 +5370,12 @@ impl Store {
             .iter()
             .position(|r| r.session_id == session_id);
         if running {
-            if existing_index.is_none() {
+            // a background door run stays off the visible agents rail — its
+            // client watches it over the door, and a row would be churn
+            let background = self
+                .tile_for_session(session_id)
+                .is_some_and(|tile| tile.background);
+            if !background && existing_index.is_none() {
                 self.running_agents.push(RunningAgentItem {
                     session_id: session_id.to_string(),
                     parent_session_id: None,
@@ -5576,8 +5724,15 @@ impl Store {
                     self.set_running(Some(sid), false);
                     self.set_subagent_running(sid, false);
                     self.note_turn_duration(sid, cx);
+                    // a background run's turn settling must not pull its
+                    // (about to be deleted) session into the sidebar lists
+                    let background = self
+                        .tile_for_session(sid)
+                        .is_some_and(|tile| tile.background);
                     // refresh the chat list of the workspace the chat belongs to
-                    if self.session_harness(sid) == HarnessKind::Dsh {
+                    if background {
+                        // retired below, with its session deleted server-side
+                    } else if self.session_harness(sid) == HarnessKind::Dsh {
                         self.touch_server_activity(DSH_SERVER_KEY);
                         self.refresh_dsh_lists();
                     } else if let Some(idle_path) = self.workspace_by_session.get(sid).cloned() {
@@ -5607,6 +5762,9 @@ impl Store {
                         if let Some(entry) = self.ipc_runs.remove(&run) {
                             let text = self.ipc_last_assistant_text(&entry.tile_key);
                             let _ = entry.reply.send(Ok(serde_json::json!({"text": text})));
+                            if entry.background {
+                                self.retire_background_run(&sid, cx);
+                            }
                         }
                     }
                     if self.retry_due_by_session.remove(&sid) {
@@ -5660,6 +5818,12 @@ impl Store {
                         .filter(|(_, run)| run.session_id.as_deref() == Some(sid))
                         .map(|(run, _)| *run)
                         .collect();
+                    // a background chat posts nothing visible: its notes
+                    // would land on the user's own tiles once the hidden
+                    // tile retires, and the run's log already tells the door
+                    let background = self
+                        .tile_for_session(sid)
+                        .is_some_and(|tile| tile.background);
                     for run in watched {
                         match attempt {
                             Some(attempt) => {
@@ -5668,17 +5832,24 @@ impl Store {
                             None => {
                                 if let Some(entry) = self.ipc_runs.remove(&run) {
                                     let _ = entry.reply.send(Err(message.clone()));
+                                    if entry.background
+                                        && let Some(sid) = &entry.session_id
+                                    {
+                                        self.retire_background_run(sid, cx);
+                                    }
                                 }
                             }
                         }
                     }
-                    match attempt {
-                        Some(attempt) => self.post_note_for_session(
-                            sid,
-                            &format!("Connection lost — re-sending the last prompt (attempt {attempt}/{MAX_AUTO_RETRY})…"),
-                            false,
-                        ),
-                        None => self.post_note_for_session(sid, &message, true),
+                    if !background {
+                        match attempt {
+                            Some(attempt) => self.post_note_for_session(
+                                sid,
+                                &format!("Connection lost — re-sending the last prompt (attempt {attempt}/{MAX_AUTO_RETRY})…"),
+                                false,
+                            ),
+                            None => self.post_note_for_session(sid, &message, true),
+                        }
                     }
                 } else {
                     self.announce(&message, true, cx);

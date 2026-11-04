@@ -37,6 +37,9 @@ enum SidebarRow {
     Chat(crate::store::SessionItem),
     /// The italic hint under a running workspace with no chats.
     Placeholder(&'static str),
+    /// The quiet header over the folder workspaces; General sits above it
+    /// as a plain task entry, outside the section.
+    SectionLabel(&'static str),
 }
 
 /// The Settings page's sections: the design's list of four, each with its own
@@ -1009,41 +1012,11 @@ impl WarpWindow {
                     .border_b_1()
                     .border_color(theme::hairline())
                     .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_1()
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .text_size(px(fonts.font_list_title))
-                                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                                    .text_color(theme::text())
-                                    .child("Workspaces"),
-                            )
-                            .child(
-                                tip(
-                                    div()
-                                        .id("add-workspace")
-                                        .role(Role::Button)
-                                        .aria_label("Add a workspace folder")
-                                        .cursor_pointer()
-                                        .p_1p5()
-                                        .rounded(px(6.))
-                                        .hover(|s| s.bg(theme::raised()))
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            this.pick_folder(cx);
-                                        })),
-                                    "Add a workspace folder",
-                                )
-                                .child(crate::ui::icon(
-                                    "icons/plus.svg",
-                                    px(fonts.icon_medium),
-                                    theme::text_dim(),
-                                )),
-                            ),
+                        // no pane title and no add button up here: the list's
+                        // own "Tasks" and "Workspaces" labels name the groups,
+                        // and add-folder lives on the Workspaces label row
+                        summary,
                     )
-                    .child(summary)
                     .child(
                         // the kit Input has no a11y of its own — the wrapper carries the
                         // role/value; an AT click lands at the wrapper's center, which is
@@ -1061,77 +1034,75 @@ impl WarpWindow {
                     ),
             )
             .child({
-                // "nothing to show" is about real rows only: a placeholder
-                // hint inside the list is not a workspace, and with no
-                // workspaces at all (or none matching) the pane says so
-                // instead of drawing an empty virtualized list
-                let has_workspaces = rows.iter().any(|r| matches!(r, SidebarRow::Workspace(_)));
-                let hint = if filter.is_empty() {
-                    "No workspaces yet"
-                } else {
-                    "No matching workspace"
-                };
-                if !has_workspaces {
-                    div()
-                        .id("sidebar-list")
-                        .flex_1()
-                        .min_h_0()
-                        .overflow_y_scroll()
-                        .pt_1()
-                        .pb_3()
-                        .child(
-                            div()
-                                .pl(px(40.))
-                                .py_2()
-                                .text_size(px(fonts.font_meta))
-                                .italic()
-                                .text_color(theme::text_muted())
-                                .child(hint),
-                        )
-                        .into_any_element()
-                } else {
-                    uniform_list(
-                        SharedString::from("sidebar-rows"),
-                        rows.len(),
-                        cx.processor(move |this, range: std::ops::Range<usize>, _window, cx| {
-                            range
-                                .map(|ix| this.render_sidebar_row(&rows[ix], cx))
-                                .collect()
-                        }),
-                    )
-                    .id("sidebar-list")
-                    .flex_1()
-                    .min_h_0()
-                    .pt_1()
-                    .pb_3()
-                    .w_full()
-                    .into_any_element()
-                }
+                // the row list is never empty: Tasks always leads, and an
+                // empty Workspaces section shows the hint under its label
+                uniform_list(
+                    SharedString::from("sidebar-rows"),
+                    rows.len(),
+                    cx.processor(move |this, range: std::ops::Range<usize>, _window, cx| {
+                        range
+                            .map(|ix| this.render_sidebar_row(&rows[ix], cx))
+                            .collect()
+                    }),
+                )
+                .id("sidebar-list")
+                .flex_1()
+                .min_h_0()
+                .pt_1()
+                .pb_3()
+                .w_full()
+                .into_any_element()
             })
             .into_any_element()
     }
 
-    /// The sidebar as one flat row list: a workspace, the hint under an empty
-    /// one, then its chats. Flattening keeps the virtualized list indexable
-    /// while the filter still hides whole workspaces.
+    /// The sidebar as one flat row list: Tasks on its own, the Workspaces
+    /// label (with the add-folder button), then a workspace, the hint under
+    /// an empty one, and its chats. Flattening keeps the virtualized list
+    /// indexable while the filter still hides whole workspaces.
     fn sidebar_rows(&self, filter: &str, cx: &App) -> Vec<SidebarRow> {
         let mut rows = Vec::new();
+        let mut section = Vec::new();
         for ws in &self.store.read(cx).workspaces {
             if !filter.is_empty() && !ws.name.to_lowercase().contains(filter) {
                 continue;
             }
-            rows.push(SidebarRow::Workspace(ws.clone()));
-            if !ws.is_expanded() {
-                continue;
+            if ws.is_general() {
+                Self::push_workspace_rows(&mut rows, ws);
+            } else {
+                section.push(ws.clone());
             }
-            if ws.show_empty_hint() {
-                rows.push(SidebarRow::Placeholder("No chats yet"));
-            }
-            for chat in &ws.chats {
-                rows.push(SidebarRow::Chat(chat.clone()));
+        }
+        // the label always leads the section: its + is the only add-folder
+        // affordance now, so a fresh install (no folder workspaces yet)
+        // still shows it, with the hint under it
+        rows.push(SidebarRow::SectionLabel("Workspaces"));
+        if section.is_empty() {
+            rows.push(SidebarRow::Placeholder(if filter.is_empty() {
+                "No workspaces yet"
+            } else {
+                "No matching workspace"
+            }));
+        } else {
+            for ws in &section {
+                Self::push_workspace_rows(&mut rows, ws);
             }
         }
         rows
+    }
+
+    /// A workspace row, the hint under an empty one, then its chats.
+    fn push_workspace_rows(rows: &mut Vec<SidebarRow>, ws: &crate::store::WorkspaceItem) {
+        rows.push(SidebarRow::Workspace(ws.clone()));
+        if !ws.is_expanded() {
+            return;
+        }
+        if ws.show_empty_hint() {
+            rows.push(SidebarRow::Placeholder("No chats yet"));
+        }
+        for chat in &ws.chats {
+            rows.push(SidebarRow::Chat(chat.clone()));
+        }
     }
 
     /// One sidebar row, at the virtualized list's fixed pitch.
@@ -1153,6 +1124,48 @@ impl WarpWindow {
                     .child(*text)
                     .into_any_element()
             }
+            SidebarRow::SectionLabel(text) => {
+                let fonts = self.store.read(cx).fonts;
+                div()
+                    .flex_shrink_0()
+                    .w_full()
+                    .h(px(SIDEBAR_ROW_HEIGHT))
+                    .pl_4()
+                    .pr_2()
+                    .flex()
+                    .items_center()
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_size(px(fonts.font_meta))
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_color(theme::text_dim())
+                            .child(*text),
+                    )
+                    // the add-folder button lives here, on the section it adds to
+                    .child(
+                        tip(
+                            div()
+                                .id("add-workspace")
+                                .role(Role::Button)
+                                .aria_label("Add a workspace folder")
+                                .cursor_pointer()
+                                .p_1p5()
+                                .rounded(px(6.))
+                                .hover(|s| s.bg(theme::raised()))
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.pick_folder(cx);
+                                })),
+                            "Add a workspace folder",
+                        )
+                        .child(crate::ui::icon(
+                            "icons/plus.svg",
+                            px(fonts.icon_small),
+                            theme::text_dim(),
+                        )),
+                    )
+                    .into_any_element()
+            }
         }
     }
 
@@ -1163,27 +1176,28 @@ impl WarpWindow {
     ) -> gpui::AnyElement {
         let fonts = self.store.read(cx).fonts;
         let path = ws.folder_path().to_string();
-        let glyph: gpui::AnyElement = if ws.is_general() {
-            crate::ui::icon(
-                "icons/chat-outline.svg",
-                px(fonts.icon_medium),
-                theme::text_muted(),
-            )
-            .into_any_element()
+        // General is a plain task entry: no leading star, no icon — the
+        // folder glyphs are only for the Workspaces section below it
+        let glyph: Option<gpui::AnyElement> = if ws.is_general() {
+            None
         } else if ws.is_expanded() {
-            crate::ui::icon(
-                "icons/folder-open-outline.svg",
-                px(fonts.icon_medium),
-                theme::text_muted(),
+            Some(
+                crate::ui::icon(
+                    "icons/folder-open-outline.svg",
+                    px(fonts.icon_medium),
+                    theme::text_muted(),
+                )
+                .into_any_element(),
             )
-            .into_any_element()
         } else {
-            crate::ui::icon(
-                "icons/folder-outline.svg",
-                px(fonts.icon_medium),
-                theme::text_muted(),
+            Some(
+                crate::ui::icon(
+                    "icons/folder-outline.svg",
+                    px(fonts.icon_medium),
+                    theme::text_muted(),
+                )
+                .into_any_element(),
             )
-            .into_any_element()
         };
 
         let ws_store = self.store.clone();
@@ -1259,19 +1273,22 @@ impl WarpWindow {
                 },
             )
             // the star leads the row like station's repos list: filled in
-            // the accent while a favorite, dimmed until the row hover else
-            .child(star_toggle(
-                gpui::ElementId::NamedInteger("ws-star".into(), TileView::hash(&path)),
-                ws.is_favorite,
-                fonts.icon_small,
-                "wsrow",
-                move |cx| {
-                    ws_store_fav.update(cx, |s, cx| {
-                        s.toggle_workspace_favorite(&path_fav, cx)
-                    });
-                },
-            ))
-            .child(glyph)
+            // the accent while a favorite, dimmed until the row hover else.
+            // General has none — it is not favoritable
+            .when(!ws.is_general(), |d| {
+                d.child(star_toggle(
+                    gpui::ElementId::NamedInteger("ws-star".into(), TileView::hash(&path)),
+                    ws.is_favorite,
+                    fonts.icon_small,
+                    "wsrow",
+                    move |cx| {
+                        ws_store_fav.update(cx, |s, cx| {
+                            s.toggle_workspace_favorite(&path_fav, cx)
+                        });
+                    },
+                ))
+            })
+            .children(glyph)
             // no flex_1: the row packs left so the count hugs the name; a long
             // name shrinks (min_w_0) and truncates instead of pushing the
             // count to the row's far edge

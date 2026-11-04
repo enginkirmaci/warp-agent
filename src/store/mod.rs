@@ -1615,11 +1615,12 @@ fn fork_transcript(tile: &ChatTile, stop_key: usize, source_title: &str) -> Stri
 
 // ---- sidebar models ------------------------------------------------------
 
-/// Sidebar display name for a workspace folder: "General" for the built-in
-/// workspace, otherwise the folder's basename.
+/// Sidebar display name for a workspace folder: "Tasks" for the built-in
+/// workspace (general-purpose chats; it leads the sidebar as a plain task
+/// entry), otherwise the folder's basename.
 fn workspace_display_name(path: &str) -> String {
     if path == crate::paths::AppPaths::general_workspace_path().to_string_lossy() {
-        return "General".to_string();
+        return "Tasks".to_string();
     }
     std::path::Path::new(path)
         .file_name()
@@ -1629,9 +1630,9 @@ fn workspace_display_name(path: &str) -> String {
         .to_string()
 }
 
-/// Sort key: General leads, then favorites, the rest alphabetical by name
+/// Sort key: Tasks leads, then favorites, the rest alphabetical by name
 /// (case-insensitive). Single-sourced so every workspace-list sort keeps
-/// General on top.
+/// Tasks on top.
 fn workspace_order_key(
     path: &str,
     favorites: &std::collections::HashMap<String, bool>,
@@ -1644,7 +1645,7 @@ fn workspace_order_key(
     )
 }
 
-/// Sidebar order: General leads, then favorites, the rest alphabetical.
+/// Sidebar order: Tasks leads, then favorites, the rest alphabetical.
 fn sort_workspaces(
     workspaces: &mut [WorkspaceState],
     favorites: &std::collections::HashMap<String, bool>,

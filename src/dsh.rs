@@ -171,6 +171,10 @@ impl DshHandle {
                 token: token.to_string(),
                 http: reqwest::Client::builder()
                     .redirect(reqwest::redirect::Policy::none())
+                    // a unary RPC must not hang a request task forever; the
+                    // SMS/event stream is a WebSocket and is not affected
+                    .connect_timeout(Duration::from_secs(8))
+                    .timeout(Duration::from_secs(120))
                     .build()
                     .unwrap_or_default(),
                 cookie: RwLock::new(String::new()),
@@ -241,6 +245,7 @@ impl DshHandle {
         self.inner
             .http
             .get(format!("{}/", self.inner.base_url))
+            .timeout(Duration::from_secs(5))
             .send()
             .await
             .is_ok()

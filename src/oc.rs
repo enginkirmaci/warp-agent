@@ -305,7 +305,11 @@ impl ServerProcess {
 
 async fn is_healthy(client: &reqwest::Client, base_url: &str) -> bool {
     matches!(
-        client.get(format!("{base_url}/global/health")).send().await,
+        client
+            .get(format!("{base_url}/global/health"))
+            .timeout(std::time::Duration::from_secs(5))
+            .send()
+            .await,
         Ok(resp) if resp.status().is_success()
     )
 }
@@ -324,21 +328,37 @@ pub fn find_free_port() -> Result<u16> {
 // a fresh pool + TLS config per request.
 #[derive(Clone)]
 pub struct ApiClient {
-    http: reqwest::Client,
+    /// The `/event` SSE connection: no total timeout (it lives as long as the
+    /// session), only a bounded connect phase.
+    stream_http: reqwest::Client,
+    /// Short REST calls: bounded end to end so a wedged server cannot leave a
+    /// tile loading forever (audit B11). The two long POSTs override this with
+    /// their own 600 s timeout.
+    rest: reqwest::Client,
     pub base_url: String,
 }
 
 impl ApiClient {
     pub fn new(base_url: &str) -> Self {
+        let stream_http = reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .build()
+            .unwrap_or_default();
+        let rest = reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .timeout(std::time::Duration::from_secs(60))
+            .build()
+            .unwrap_or_default();
         Self {
-            http: reqwest::Client::builder().build().unwrap_or_default(),
+            stream_http,
+            rest,
             base_url: base_url.trim_end_matches('/').to_string(),
         }
     }
 
     pub async fn create_session(&self, title: &str) -> Result<SessionInfo> {
         let resp = self
-            .http
+            .rest
             .post(format!("{}/session", self.base_url))
             .json(&json!({ "title": title }))
             .send()
@@ -349,7 +369,7 @@ impl ApiClient {
 
     pub async fn list_sessions(&self) -> Result<Vec<SessionInfo>> {
         let resp = self
-            .http
+            .rest
             .get(format!("{}/session", self.base_url))
             .send()
             .await?;
@@ -362,7 +382,7 @@ impl ApiClient {
 
     pub async fn get_messages(&self, session_id: &str) -> Result<Vec<StoredMessage>> {
         let resp = self
-            .http
+            .rest
             .get(format!("{}/session/{}/message", self.base_url, session_id))
             .send()
             .await?;
@@ -400,7 +420,7 @@ impl ApiClient {
 
     pub async fn rename_session(&self, session_id: &str, title: &str) -> Result<SessionInfo> {
         let resp = self
-            .http
+            .rest
             .patch(format!("{}/session/{}", self.base_url, session_id))
             .json(&json!({ "title": title }))
             .send()
@@ -411,7 +431,7 @@ impl ApiClient {
 
     pub async fn delete_session(&self, session_id: &str) -> Result<()> {
         let resp = self
-            .http
+            .rest
             .delete(format!("{}/session/{}", self.base_url, session_id))
             .send()
             .await?;
@@ -420,7 +440,7 @@ impl ApiClient {
 
     pub async fn abort(&self, session_id: &str) -> Result<()> {
         let resp = self
-            .http
+            .rest
             .post(format!("{}/session/{}/abort", self.base_url, session_id))
             .json(&json!({}))
             .send()
@@ -465,7 +485,7 @@ impl ApiClient {
             body["agent"] = json!(agent);
         }
         let resp = self
-            .http
+            .rest
             .post(format!("{}/session/{}/message", self.base_url, session_id))
             .json(&body)
             .timeout(Duration::from_secs(600))
@@ -518,7 +538,7 @@ impl ApiClient {
             body["parts"] = json!(parts);
         }
         let resp = self
-            .http
+            .rest
             .post(format!("{}/session/{}/command", self.base_url, session_id))
             .json(&body)
             .timeout(Duration::from_secs(600))
@@ -534,7 +554,7 @@ impl ApiClient {
         response: &str,
     ) -> Result<()> {
         let resp = self
-            .http
+            .rest
             .post(format!(
                 "{}/session/{}/permissions/{}",
                 self.base_url, session_id, permission_id
@@ -547,7 +567,7 @@ impl ApiClient {
 
     pub async fn reply_v2(&self, request_id: &str, reply: &str) -> Result<()> {
         let resp = self
-            .http
+            .rest
             .post(format!("{}/permission/{}/reply", self.base_url, request_id))
             .json(&json!({ "reply": reply }))
             .send()
@@ -557,7 +577,7 @@ impl ApiClient {
 
     pub async fn get_questions(&self) -> Result<Vec<QuestionRequestInfo>> {
         let resp = self
-            .http
+            .rest
             .get(format!("{}/question", self.base_url))
             .send()
             .await?;
@@ -570,7 +590,7 @@ impl ApiClient {
 
     pub async fn reply_question(&self, request_id: &str, answers: &[Vec<String>]) -> Result<()> {
         let resp = self
-            .http
+            .rest
             .post(format!("{}/question/{}/reply", self.base_url, request_id))
             .json(&json!({ "answers": answers }))
             .send()
@@ -580,7 +600,7 @@ impl ApiClient {
 
     pub async fn reject_question(&self, request_id: &str) -> Result<()> {
         let resp = self
-            .http
+            .rest
             .post(format!("{}/question/{}/reject", self.base_url, request_id))
             .json(&json!({}))
             .send()
@@ -590,7 +610,7 @@ impl ApiClient {
 
     pub async fn get_agents(&self) -> Result<Vec<AgentInfo>> {
         let resp = self
-            .http
+            .rest
             .get(format!("{}/agent", self.base_url))
             .send()
             .await?;
@@ -614,7 +634,7 @@ impl ApiClient {
     /// The server's slash commands and skills, in server order.
     pub async fn get_commands(&self) -> Result<Vec<CommandInfo>> {
         let resp = self
-            .http
+            .rest
             .get(format!("{}/command", self.base_url))
             .send()
             .await?;
@@ -648,7 +668,7 @@ impl ApiClient {
     /// source); paths come back as the server reports them, usually relative.
     pub async fn find_files(&self, query: &str) -> Result<Vec<String>> {
         let resp = self
-            .http
+            .rest
             .get(format!("{}/find/file", self.base_url))
             .query(&[("query", query)])
             .send()
@@ -668,7 +688,7 @@ impl ApiClient {
     /// section lists the workspace's configured MCP servers.
     pub async fn get_config(&self) -> Result<Value> {
         let resp = self
-            .http
+            .rest
             .get(format!("{}/config", self.base_url))
             .send()
             .await?;
@@ -684,7 +704,7 @@ impl ApiClient {
     /// vanished from config between listing and acting — still a success.
     pub async fn mcp_connect(&self, name: &str) -> Result<()> {
         let resp = self
-            .http
+            .rest
             .post(format!("{}/mcp/{}/connect", self.base_url, name))
             .json(&json!({}))
             .send()
@@ -697,7 +717,7 @@ impl ApiClient {
 
     pub async fn mcp_disconnect(&self, name: &str) -> Result<()> {
         let resp = self
-            .http
+            .rest
             .post(format!("{}/mcp/{}/disconnect", self.base_url, name))
             .json(&json!({}))
             .send()
@@ -710,7 +730,7 @@ impl ApiClient {
 
     pub async fn get_models(&self) -> Result<Vec<ModelInfo>> {
         let resp = self
-            .http
+            .rest
             .get(format!("{}/config/providers", self.base_url))
             .send()
             .await?;
@@ -760,7 +780,7 @@ impl ApiClient {
     ) -> Result<()> {
         use futures_util::StreamExt as _;
         let resp = self
-            .http
+            .stream_http
             .get(format!("{}/event", self.base_url))
             .send()
             .await?;
@@ -1565,7 +1585,7 @@ async fn start_workspace(
                 }
                 let healthy = tokio::select! {
                     _ = stop_rx.recv() => return,
-                    healthy = is_healthy(&pump_client.http, &pump_client.base_url) => healthy,
+                    healthy = is_healthy(&pump_client.stream_http, &pump_client.base_url) => healthy,
                 };
                 if healthy {
                     break;
@@ -1598,7 +1618,7 @@ async fn start_workspace(
             }
             let healthy = tokio::select! {
                 _ = stop_rx.recv() => return,
-                healthy = is_healthy(&poll_client.http, &poll_client.base_url) => healthy,
+                healthy = is_healthy(&poll_client.stream_http, &poll_client.base_url) => healthy,
             };
             let _ = poll_tx
                 .send(UiEvent::HealthChanged {

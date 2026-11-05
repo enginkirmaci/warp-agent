@@ -19,26 +19,31 @@ pub(crate) fn plain_path(path: &std::path::Path) -> std::path::PathBuf {
     path.to_path_buf()
 }
 
+/// Spawn a launcher nobody owns the lifetime of, and reap it on a detached
+/// thread: dropping the `Child` leaves a zombie on Unix until this process
+/// exits (audit B13).
+fn spawn_detached(mut command: std::process::Command) -> std::io::Result<()> {
+    let mut child = command.spawn()?;
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
+    Ok(())
+}
+
 /// Opens a folder in the platform file manager: explorer on Windows, xdg-open elsewhere.
 pub fn open_folder(path: &str) -> Result<(), String> {
     #[cfg(windows)]
     let mut command = std::process::Command::new("explorer");
     #[cfg(not(windows))]
     let mut command = std::process::Command::new("xdg-open");
-    command
-        .arg(path)
-        .spawn()
-        .map(|_| ())
-        .map_err(|err| err.to_string())
+    command.arg(path);
+    spawn_detached(command).map_err(|err| err.to_string())
 }
 
 /// Launches a sibling Warp app by the binary name the suite installs. The
 /// window is the other app's; this process only hands it over.
 pub fn launch_sibling(binary: &str) -> Result<(), String> {
-    std::process::Command::new(binary)
-        .spawn()
-        .map(|_| ())
-        .map_err(|err| err.to_string())
+    spawn_detached(std::process::Command::new(binary)).map_err(|err| err.to_string())
 }
 
 /// Hooks the store up to scale changes; each one re-reads the ladder and

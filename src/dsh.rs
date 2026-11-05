@@ -308,7 +308,7 @@ impl DshHandle {
     /// Opens (once) the follow stream for a session and waits for its snapshot
     /// so history can be read from the folded state.
     pub async fn messages(&self, session_id: &str) -> Result<Vec<StoredMessage>> {
-        self.ensure_follow(session_id)?;
+        self.ensure_follow(session_id).await?;
         let deadline = std::time::Instant::now() + SNAPSHOT_WAIT;
         loop {
             {
@@ -332,7 +332,7 @@ impl DshHandle {
 
     /// Opens the follow stream for a session if it is not open yet. Frames
     /// arrive on the pump; the state entry existing is what "open" means here.
-    pub fn ensure_follow(&self, session_id: &str) -> Result<()> {
+    pub async fn ensure_follow(&self, session_id: &str) -> Result<()> {
         {
             let mut sessions = self.inner.sessions.lock().expect("dsh sessions");
             let exists = sessions.contains_key(session_id);
@@ -352,14 +352,16 @@ impl DshHandle {
                 "maxMessages": 120,
             } } },
         });
-        self.send_ws_frame(&frame)
+        self.send_ws_frame(&frame).await
     }
 
-    fn send_ws_frame(&self, frame: &Value) -> Result<()> {
-        // bounded channel to the pump; a closed channel means the pump is gone
+    async fn send_ws_frame(&self, frame: &Value) -> Result<()> {
+        // bounded channel to the pump; `.send().await` (not send_blocking)
+        // keeps a full channel from stalling a tokio worker (audit B5)
         self.inner
             .ws_tx
-            .send_blocking(frame.to_string())
+            .send(frame.to_string())
+            .await
             .map_err(|_| anyhow!("dsh stream pump is not running"))
     }
 
@@ -454,8 +456,13 @@ impl DshHandle {
         .map(|_| ())
     }
 
-    /// Re-opens every stream the connection generation needs after a reconnect.
-    fn reopen_streams(&self) -> Result<()> {
+    /// Clears every folded snapshot for a new connection generation and returns
+    /// the session ids whose follow streams the pump must reopen. The pump
+    /// writes those frames on its own socket: routing them back through the
+    /// bounded outbound channel would wait on the pump to drain a channel it
+    /// is the only reader of, deadlocking once a reconnect needs more frames
+    /// than the channel holds (audit B5).
+    fn reconnect_sessions(&self) -> Vec<String> {
         let session_ids: Vec<String> = self
             .inner
             .sessions
@@ -474,22 +481,7 @@ impl DshHandle {
                 }
             }
         }
-        self.send_ws_frame(&json!({
-            "type": "open", "streamId": "events", "endpoint": "$events", "payload": { "args": {} },
-        }))?;
-        for id in &session_ids {
-            let frame = json!({
-                "type": "open",
-                "streamId": follow_stream_id(id),
-                "endpoint": "session/follow",
-                "payload": { "args": { "request": {
-                    "address": { "kind": "session", "sessionId": id },
-                    "maxMessages": 120,
-                } } },
-            });
-            self.send_ws_frame(&frame)?;
-        }
-        Ok(())
+        session_ids
     }
 }
 
@@ -545,7 +537,7 @@ pub async fn run_request(handle: &DshHandle, ws_key: String, request: ApiRequest
             UiEvent::CommandsLoaded { ws_key, result }
         }
         ApiRequest::GetMessages { session_id } => {
-            handle.ensure_follow(&session_id).ok();
+            handle.ensure_follow(&session_id).await.ok();
             let result = handle.messages(&session_id).await;
             UiEvent::MessagesLoaded {
                 ws_key,
@@ -719,7 +711,7 @@ async fn create_session(
         .and_then(Value::as_str)
         .ok_or_else(|| anyhow!("dsh session/create returned no sessionId"))?
         .to_string();
-    handle.ensure_follow(&id).ok();
+    handle.ensure_follow(&id).await.ok();
     Ok(SessionInfo {
         id,
         title: "New chat".into(),
@@ -929,7 +921,7 @@ pub async fn send_message(
             }
         }
     }
-    handle.ensure_follow(session_id).ok();
+    handle.ensure_follow(session_id).await.ok();
     let mut content = Vec::new();
     // images first, matching the reference clients' ordering
     for (file_name, mime, data) in attachments {
@@ -1669,15 +1661,42 @@ pub async fn run_pump(
             })
             .await;
 
-        // 3) open the streams this generation needs
-        if let Err(err) = handle.reopen_streams() {
-            tracing::warn!("[{ws_key}] dsh stream open failed: {err:#}");
-        }
-
+        // 3) Open the streams this generation needs straight on this socket:
+        // the pump is the only reader of the bounded outbound channel, so
+        // queueing its own reopen frames there would deadlock once the
+        // generation needs more frames than the channel holds (audit B5).
+        while outbound.try_recv().is_ok() {}
+        let session_ids = handle.reconnect_sessions();
         let (mut sink, mut stream) = socket.split();
         let started = std::time::Instant::now();
-        loop {
-            tokio::select! {
+        let mut opened = true;
+        let frames = std::iter::once(json!({
+            "type": "open", "streamId": "events", "endpoint": "$events", "payload": { "args": {} },
+        }))
+        .chain(session_ids.iter().map(|id| {
+            json!({
+                "type": "open",
+                "streamId": follow_stream_id(id),
+                "endpoint": "session/follow",
+                "payload": { "args": { "request": {
+                    "address": { "kind": "session", "sessionId": id },
+                    "maxMessages": 120,
+                } } },
+            })
+        }));
+        for frame in frames {
+            if sink
+                .send(Message::Text(frame.to_string().into()))
+                .await
+                .is_err()
+            {
+                opened = false;
+                break;
+            }
+        }
+        if opened {
+            loop {
+                tokio::select! {
                 _ = stop.recv() => return,
                 frame = outbound.recv() => {
                     match frame {
@@ -1708,6 +1727,7 @@ pub async fn run_pump(
                     };
                     let Ok(frame) = serde_json::from_str::<Value>(&message) else { continue };
                     dispatch_frame(&handle, &ws_key, &event_tx, &frame);
+                }
                 }
             }
         }

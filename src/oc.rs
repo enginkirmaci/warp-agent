@@ -13,7 +13,7 @@
 use anyhow::{Context as _, Result, anyhow};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -207,6 +207,18 @@ impl ServerProcess {
         // for the console-subsystem child process
         #[cfg(windows)]
         command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+        // A process quit races the net thread's StopServer: on Linux the
+        // child must die with us instead of surviving as an orphan that keeps
+        // its port and memory (audit B4).
+        #[cfg(target_os = "linux")]
+        unsafe {
+            command.pre_exec(|| {
+                if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
 
         let mut child = command
             .spawn()
@@ -1217,7 +1229,13 @@ async fn net_main(
     command_rx: async_channel::Receiver<NetCommand>,
     event_tx: async_channel::Sender<UiEvent>,
 ) {
-    let mut workspaces: HashMap<String, WorkspaceNet> = HashMap::new();
+    // Server boots run in their own tasks (audit B3), so the map is shared
+    // with them; a boot in flight is tracked separately so a duplicate start
+    // request does not spawn a second child, and a stop can cancel it.
+    let workspaces: Arc<Mutex<HashMap<String, WorkspaceNet>>> =
+        Arc::new(Mutex::new(HashMap::new()));
+    let starting: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
+    let start_cancelled: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
     // the DevTools door rides this runtime; a bind failure logs and the app
     // keeps working — the door is an integration, not a dependency
     let (door_tx, _) = tokio::sync::broadcast::channel::<String>(64);
@@ -1236,41 +1254,92 @@ async fn net_main(
                 executable,
                 folder,
             } => {
-                let event_tx = event_tx.clone();
-                // sequential spawn keeps one workspace's failed start from racing others
-                match start_workspace(
-                    &mut workspaces,
-                    &ws_key,
-                    kind,
-                    &executable,
-                    &folder,
-                    &event_tx,
-                )
-                .await
-                {
-                    Ok(()) => {
-                        // async_channel::send is a future — dropping it without
-                        // awaiting silently discards the event
-                        let _ = event_tx
-                            .send(UiEvent::ServerStarted {
-                                ws_key: ws_key.clone(),
-                                result: Ok(()),
-                            })
-                            .await;
-                    }
-                    Err(err) => {
-                        workspaces.remove(&ws_key);
-                        let _ = event_tx
-                            .send(UiEvent::ServerStarted {
-                                ws_key,
-                                result: Err(anyhow!("{err}")),
-                            })
-                            .await;
-                    }
+                // A boot can take 25–40 s; awaiting it here froze every other
+                // command behind it, and StopServer could not even cancel it
+                // (audit B3). Spawn it and keep the lane free.
+                let running = workspaces.lock().expect("workspaces").contains_key(&ws_key);
+                if running {
+                    continue;
                 }
+                let claimed = {
+                    let mut starting = starting.lock().expect("starting");
+                    if starting.contains(&ws_key) {
+                        // a boot is already in flight; a fresh start request
+                        // clears a stop that raced it, so that boot lands
+                        start_cancelled
+                            .lock()
+                            .expect("start cancellation")
+                            .remove(&ws_key);
+                        false
+                    } else {
+                        start_cancelled
+                            .lock()
+                            .expect("start cancellation")
+                            .remove(&ws_key);
+                        starting.insert(ws_key.clone())
+                    }
+                };
+                if !claimed {
+                    continue;
+                }
+                let workspaces = Arc::clone(&workspaces);
+                let starting = Arc::clone(&starting);
+                let cancelled = Arc::clone(&start_cancelled);
+                let event_tx = event_tx.clone();
+                tokio::spawn(async move {
+                    let result =
+                        start_workspace(&ws_key, kind, &executable, &folder, &event_tx).await;
+                    starting.lock().expect("starting").remove(&ws_key);
+                    // a stop that landed while booting wins: tear the child
+                    // down and stay silent (StopServer already announced)
+                    if cancelled
+                        .lock()
+                        .expect("start cancellation")
+                        .remove(&ws_key)
+                    {
+                        if let Ok(mut workspace) = result {
+                            if let Some(stop) = workspace.event_stop.take() {
+                                stop.close();
+                            }
+                            if let Some(process) = workspace.process.as_mut() {
+                                process.stop();
+                            }
+                        }
+                        return;
+                    }
+                    match result {
+                        Ok(workspace) => {
+                            workspaces
+                                .lock()
+                                .expect("workspaces")
+                                .insert(ws_key.clone(), workspace);
+                            let _ = event_tx
+                                .send(UiEvent::ServerStarted {
+                                    ws_key,
+                                    result: Ok(()),
+                                })
+                                .await;
+                        }
+                        Err(err) => {
+                            let _ = event_tx
+                                .send(UiEvent::ServerStarted {
+                                    ws_key,
+                                    result: Err(anyhow!("{err}")),
+                                })
+                                .await;
+                        }
+                    }
+                });
             }
             NetCommand::StopServer { ws_key } => {
-                if let Some(ws) = workspaces.get_mut(&ws_key) {
+                // a boot in flight has no map entry yet: remember the stop for
+                // the task to honour as soon as its start returns
+                start_cancelled
+                    .lock()
+                    .expect("start cancellation")
+                    .insert(ws_key.clone());
+                let workspace = workspaces.lock().expect("workspaces").remove(&ws_key);
+                if let Some(mut ws) = workspace {
                     // close (not a single token): every task selecting on this
                     // channel — event pump and health poll — wakes and exits
                     if let Some(stop) = ws.event_stop.take() {
@@ -1280,24 +1349,30 @@ async fn net_main(
                         process.stop();
                     }
                 }
-                workspaces.remove(&ws_key);
                 let _ = event_tx.send(UiEvent::ServerStopped).await;
             }
             NetCommand::Request { ws_key, request } => {
-                let Some(ws) = workspaces.get(&ws_key) else {
+                // clone the runner out of the map before any await: the lock
+                // must never be held across a request
+                let target = {
+                    let workspaces = workspaces.lock().expect("workspaces");
+                    workspaces
+                        .get(&ws_key)
+                        .map(|ws| (ws.kind, ws.api.clone(), ws.dsh.clone()))
+                };
+                let Some((kind, client, handle)) = target else {
                     continue;
                 };
                 let event_tx = event_tx.clone();
-                match ws.kind {
+                match kind {
                     HarnessKind::OpenCode => {
-                        let client = ws.api.clone();
                         tokio::spawn(async move {
                             let event = run_request(&client, ws_key, request).await;
                             let _ = event_tx.send(event).await;
                         });
                     }
                     HarnessKind::Dsh => {
-                        let Some(handle) = ws.dsh.clone() else {
+                        let Some(handle) = handle else {
                             continue;
                         };
                         tokio::spawn(async move {
@@ -1317,7 +1392,13 @@ async fn net_main(
                 attachments,
                 command,
             } => {
-                let Some(ws) = workspaces.get(&ws_key) else {
+                let target = {
+                    let workspaces = workspaces.lock().expect("workspaces");
+                    workspaces
+                        .get(&ws_key)
+                        .map(|ws| (ws.kind, ws.api.clone(), ws.dsh.clone()))
+                };
+                let Some((kind, client, handle)) = target else {
                     // don't drop silently — the tile would sit "running" forever
                     let _ = event_tx
                         .send(UiEvent::MessageSendFailed {
@@ -1328,9 +1409,8 @@ async fn net_main(
                     continue;
                 };
                 let event_tx = event_tx.clone();
-                match ws.kind {
+                match kind {
                     HarnessKind::OpenCode => {
-                        let client = ws.api.clone();
                         tokio::spawn(async move {
                             send_with_blips(
                                 &client,
@@ -1347,7 +1427,7 @@ async fn net_main(
                         });
                     }
                     HarnessKind::Dsh => {
-                        let Some(handle) = ws.dsh.clone() else {
+                        let Some(handle) = handle else {
                             let _ = event_tx
                                 .send(UiEvent::MessageSendFailed {
                                     session_id: session_id.clone(),
@@ -1385,9 +1465,18 @@ async fn net_main(
             }
         }
     }
-    // shutdown: kill every spawned server
-    for (_, mut ws) in workspaces {
-        if let Some(process) = ws.process.as_mut() {
+    // shutdown: stop every spawned server and its pump
+    let remaining: Vec<WorkspaceNet> = workspaces
+        .lock()
+        .expect("workspaces")
+        .drain()
+        .map(|(_, workspace)| workspace)
+        .collect();
+    for mut workspace in remaining {
+        if let Some(stop) = workspace.event_stop.take() {
+            stop.close();
+        }
+        if let Some(process) = workspace.process.as_mut() {
             process.stop();
         }
     }
@@ -1397,21 +1486,12 @@ async fn net_main(
 }
 
 async fn start_workspace(
-    workspaces: &mut HashMap<String, WorkspaceNet>,
     ws_key: &str,
     kind: HarnessKind,
     executable: &str,
     folder: &str,
     event_tx: &async_channel::Sender<UiEvent>,
-) -> Result<()> {
-    if workspaces
-        .get(ws_key)
-        .map(|ws| ws.process.is_some())
-        .unwrap_or(false)
-    {
-        // already running: reuse
-        return Ok(());
-    }
+) -> Result<WorkspaceNet> {
     let port = find_free_port()?;
     let log_tx = event_tx.clone();
     let key = ws_key.to_string();
@@ -1481,17 +1561,13 @@ async fn start_workspace(
                 }
             }
         });
-        workspaces.insert(
-            ws_key.to_string(),
-            WorkspaceNet {
-                kind,
-                process: Some(process),
-                api,
-                dsh: Some(handle),
-                event_stop: Some(stop_tx),
-            },
-        );
-        return Ok(());
+        return Ok(WorkspaceNet {
+            kind,
+            process: Some(process),
+            api,
+            dsh: Some(handle),
+            event_stop: Some(stop_tx),
+        });
     }
 
     // event pump + health poll; both select on the same stop channel, closed
@@ -1633,17 +1709,13 @@ async fn start_workspace(
         }
     });
 
-    workspaces.insert(
-        ws_key.to_string(),
-        WorkspaceNet {
-            kind,
-            process: Some(process),
-            api,
-            dsh: None,
-            event_stop: Some(stop_tx),
-        },
-    );
-    Ok(())
+    Ok(WorkspaceNet {
+        kind,
+        process: Some(process),
+        api,
+        dsh: None,
+        event_stop: Some(stop_tx),
+    })
 }
 
 /// opencode send with the quiet connect-blip retry (a failure in the connect

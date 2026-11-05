@@ -138,6 +138,15 @@ pub struct TileView {
     pinned: bool,
     last_max: Pixels,
     expanded: HashSet<String>, // fold state by item id
+    /// Bumped on every fold toggle: `expanded` is unordered, so the cache-key
+    /// fingerprint hashes this counter instead of the set.
+    fold_rev: u64,
+    /// The cache keys handed to `prune_caches` last time and the content
+    /// fingerprint they were built from. A repaint with no content change
+    /// (caret, scroll, resize) reuses both instead of building a set of
+    /// Strings per frame (audit B7).
+    live_keys: HashSet<String>,
+    live_fingerprint: Option<u64>,
     picker: Option<PickerKind>,
     /// the composer model dropdown as its own entity: filter typing repaints
     /// only the picker (see FilteredPicker::overlay); created on first open
@@ -621,6 +630,9 @@ impl TileView {
             pinned: true,
             last_max: px(0.),
             expanded: HashSet::new(),
+            fold_rev: 0,
+            live_keys: HashSet::new(),
+            live_fingerprint: None,
             picker: None,
             model_picker: None,
             menu: None,
@@ -1470,6 +1482,7 @@ impl TileView {
                     // or the expanded content lands above the viewport
                     this.pinned = false;
                 }
+                this.fold_rev = this.fold_rev.wrapping_add(1);
                 cx.notify();
             }))
             .child(crate::ui::icon(
@@ -3809,6 +3822,41 @@ impl TileView {
             focus.dispatch_action(&Escape, window, cx);
         }
     }
+    /// A cheap content fingerprint for the cache-prune key set: item ids,
+    /// the tool/question keys derived from them, attachments and the fold
+    /// revision. Text changes under the same ids do not move it (the prune
+    /// set is about which keys exist, not their contents).
+    fn live_fingerprint(
+        items: &[(String, std::sync::Arc<ChatItem>)],
+        visible_tools: &HashSet<String>,
+        attachments: &[crate::store::AttachmentItem],
+        fold_rev: u64,
+    ) -> u64 {
+        use std::hash::{Hash as _, Hasher as _};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        for (id, item) in items {
+            id.hash(&mut hasher);
+            match item.as_ref() {
+                ChatItem::Tool(tool) => {
+                    true.hash(&mut hasher);
+                    visible_tools.contains(id).hash(&mut hasher);
+                    tool.has_details().hash(&mut hasher);
+                }
+                ChatItem::Question(question) => {
+                    false.hash(&mut hasher);
+                    question.questions.len().hash(&mut hasher);
+                    question.resolution.is_some().hash(&mut hasher);
+                }
+                _ => 0u8.hash(&mut hasher),
+            }
+        }
+        attachments.len().hash(&mut hasher);
+        for attachment in attachments {
+            attachment.key.hash(&mut hasher);
+        }
+        fold_rev.hash(&mut hasher);
+        hasher.finish()
+    }
 }
 
 impl Render for TileView {
@@ -3991,35 +4039,46 @@ impl Render for TileView {
             idx += 1;
         }
         let transcript_empty = items.is_empty();
-        // cache entries only live as long as the transcript/composer entries
-        // they serve; question inputs die with their question
-        let mut live: HashSet<String> = items.iter().map(|(id, _)| id.clone()).collect();
-        // sub-surface texts key off derived ids — keep those too;
-        // members hidden inside a collapsed tool group are not mounted
-        for (id, item) in &items {
-            match item.as_ref() {
-                ChatItem::Tool(tool) => {
-                    if !visible_tools.contains(id) {
-                        continue;
+        // Cache entries only live as long as the transcript/composer entries
+        // they serve; question inputs die with their question. Building the
+        // key set costs a String per item plus a format! per sub-surface, so
+        // it is rebuilt only when the content fingerprint moves — caret
+        // blinks, scrolling and resizes reuse it.
+        let fingerprint =
+            Self::live_fingerprint(&items, &visible_tools, &snap.attachments, self.fold_rev);
+        if self.live_fingerprint != Some(fingerprint) {
+            let mut live: HashSet<String> = items.iter().map(|(id, _)| id.clone()).collect();
+            for (id, item) in &items {
+                match item.as_ref() {
+                    ChatItem::Tool(tool) => {
+                        if !visible_tools.contains(id) {
+                            continue;
+                        }
+                        live.insert(format!("{id}:title"));
+                        if tool.has_details() {
+                            live.insert(format!("{id}:details"));
+                        }
                     }
-                    live.insert(format!("{id}:title"));
-                    if tool.has_details() {
-                        live.insert(format!("{id}:details"));
+                    ChatItem::Question(q) => {
+                        for qi in 0..q.questions.len() {
+                            live.insert(format!("{id}#{qi}"));
+                        }
+                        if q.resolution.is_some() {
+                            live.insert(format!("{id}:res"));
+                        }
                     }
+                    _ => {}
                 }
-                ChatItem::Question(q) => {
-                    for qi in 0..q.questions.len() {
-                        live.insert(format!("{id}#{qi}"));
-                    }
-                    if q.resolution.is_some() {
-                        live.insert(format!("{id}:res"));
-                    }
-                }
-                _ => {}
             }
+            live.extend(snap.attachments.iter().map(|a| format!("att{}", a.key)));
+            self.live_keys = live;
+            self.live_fingerprint = Some(fingerprint);
+            // prune only when the set can have changed; `live_keys` is taken
+            // out so the &mut self call does not see it borrowed
+            let live = std::mem::take(&mut self.live_keys);
+            self.prune_caches(&live, window, cx);
+            self.live_keys = live;
         }
-        live.extend(snap.attachments.iter().map(|a| format!("att{}", a.key)));
-        self.prune_caches(&live, window, cx);
         self.question_inputs
             .retain(|k, _| self.question_keys_seen.contains(k));
 

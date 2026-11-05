@@ -55,10 +55,11 @@ use crate::ui::markdown::render_markdown;
 use crate::ui::tooltip::tip;
 use gpui::prelude::*;
 use gpui::{
-    AccessibleAction, Animation, AnimationExt as _, App, Context, Entity, Focusable, ImageFormat,
-    MouseButton, Pixels, Render, Role, ScrollHandle, SharedString, Toggled, Window, actions,
-    canvas, div, img, px, relative,
+    AccessibleAction, Animation, AnimationExt as _, App, Bounds, Context, Entity, Focusable,
+    ImageFormat, MouseButton, Pixels, Render, Role, ScrollHandle, SharedString, Toggled, Window,
+    actions, canvas, div, img, px, relative,
 };
+use gpui_kit::base::ElementExt as _;
 use gpui_kit::component::input::{
     Enter, Escape, InputEvent, InputState, MoveDown, MoveUp, Position, TextareaState,
 };
@@ -100,6 +101,7 @@ enum SuggestMode {
     Files,
 }
 
+#[derive(Clone, Copy)]
 enum PickerKind {
     Model,
     Variant,
@@ -144,6 +146,16 @@ pub struct TileView {
     /// window-space bounds of the tile root, captured each paint; converts
     /// click positions into tile-local menu coordinates
     origin: std::rc::Rc<std::cell::Cell<(f32, f32, f32, f32)>>,
+    /// window-space bounds of the composer pills, captured at prepaint (one
+    /// per PickerKind) so a dropdown opens against its own pill instead of
+    /// the tile's corner
+    pill_bounds: [std::rc::Rc<std::cell::Cell<Option<gpui::Bounds<Pixels>>>>; 3],
+    /// window-space bounds of the composer frame, so a dropdown opens above
+    /// the whole composer instead of over its input
+    composer_bounds: std::rc::Rc<std::cell::Cell<Option<Bounds<Pixels>>>>,
+    /// where the open variant/agent dropdown sits in the tile: its left edge
+    /// and the distance from the tile's bottom to its bottom edge
+    picker_placement: Option<(Pixels, Pixels)>,
     composer: Entity<TextareaState>,
     /// the same textarea state wrapped in a leaf view: a keystroke notifies
     /// TextareaState, and any view that read the entity during its render
@@ -616,6 +628,9 @@ impl TileView {
             model_picker: None,
             menu: None,
             origin: std::rc::Rc::new(std::cell::Cell::new((0., 0., 0., 0.))),
+            pill_bounds: std::array::from_fn(|_| std::rc::Rc::new(std::cell::Cell::new(None))),
+            composer_bounds: std::rc::Rc::new(std::cell::Cell::new(None)),
+            picker_placement: None,
             composer,
             composer_field,
             composer_focused: false,
@@ -632,6 +647,41 @@ impl TileView {
             md_editors: HashMap::new(),
             img_cache: HashMap::new(),
         }
+    }
+
+    /// The pill's and the tile's window bounds: what a dropdown needs to
+    /// open against its own pill. Both come from the last painted frame.
+    fn picker_bounds(&self, kind: PickerKind) -> Option<(Bounds<Pixels>, Bounds<Pixels>)> {
+        let pill = self.pill_bounds[kind as usize].get()?;
+        let (x, y, w, h) = self.origin.get();
+        if w <= 0. || h <= 0. {
+            return None;
+        }
+        // the card is left-aligned with its pill but clears the whole
+        // composer: its bottom edge rides the composer frame's top, so the
+        // dropdown never covers the input the user is about to type in
+        let top = self
+            .composer_bounds
+            .get()
+            .map_or(pill.origin.y, |frame| frame.origin.y);
+        let trigger = Bounds {
+            origin: gpui::point(pill.origin.x, top),
+            size: pill.size,
+        };
+        Some((
+            trigger,
+            Bounds {
+                origin: gpui::point(px(x), px(y)),
+                size: gpui::size(px(w), px(h)),
+            },
+        ))
+    }
+
+    /// Where a dropdown opens for `kind`: left-aligned with its pill, just
+    /// above it, kept inside the tile.
+    fn picker_anchor(&self, kind: PickerKind) -> Option<(Pixels, Pixels)> {
+        self.picker_bounds(kind)
+            .map(|(trigger, host)| warpui_kit_picker::composer_placement(trigger, host))
     }
 
     /// Window click position → tile-local menu anchor, kept inside the tile.
@@ -2511,6 +2561,11 @@ impl TileView {
         let fonts = snap.fonts;
         let accent_text = snap.accent_text;
         let locked_small = snap.harness_locked && snap.density != TileDensity::Full;
+        // each pill reports its own window bounds, so a dropdown opens
+        // against the pill that owns it instead of the tile's corner
+        let agent_bounds = self.pill_bounds[PickerKind::Agent as usize].clone();
+        let model_bounds = self.pill_bounds[PickerKind::Model as usize].clone();
+        let variant_bounds = self.pill_bounds[PickerKind::Variant as usize].clone();
         // the one that gives way is the model: the rest keep their words
         let mut pills = div()
             .flex_1()
@@ -2609,6 +2664,7 @@ impl TileView {
                         .hover(|s| s.bg(theme::raised()).text_color(accent_text)),
                     "Agent",
                 )
+                .on_prepaint(move |bounds, _, _| agent_bounds.set(Some(bounds)))
                 .on_click(cx.listener(|this, _, window, cx| this.toggle_agent_picker(window, cx)))
                 .on_a11y_action(
                     AccessibleAction::Click,
@@ -2658,6 +2714,7 @@ impl TileView {
                         .hover(|s| s.bg(theme::raised()).text_color(accent_text)),
                     "Model",
                 )
+                .on_prepaint(move |bounds, _, _| model_bounds.set(Some(bounds)))
                 .on_click(cx.listener(|this, _, window, cx| this.toggle_model_picker(window, cx)))
                 .on_a11y_action(
                     AccessibleAction::Click,
@@ -2705,6 +2762,7 @@ impl TileView {
                         .when(!snap.has_variants, |d| d.opacity(0.4)),
                     "Response variant",
                 )
+                .on_prepaint(move |bounds, _, _| variant_bounds.set(Some(bounds)))
                 .on_click(cx.listener(|this, _, window, cx| this.toggle_variant_picker(window, cx)))
                 .on_a11y_action(
                     AccessibleAction::Click,
@@ -2782,16 +2840,31 @@ impl TileView {
         } else {
             Some(PickerKind::Agent)
         };
+        self.picker_placement = self.picker.and_then(|kind| self.picker_anchor(kind));
         cx.notify();
     }
 
     fn toggle_model_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if matches!(self.picker, Some(PickerKind::Model)) {
+            if let Some(picker) = &self.model_picker {
+                picker.update(cx, |p, cx| p.set_open(false, window, cx));
+            }
             self.picker = None;
         } else {
             self.picker = Some(PickerKind::Model);
+            let bounds = self.picker_bounds(PickerKind::Model);
             let picker = self.ensure_model_picker(window, cx);
-            picker.update(cx, |p, cx| p.reset_filter(window, cx));
+            picker.update(cx, |p, cx| {
+                if let Some((trigger, host)) = bounds {
+                    p.set_composer_anchor(trigger, host, cx);
+                }
+                // the host mounts the picker only while the pill is open, so
+                // the entity's own flag is raised again on every open: a
+                // dismissal or a pick leaves it false, and a stale false made
+                // the catcher's click-elsewhere a no-op
+                p.set_open(true, window, cx);
+                p.reset_filter(window, cx);
+            });
         }
         cx.notify();
     }
@@ -2809,6 +2882,7 @@ impl TileView {
             } else {
                 Some(PickerKind::Variant)
             };
+            self.picker_placement = self.picker.and_then(|kind| self.picker_anchor(kind));
             cx.notify();
         }
     }
@@ -3316,15 +3390,20 @@ impl TileView {
                         // stay above the catcher and keep working
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.picker = None;
+                            this.picker_placement = None;
                             cx.notify();
                         }))
-                        .child(
-                            div()
-                                .absolute()
-                                .bottom_10()
-                                .right_8()
-                                .child(popover_card().child(menu)),
-                        )
+                        .child({
+                            // the card sits against its own pill (see
+                            // picker_anchor); the corner is the fallback
+                            // until the pill has reported its bounds
+                            let card = div().absolute();
+                            let card = match self.picker_placement {
+                                Some((left, bottom)) => card.left(left).bottom(bottom),
+                                None => card.bottom_10().right_8(),
+                            };
+                            card.child(popover_card().child(menu))
+                        })
                         .into_any_element();
                 }
             }
@@ -3586,10 +3665,14 @@ impl TileView {
 
         // the composer is the tile's foot, not a box inside it: a quiet
         // hairline, the well field, then the pill row on the tile itself
+        let frame_bounds = self.composer_bounds.clone();
         div()
             // anchors the popovers and scopes the slash-menu key
             // bindings ("Composer > Input") to this frame only
             .relative()
+            // the pill row's dropdowns open above this frame (see
+            // picker_bounds), never over the field
+            .on_prepaint(move |bounds, _, _| frame_bounds.set(Some(bounds)))
             .key_context("Composer")
             .flex_shrink_0()
             .px_3()
@@ -4597,14 +4680,15 @@ impl Render for QuestionField {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // the kit Input has no a11y of its own — the wrapper carries the role;
         // an AT click lands at the wrapper's center, the input itself
-        let focus = self.state.read(cx).focus_handle(cx);
+        // the field box owns the focus/a11y node; this wrapper only names it
+        // (a second track_focus here made two nodes claim a11y focus in one
+        // frame)
         div()
             .id(gpui::ElementId::NamedInteger(
                 "qfield".into(),
                 TileView::hash(&format!("{}#{}", self.question_id, self.qi)),
             ))
             .role(Role::TextInput)
-            .track_focus(&focus)
             .aria_label("Custom answer")
             .aria_placeholder("custom answer…")
             // the prototype's "Custom answer" is a `.field text`, so a value,
@@ -4630,41 +4714,25 @@ struct ComposerField {
 }
 
 impl Render for ComposerField {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         let store = self.store.clone();
         let key = self.key.clone();
-        // the kit Textarea has no a11y of its own — the wrapper carries the
-        // role and the current text (store copy, updated by every Change
-        // event); an AT click lands at the wrapper's center, so the wrapper
-        // must hug the textarea: self_start keeps the surrounding flex from
-        // stretching it over the pill row, where an AT click toggled pills
-        // instead of focusing the field
-        let (text, harness_label) = store
-            .read(cx)
-            .tile_by_key(&key)
-            .map(|t| (t.input.clone(), t.harness.label()))
-            .unwrap_or_else(|| (String::new(), "opencode"));
         // chrome-less inside: the composer frame (border/bg) is the tile's,
-        // the textarea only edits.
+        // the textarea only edits. The kit field owns the focus/a11y node;
+        // the wrapper stays a plain layout box — tracking the same focus
+        // handle here made both nodes claim a11y focus in one frame, which
+        // panicked ("set_focus called more than once") on the first click.
         // image paste → attachment instead of text insertion
-        let focus = self.state.read(cx).focus_handle(cx);
         div()
             .id("composer-field")
-            .role(Role::MultilineTextInput)
-            // the node carries the kit field's own focus handle: an AT focus
-            // reaches the real textarea and the focused-handle a11y warning
-            // names this node instead of announcing the whole window
-            .track_focus(&focus)
-            .aria_label("Message composer")
-            .aria_placeholder(SharedString::from(format!("Ask {harness_label}…")))
-            .aria_value(SharedString::from(text))
             .self_start()
             .w_full()
             .child(
                 // the same chrome-less area the kit's own box seats, so the
                 // composer's text sits on the design's 10/9 padding
-                warpui_kit_core::field::bare_area(&self.state).on_paste(
-                    move |item: &gpui::ClipboardItem, _, cx| {
+                warpui_kit_core::field::bare_area(&self.state)
+                    .aria_label("Message composer")
+                    .on_paste(move |item: &gpui::ClipboardItem, _, cx| {
                         let image = item.entries().iter().find_map(|entry| match entry {
                             gpui::ClipboardEntry::Image(image) => Some(image),
                             _ => None,
@@ -4677,8 +4745,7 @@ impl Render for ComposerField {
                         } else {
                             false
                         }
-                    },
-                ),
+                    }),
             )
             .into_any_element()
     }

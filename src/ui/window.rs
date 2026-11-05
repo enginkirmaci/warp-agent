@@ -1091,13 +1091,12 @@ impl WarpWindow {
                         summary,
                     )
                     .child(
-                        // the kit Input has no a11y of its own — the wrapper carries the
-                        // role/value; an AT click lands at the wrapper's center, which is
-                        // the input itself, so focus still reaches the real field
+                        // the field box owns the focus/a11y node; this wrapper
+                        // only names the filter — tracking the same handle here
+                        // made two nodes claim a11y focus in one frame
                         div()
                             .id("sidebar-filter")
                             .role(Role::SearchInput)
-                            .track_focus(&filter_leaf.read(cx).state.read(cx).focus_handle(cx))
                             .aria_label("Filter workspaces")
                             .aria_placeholder("Filter workspaces")
                             .aria_value(self.sidebar_filter.clone())
@@ -2186,9 +2185,9 @@ impl WarpWindow {
                         cx.notify();
                     }
                 });
-                // the kit Input has no a11y of its own — the wrapper carries the
-                // role/value; an AT click lands at the wrapper's center, which
-                // is the input itself
+                // the field box owns the focus/a11y node; this wrapper only
+                // names and sizes the field (a second track_focus here made
+                // two nodes claim a11y focus in one frame)
                 let state = leaf.read(cx).state.clone();
                 let value = state.read(cx).value().to_string();
                 div()
@@ -2196,7 +2195,6 @@ impl WarpWindow {
                         "field-{key}"
                     ))))
                     .role(Role::TextInput)
-                    .track_focus(&state.read(cx).focus_handle(cx))
                     .aria_label(SharedString::from(format!("{key} field")))
                     .aria_value(value)
                     .flex_1()

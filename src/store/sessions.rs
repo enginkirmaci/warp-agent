@@ -413,6 +413,11 @@ impl Store {
     }
 
     pub(super) fn forget_session(&mut self, id: &str, cx: &mut Context<Self>) {
+        // a dsh follow stream keeps folded state for the chat; the net thread
+        // drops it (a no-op for opencode) so deleting chats frees memory
+        self.net.send(NetCommand::ForgetDshSession {
+            session_id: id.to_string(),
+        });
         if let Some(tile_key) = self.tile_by_session.get(id).cloned() {
             self.detach_tile(&tile_key, cx);
         }

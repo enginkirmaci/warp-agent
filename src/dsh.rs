@@ -483,6 +483,29 @@ impl DshHandle {
         }
         session_ids
     }
+
+    /// Drops a chat's folded state after the user deleted it. Also cancels the
+    /// server-side follow stream, and dispatch ignores frames for a session
+    /// that is no longer in the map, so a late frame cannot recreate it.
+    pub fn forget_session(&self, session_id: &str) {
+        self.inner
+            .sessions
+            .lock()
+            .expect("dsh sessions")
+            .remove(session_id);
+        self.inner
+            .recent_errors
+            .lock()
+            .expect("dsh errors")
+            .remove(session_id);
+        let frame = json!({
+            "type": "cancel",
+            "streamId": follow_stream_id(session_id),
+        });
+        // full means the pump is behind; the state is already gone, so a
+        // dropped cancel only leaves a stream whose frames dispatch ignores
+        let _ = self.inner.ws_tx.try_send(frame.to_string());
+    }
 }
 
 fn follow_stream_id(session_id: &str) -> String {
@@ -1892,7 +1915,10 @@ fn dispatch_frame(
     match follow_kind {
         "snapshot" => {
             let mut sessions = handle.inner.sessions.lock().expect("dsh sessions");
-            let state = sessions.entry(session_id.to_string()).or_default();
+            // a forgotten session's late snapshot must not recreate its state
+            let Some(state) = sessions.get_mut(session_id) else {
+                return;
+            };
             *state = DshSessionState::default();
             state.snapshot_seen = true;
             for record in value
@@ -1922,7 +1948,10 @@ fn dispatch_frame(
             }
             let outcome = {
                 let mut sessions = handle.inner.sessions.lock().expect("dsh sessions");
-                let state = sessions.entry(session_id.to_string()).or_default();
+                // a deleted chat's follow stream may still deliver a frame
+                let Some(state) = sessions.get_mut(session_id) else {
+                    return;
+                };
                 fold_event(state, session_id, &event)
             };
             // the part events carry the session id: the store routes by it,
@@ -2186,5 +2215,19 @@ mod tests {
         assert_eq!(events[0].get("type"), Some(&json!("question.asked")));
         assert!(take_stashed_questions("evt-2").is_some());
         assert!(take_stashed_questions("evt-2").is_none());
+    }
+
+    #[test]
+    fn forgetting_a_session_drops_its_folded_state() {
+        let (tx, _rx) = async_channel::bounded(4);
+        let handle = DshHandle::new("http://127.0.0.1:1", "token", tx);
+        handle
+            .inner
+            .sessions
+            .lock()
+            .unwrap()
+            .insert("chat-1".into(), DshSessionState::default());
+        handle.forget_session("chat-1");
+        assert!(!handle.inner.sessions.lock().unwrap().contains_key("chat-1"));
     }
 }

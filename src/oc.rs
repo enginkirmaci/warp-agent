@@ -978,6 +978,8 @@ pub enum NetCommand {
     },
     /// Fan a pre-serialized event frame out to every connected door client.
     IpcBroadcast { line: String },
+    /// A chat was deleted: drop any folded dsh follow state for it.
+    ForgetDshSession { session_id: String },
 }
 
 pub enum ApiRequest {
@@ -1458,6 +1460,15 @@ async fn net_main(
                             }
                         });
                     }
+                }
+            }
+            NetCommand::ForgetDshSession { session_id } => {
+                let handle = {
+                    let workspaces = workspaces.lock().expect("workspaces");
+                    workspaces.get(DSH_SERVER_KEY).and_then(|ws| ws.dsh.clone())
+                };
+                if let Some(handle) = handle {
+                    handle.forget_session(&session_id);
                 }
             }
             NetCommand::IpcBroadcast { line } => {

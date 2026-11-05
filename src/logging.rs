@@ -1,5 +1,6 @@
 //! File logging: devtools-style readable lines into a daily-rolling file under
-//! ~/.warp-agent/logs. Best effort — an unwritable home keeps stderr logging.
+//! the suite's shared ~/.warp/logs. Best effort — an unwritable home keeps
+//! stderr logging.
 
 use crate::paths::AppPaths;
 

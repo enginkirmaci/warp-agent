@@ -27,6 +27,9 @@ use ui::window::WarpWindow;
 static LAUNCH_FOLDERS: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
 
 fn main() {
+    // the data folder moved into the shared ~/.warp tree: absorb ~/.warp-agent
+    // (and its logs) before logging decides where its file goes
+    paths::AppPaths::migrate_legacy_layout();
     let _log_guard = logging::initialize();
     services::install_panic_hook();
 

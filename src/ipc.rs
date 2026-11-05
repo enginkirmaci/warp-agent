@@ -91,7 +91,7 @@ pub struct Door {
 }
 
 /// Binds the door on a loopback port and publishes port+token under
-/// ~/.warp-agent. Token is regenerated every launch, so a stale file never
+/// ~/.warp/agent. Token is regenerated every launch, so a stale file never
 /// grants access.
 pub async fn start(
     event_tx: async_channel::Sender<UiEvent>,

@@ -16,13 +16,14 @@ cargo run --release  # release build (LTO, stripped)
 ```
 
 First build fetches GPUI from the zed git repo and takes a while. Needs the
-usual Wayland/Vulkan dev packages. State (settings.json, ui.json, logs, the
-built-in General workspace) lives in `~/.warp-agent`.
+usual Wayland/Vulkan dev packages. State (settings.json, ui.json, the model cache,
+the built-in General workspace, the door endpoint) lives in `~/.warp/agent`;
+the rolling logs go to the suite's shared `~/.warp/logs`.
 
 ## DevTools door
 
 At startup the app binds a token-authenticated NDJSON server on
-`127.0.0.1` (port + token under `~/.warp-agent/ipc.*`). DevTools drives it:
+`127.0.0.1` (port + token under `~/.warp/agent/ipc.*`). DevTools drives it:
 `open-workspace` (folder args on the command line do the same, forwarded to
 a running instance — second launches exit), `new-chat`, `run-prompt`
 (one-shot wand runs as real chats, answered at idle; both accept a
@@ -74,7 +75,7 @@ This directory only carries the assets: `packaging/linux/{*.desktop,icons}`,
 - **Prompt history** (Up/Down in the composer), clipboard image paste, and a
   Settings page with the family's four sections (Appearance, Chat defaults,
   Permissions, Server), the shared text size and reduce motion, persisted to
-  `~/.warp-agent/settings.json`.
+  `~/.warp/agent/settings.json`.
 - Stop aborts the running turn (*stopped in Xs*); *done in Xs* closes a normal
   one.
 
@@ -91,7 +92,7 @@ This directory only carries the assets: `packaging/linux/{*.desktop,icons}`,
 | `src/ui/tile.rs` | ChatTile.axaml(+cs) | Transcript item cards (user/assistant/reasoning/tool/image/permission/question/note), tasks+agents flyout, model/variant/agent pickers, queue rows, attachments |
 | `src/ui/window.rs` | MainWindow.axaml(+cs) | Titlebar (drag/zoom/close/toggle), workspace + chat tree with context menus, drag-resizable sidebar, settings page, restore banner |
 | `src/services.rs` | TerminalLauncher + SystemFontScale | `Open in opencode` terminal probe (alacritty→…), gsettings text-scale follower |
-| `src/settings.rs`, `src/paths.rs`, `src/logging.rs` | AppSettings/UiState/AppPaths/AppLogging | Same files, same defaults, legacy migration |
+| `src/settings.rs`, `src/paths.rs`, `src/logging.rs` | AppSettings/UiState/AppPaths/AppLogging | Same files, same defaults; `~/.warp-agent` is adopted on first run |
 | `assets/` | — | Icons + spark logo (embedded) |
 
 Verified against opencode 1.18.32.

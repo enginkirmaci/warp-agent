@@ -150,9 +150,6 @@ pub struct TileView {
     /// per PickerKind) so a dropdown opens against its own pill instead of
     /// the tile's corner
     pill_bounds: [std::rc::Rc<std::cell::Cell<Option<gpui::Bounds<Pixels>>>>; 3],
-    /// window-space bounds of the composer frame, so a dropdown opens above
-    /// the whole composer instead of over its input
-    composer_bounds: std::rc::Rc<std::cell::Cell<Option<Bounds<Pixels>>>>,
     /// where the open variant/agent dropdown sits in the tile: its left edge
     /// and the distance from the tile's bottom to its bottom edge
     picker_placement: Option<(Pixels, Pixels)>,
@@ -629,7 +626,6 @@ impl TileView {
             menu: None,
             origin: std::rc::Rc::new(std::cell::Cell::new((0., 0., 0., 0.))),
             pill_bounds: std::array::from_fn(|_| std::rc::Rc::new(std::cell::Cell::new(None))),
-            composer_bounds: std::rc::Rc::new(std::cell::Cell::new(None)),
             picker_placement: None,
             composer,
             composer_field,
@@ -652,22 +648,11 @@ impl TileView {
     /// The pill's and the tile's window bounds: what a dropdown needs to
     /// open against its own pill. Both come from the last painted frame.
     fn picker_bounds(&self, kind: PickerKind) -> Option<(Bounds<Pixels>, Bounds<Pixels>)> {
-        let pill = self.pill_bounds[kind as usize].get()?;
+        let trigger = self.pill_bounds[kind as usize].get()?;
         let (x, y, w, h) = self.origin.get();
         if w <= 0. || h <= 0. {
             return None;
         }
-        // the card is left-aligned with its pill but clears the whole
-        // composer: its bottom edge rides the composer frame's top, so the
-        // dropdown never covers the input the user is about to type in
-        let top = self
-            .composer_bounds
-            .get()
-            .map_or(pill.origin.y, |frame| frame.origin.y);
-        let trigger = Bounds {
-            origin: gpui::point(pill.origin.x, top),
-            size: pill.size,
-        };
         Some((
             trigger,
             Bounds {
@@ -3665,14 +3650,10 @@ impl TileView {
 
         // the composer is the tile's foot, not a box inside it: a quiet
         // hairline, the well field, then the pill row on the tile itself
-        let frame_bounds = self.composer_bounds.clone();
         div()
             // anchors the popovers and scopes the slash-menu key
             // bindings ("Composer > Input") to this frame only
             .relative()
-            // the pill row's dropdowns open above this frame (see
-            // picker_bounds), never over the field
-            .on_prepaint(move |bounds, _, _| frame_bounds.set(Some(bounds)))
             .key_context("Composer")
             .flex_shrink_0()
             .px_3()
@@ -4782,7 +4763,7 @@ fn composer_model_picker(
         refresh: false,
         refresh_label: "",
         stop_trigger_mousedown: false,
-        visible_rows: 10,
+        visible_rows: 7,
         selected_accent: false,
         overlay: true,
         anchor: OverlayAnchor::Composer,

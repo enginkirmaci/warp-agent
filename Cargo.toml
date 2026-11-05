@@ -52,7 +52,6 @@ smallvec = "1"
 unicode-segmentation = "1"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp"] }
 anyhow = "1"
-rand = "0.10"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 # debug-embed: embed assets at compile time in debug builds too — without it
 # rust-embed resolves "assets" against the process CWD at runtime, so the app

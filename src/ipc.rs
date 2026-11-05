@@ -4,7 +4,6 @@
 //! itself never depends on a client — commands relay to the store through
 //! the UiEvent pump and answers ride a oneshot back to the wire.
 
-use rand::Rng;
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -108,9 +107,7 @@ pub async fn start_in(
 ) -> anyhow::Result<Door> {
     let listener = TcpListener::bind(("127.0.0.1", 0)).await?;
     let port = listener.local_addr()?.port();
-    let mut bytes = [0u8; 32];
-    rand::rng().fill_bytes(&mut bytes);
-    let token = bytes.iter().map(|b| format!("{b:02x}")).collect::<String>();
+    let token = door::random_token();
     std::fs::create_dir_all(&dir)?;
     // token first: a reader that sees a port is entitled to its token. Both
     // files are created 0o600 — restricting after a default-mode write leaves

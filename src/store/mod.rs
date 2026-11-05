@@ -569,6 +569,12 @@ impl Store {
             .into_iter()
             .map(|state| WorkspaceItem::new(state, &store.ui.favorites))
             .collect();
+        // Every launch starts with the sections folded: an open section is a
+        // transient view choice (and auto-connects its server), never a
+        // startup state, so a saved flag is ignored here.
+        for ws in &mut store.workspaces {
+            ws.set_expanded(false);
+        }
         for ws in &store.workspaces {
             for sid in &ws.state.sessions {
                 store

@@ -63,6 +63,6 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 tracing-appender = "0.2"
 
 [dev-dependencies]
-# headless selection probes (tests/selection_probe.rs); feature-unifies with
-# the normal gpui-kit dep only under `cargo test`
+# headless chat probes (tests/*_probe.rs); feature-unifies with the normal
+# gpui-kit dep only under `cargo test`
 gpui-kit = { version = "0.9", features = ["test-support"] }

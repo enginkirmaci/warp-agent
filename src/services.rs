@@ -52,13 +52,15 @@ pub fn init_font_scale(store: &Entity<Store>, cx: &mut App) {
     });
 }
 
-/// The crash net, terminal-side: panics are logged with their payload so the
-/// rolling log always carries the reason. gpui unwinds handler panics per
-/// frame; the app keeps running and the rest of the sessions stay alive.
+/// The crash net, terminal-side: panics are logged with their payload and a
+/// captured backtrace so the rolling log can name the failing frame on a
+/// machine where the reporter cannot reproduce it. gpui unwinds handler panics
+/// per frame; the app keeps running and the rest of the sessions stay alive.
 pub fn install_panic_hook() {
     std::panic::set_hook(Box::new(move |info| {
         let message = info.to_string();
-        tracing::error!("panic: {message}");
+        let backtrace = std::backtrace::Backtrace::force_capture();
+        tracing::error!("panic: {message}\n{backtrace}");
         eprintln!("[warp-agent] panic: {message}");
     }));
 }

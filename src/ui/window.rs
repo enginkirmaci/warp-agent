@@ -515,22 +515,6 @@ impl Render for WarpWindow {
             .bg(theme::window_chrome())
             .text_color(theme::text())
             .font_family(theme::ui_font())
-            // mounts the window's selection machinery: without this layer the
-            // kit's global mouse handlers never register and selectable
-            // TextViews (chat transcripts) ignore drags entirely
-            .child(gpui_kit::base::TextSelectionLayer)
-            // Ctrl+C fallback for transcript selections when no input is
-            // focused (mirrors gpui-base's Root)
-            .on_action(|_: &gpui_kit::base::input::Copy, window, cx| {
-                let text = gpui_kit::base::TextSelection::selected_text(window, cx)
-                    .trim()
-                    .to_string();
-                if text.is_empty() {
-                    cx.propagate();
-                    return;
-                }
-                cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
-            })
             // the shell's Ctrl+\ hides the list; the title bar button does the same
             .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
                 let modifiers = event.keystroke.modifiers;
@@ -747,9 +731,6 @@ impl WarpWindow {
         };
         shell::rail()
             .debug_selector(|| "app-rail".into())
-            .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                gpui_kit::base::GlobalState::suppress_text_selection(cx);
-            })
             .child(
                 shell::rail_item_inked(
                     "rail-chats",
@@ -816,10 +797,6 @@ impl WarpWindow {
         };
         shell::title_bar()
             .pl_3()
-            // titlebar chrome owns no selectable text either (see sidebar note)
-            .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                gpui_kit::base::GlobalState::suppress_text_selection(cx);
-            })
             .child(
                 div()
                     .flex_shrink_0()
@@ -1096,12 +1073,6 @@ impl WarpWindow {
 
         shell::list_pane(width)
             .debug_selector(|| "agent-list".into())
-            // the sidebar owns no selectable text: a press here (row, + button)
-            // must not seed a window drag-selection — otherwise the gesture
-            // that starts on a row can land on transcript text and select it
-            .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                gpui_kit::base::GlobalState::suppress_text_selection(cx);
-            })
             .child(
                 div()
                     .flex_shrink_0()
@@ -1473,8 +1444,9 @@ impl WarpWindow {
                             s.connect_expanded_workspace(&connect_path, cx);
                         }
                     }
-                    // the section's open/closed state is a toggled panel: it
-                    // restores as it was left, so it saves when it flips
+                    // an open section is a transient view choice (the next
+                    // launch folds every section again); save so the
+                    // selection and the rest of the sidebar state survive
                     s.save_state();
                     cx.notify();
                 });

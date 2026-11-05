@@ -184,6 +184,22 @@ pub struct TileView {
     img_cache: HashMap<String, Arc<gpui::RenderImage>>,
 }
 
+/// Bidi embedding/override controls (U+202A–U+202E, U+2066–U+2069) reorder
+/// glyphs without appearing. gpui-pre's line splitter underflows on the
+/// resulting unordered line (`LineLayout::split_at`), which crashed the tile
+/// on a reply containing U+202E. They carry no visible content, so strip them
+/// from display text; real RTL text and directional marks stay.
+fn strip_bidi_overrides(text: &str) -> std::borrow::Cow<'_, str> {
+    if !text.chars().any(is_bidi_override) {
+        return std::borrow::Cow::Borrowed(text);
+    }
+    std::borrow::Cow::Owned(text.chars().filter(|c| !is_bidi_override(*c)).collect())
+}
+
+fn is_bidi_override(c: char) -> bool {
+    matches!(c, '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
+}
+
 impl TileView {
     /// Start the one-second "copied" flash for `key` (a message item id, or
     /// "{item_id}#code{n}" for a fenced code block inside it). Reverts itself
@@ -213,12 +229,13 @@ impl TileView {
     /// an unchanged document. Replaced whenever the store's copy has moved on
     /// (the streaming tail).
     fn md_text(&mut self, item_id: &str, text: &str) -> SharedString {
+        let text = strip_bidi_overrides(text);
         if let Some(cached) = self.md_cache.get(item_id)
-            && cached.as_ref() == text
+            && cached.as_ref() == text.as_ref()
         {
             return cached.clone();
         }
-        let fresh = SharedString::from(text.to_string());
+        let fresh = SharedString::from(text.into_owned());
         self.md_cache.insert(item_id.to_string(), fresh.clone());
         fresh
     }
@@ -283,11 +300,11 @@ impl TileView {
         editor
     }
 
-    /// Selectable markdown text for a transcript sub-surface (tool title /
+    /// Read-only markdown text for a transcript sub-surface (tool title /
     /// details, question text, notes): pointer-stable text through md_text
     /// plus a stable per-surface element id, so the kit neither re-parses on
     /// every render nor collides element ids between surfaces.
-    fn selectable_text(
+    fn transcript_text(
         &mut self,
         cache_key: &str,
         text: &str,
@@ -298,7 +315,6 @@ impl TileView {
             gpui::ElementId::NamedInteger(id_name.into(), Self::hash(cache_key)),
             stable,
         )
-        .selectable(true)
     }
 
     /// Decoded image for a transcript item or composer attachment, cached by a
@@ -771,21 +787,18 @@ impl TileView {
                             .flex_col()
                             .gap_1()
                             .child(
-                                // selectable TextView (not plain div text) so
-                                // the user's own message can be mouse-selected
+                                // markdown TextView (not plain div text) so
+                                // the user's own message keeps inline styling
                                 div()
                                     .text_size(px(fonts.font_body))
                                     .text_color(theme::text())
-                                    .child(
-                                        gpui_kit::base::text::TextView::markdown(
-                                            gpui::ElementId::NamedInteger(
-                                                "utext".into(),
-                                                TileView::hash(item_id),
-                                            ),
-                                            text.clone(),
-                                        )
-                                        .selectable(true),
-                                    ),
+                                    .child(gpui_kit::base::text::TextView::markdown(
+                                        gpui::ElementId::NamedInteger(
+                                            "utext".into(),
+                                            TileView::hash(item_id),
+                                        ),
+                                        text.clone(),
+                                    )),
                             )
                             .child(
                                 // copy button shares the time line: pinned left,
@@ -954,6 +967,7 @@ impl TileView {
                                 "fold-thinking".into(),
                                 TileView::hash(item_id),
                             ))
+                            .max_w(px(MESSAGE_WIDTH))
                             .text_size(px(fonts.font_meta))
                             .text_color(theme::text_dim())
                             .child(
@@ -963,8 +977,7 @@ impl TileView {
                                         TileView::hash(item_id),
                                     ),
                                     body,
-                                )
-                                .selectable(true),
+                                ),
                             ),
                         )
                     })
@@ -1073,7 +1086,7 @@ impl TileView {
                                                 .text_size(px(fonts.font_body))
                                                 .text_color(theme::DANGER)
                                                 .child(
-                                                    self.selectable_text(item_id, text, "errnote"),
+                                                    self.transcript_text(item_id, text, "errnote"),
                                                 ),
                                         ),
                                 ),
@@ -1087,7 +1100,7 @@ impl TileView {
                         .text_color(theme::text_muted())
                         .italic()
                         .py_0p5()
-                        .child(self.selectable_text(item_id, text, "sysnote"))
+                        .child(self.transcript_text(item_id, text, "sysnote"))
                         .into_any_element()
                 }
             }
@@ -1136,7 +1149,7 @@ impl TileView {
                             .text_color(theme::text_dim())
                             .truncate()
                             .child(
-                                self.selectable_text(
+                                self.transcript_text(
                                     &format!("{item_id}:title"),
                                     &tool.title,
                                     "tooltitle",
@@ -1302,7 +1315,7 @@ impl TileView {
                     .text_size(px(fonts.font_meta))
                     .font_family(theme::code_font())
                     .text_color(color)
-                    .child(self.selectable_text(cache_key, text, "tooldetails")),
+                    .child(self.transcript_text(cache_key, text, "tooldetails")),
             })
             .into_any_element()
     }
@@ -1766,7 +1779,7 @@ impl TileView {
                     .italic()
                     .text_size(px(fonts.font_body))
                     .text_color(theme::text_faint())
-                    .child(self.selectable_text(&format!("{item_id}:res"), resolution, "qres")),
+                    .child(self.transcript_text(&format!("{item_id}:res"), resolution, "qres")),
             );
         }
         div()
@@ -1874,7 +1887,7 @@ impl TileView {
                 div()
                     .text_size(px(fonts.font_body))
                     .text_color(theme::text())
-                    .child(self.selectable_text(
+                    .child(self.transcript_text(
                         &format!("{item_id}#{qi}"),
                         &entry.question,
                         "qtext",
@@ -3867,11 +3880,10 @@ impl Render for TileView {
                 // same tick scroll it too
                 cx.stop_propagation();
             }))
-            // one 760 column centred in the tile, so a single tile filling the
-            // pane reads at the same measure as four
+            // the transcript fills the tile: bubbles keep their 760 measure at
+            // the edges (the reply left, the prompt right), so a wide tile is
+            // used instead of reading as a narrow centred column
             .w_full()
-            .max_w(px(MESSAGE_WIDTH))
-            .mx_auto()
             .p_3()
             .flex()
             .flex_col()
@@ -3879,7 +3891,7 @@ impl Render for TileView {
         // consecutive tool calls collapse into one disclosure row; the run is
         // split by anything non-tool (permission cards, notes) in between.
         // visible_tools feeds the cache-prune set below: members hidden inside
-        // a collapsed group drop their selectable-text cache slots
+        // a collapsed group drop their text cache slots
         let mut visible_tools: HashSet<String> = HashSet::new();
         let mut idx = 0;
         while idx < items.len() {
@@ -3918,7 +3930,7 @@ impl Render for TileView {
         // cache entries only live as long as the transcript/composer entries
         // they serve; question inputs die with their question
         let mut live: HashSet<String> = items.iter().map(|(id, _)| id.clone()).collect();
-        // sub-surface selectable texts key off derived ids — keep those too;
+        // sub-surface texts key off derived ids — keep those too;
         // members hidden inside a collapsed tool group are not mounted
         for (id, item) in &items {
             match item.as_ref() {
@@ -4826,5 +4838,20 @@ fn composer_model_data(
         fonts,
         accent,
         show_tooltips: false,
+    }
+}
+
+#[cfg(test)]
+mod bidi_tests {
+    use super::strip_bidi_overrides;
+
+    #[test]
+    fn strips_bidi_overrides_and_keeps_rtl_text() {
+        let raw = "a\u{202e}b\u{202d}c\u{2067}d";
+        assert_eq!(strip_bidi_overrides(raw).as_ref(), "abcd");
+        let rtl = "مرحبا بالعالم";
+        assert_eq!(strip_bidi_overrides(rtl).as_ref(), rtl);
+        let marks = "a\u{200b}\u{200e}b";
+        assert_eq!(strip_bidi_overrides(marks).as_ref(), marks);
     }
 }

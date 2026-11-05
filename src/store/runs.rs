@@ -156,20 +156,9 @@ impl Store {
             return false;
         };
         match parent_id {
-            None if parent_id.is_none() || parent_id == Some(session_id) => {
-                if self.subagent_by_session.remove(session_id).is_some() {
-                    self.set_subagent_running(session_id, false);
-                    return true;
-                }
-                false
-            }
-            Some(parent_id) if parent_id == session_id => {
-                if self.subagent_by_session.remove(session_id).is_some() {
-                    self.set_subagent_running(session_id, false);
-                    return true;
-                }
-                false
-            }
+            // no parent (or a session naming itself): not a subagent
+            None => self.clear_subagent(session_id),
+            Some(parent_id) if parent_id == session_id => self.clear_subagent(session_id),
             Some(parent_id) => {
                 let agent_label = agent
                     .filter(|a| !a.trim().is_empty())
@@ -201,8 +190,17 @@ impl Store {
                 }
                 info_changed || label_changed
             }
-            None => false,
         }
+    }
+
+    /// Drops the subagent row/mapping for a session that became a parent (or
+    /// lost its parent); reports whether anything changed.
+    fn clear_subagent(&mut self, session_id: &str) -> bool {
+        if self.subagent_by_session.remove(session_id).is_some() {
+            self.set_subagent_running(session_id, false);
+            return true;
+        }
+        false
     }
 
     pub(super) fn set_subagent_running(&mut self, child_id: &str, running: bool) {

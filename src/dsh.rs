@@ -1956,10 +1956,8 @@ fn dispatch_frame(
                 });
             }
         }
-        "assistant-stream" => {
-            // dense deltas; the durable event on commit carries the full text,
-            // so live streaming granularity is skipped deliberately
-        }
+        // "assistant-stream" carries dense deltas; the durable event on
+        // commit carries the full text, so live streaming is skipped here.
         _ => {}
     }
 }

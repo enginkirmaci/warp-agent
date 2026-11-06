@@ -321,17 +321,21 @@ impl TileView {
     /// Read-only markdown text for a transcript sub-surface (tool title /
     /// details, question text, notes): pointer-stable text through md_text
     /// plus a stable per-surface element id, so the kit neither re-parses on
-    /// every render nor collides element ids between surfaces.
+    /// every render nor collides element ids between surfaces. `max_lines` is
+    /// the tool row's one-line clamp; the text goes through the Markdown guard,
+    /// which renders a text the parser panics on as plain prose instead.
     fn transcript_text(
         &mut self,
         cache_key: &str,
         text: &str,
         id_name: &'static str,
-    ) -> gpui_kit::base::text::TextView {
+        max_lines: Option<usize>,
+    ) -> gpui::AnyElement {
         let stable = self.md_text(cache_key, text);
-        gpui_kit::base::text::TextView::markdown(
+        crate::ui::markdown::text_view(
             gpui::ElementId::NamedInteger(id_name.into(), Self::hash(cache_key)),
             stable,
+            max_lines,
         )
     }
 
@@ -834,17 +838,20 @@ impl TileView {
                             .flex_col()
                             .gap_1()
                             .child(
-                                // markdown TextView (not plain div text) so
-                                // the user's own message keeps inline styling
+                                // markdown (not plain div text) so the user's
+                                // own message keeps inline styling; the guard
+                                // drops to plain prose if the parser would
+                                // panic on it
                                 div()
                                     .text_size(px(fonts.font_body))
                                     .text_color(theme::text())
-                                    .child(gpui_kit::base::text::TextView::markdown(
+                                    .child(crate::ui::markdown::text_view(
                                         gpui::ElementId::NamedInteger(
                                             "utext".into(),
                                             TileView::hash(item_id),
                                         ),
                                         text.clone(),
+                                        None,
                                     )),
                             )
                             .child(
@@ -1017,15 +1024,14 @@ impl TileView {
                             .max_w(px(MESSAGE_WIDTH))
                             .text_size(px(fonts.font_meta))
                             .text_color(theme::text_dim())
-                            .child(
-                                gpui_kit::base::text::TextView::markdown(
-                                    gpui::ElementId::NamedInteger(
-                                        "rtext".into(),
-                                        TileView::hash(item_id),
-                                    ),
-                                    body,
+                            .child(crate::ui::markdown::text_view(
+                                gpui::ElementId::NamedInteger(
+                                    "rtext".into(),
+                                    TileView::hash(item_id),
                                 ),
-                            ),
+                                body,
+                                None,
+                            )),
                         )
                     })
                     .into_any_element()
@@ -1132,9 +1138,9 @@ impl TileView {
                                             div()
                                                 .text_size(px(fonts.font_body))
                                                 .text_color(theme::DANGER)
-                                                .child(
-                                                    self.transcript_text(item_id, text, "errnote"),
-                                                ),
+                                                .child(self.transcript_text(
+                                                    item_id, text, "errnote", None,
+                                                )),
                                         ),
                                 ),
                         )
@@ -1147,7 +1153,7 @@ impl TileView {
                         .text_color(theme::text_muted())
                         .italic()
                         .py_0p5()
-                        .child(self.transcript_text(item_id, text, "sysnote"))
+                        .child(self.transcript_text(item_id, text, "sysnote", None))
                         .into_any_element()
                 }
             }
@@ -1195,14 +1201,12 @@ impl TileView {
                             .text_size(px(fonts.font_body))
                             .text_color(theme::text_dim())
                             .truncate()
-                            .child(
-                                self.transcript_text(
-                                    &format!("{item_id}:title"),
-                                    &tool.title,
-                                    "tooltitle",
-                                )
-                                .max_lines(1),
-                            ),
+                            .child(self.transcript_text(
+                                &format!("{item_id}:title"),
+                                &tool.title,
+                                "tooltitle",
+                                Some(1),
+                            )),
                     )
                     .child(
                         div()
@@ -1362,7 +1366,7 @@ impl TileView {
                     .text_size(px(fonts.font_meta))
                     .font_family(theme::code_font())
                     .text_color(color)
-                    .child(self.transcript_text(cache_key, text, "tooldetails")),
+                    .child(self.transcript_text(cache_key, text, "tooldetails", None)),
             })
             .into_any_element()
     }
@@ -1827,7 +1831,12 @@ impl TileView {
                     .italic()
                     .text_size(px(fonts.font_body))
                     .text_color(theme::text_faint())
-                    .child(self.transcript_text(&format!("{item_id}:res"), resolution, "qres")),
+                    .child(self.transcript_text(
+                        &format!("{item_id}:res"),
+                        resolution,
+                        "qres",
+                        None,
+                    )),
             );
         }
         div()
@@ -1939,6 +1948,7 @@ impl TileView {
                         &format!("{item_id}#{qi}"),
                         &entry.question,
                         "qtext",
+                        None,
                     )),
             );
         for (oi, option) in entry.options.iter().enumerate() {
@@ -3264,7 +3274,7 @@ impl TileView {
                 }
             }) as Box<dyn Fn(&mut App)>
         };
-        let picker = composer_model_picker(&store, selected, pick, close, window, cx);
+        let picker = composer_model_picker(&store, key.clone(), selected, pick, close, window, cx);
         self.model_picker = Some(picker.clone());
         picker
     }
@@ -4806,6 +4816,7 @@ const PICKER_ICONS: PickerIcons = PickerIcons {
 /// callbacks; the catalog comes from the store.
 fn composer_model_picker(
     store: &Entity<Store>,
+    key: String,
     selected: Box<dyn Fn(&App) -> String>,
     pick: ModelPick,
     close: DismissFn,
@@ -4838,10 +4849,11 @@ fn composer_model_picker(
     cx.new(|cx| {
         let data = {
             let store = store.clone();
+            let key = key.clone();
             // the selected readout is not clonable through the box — wrap it
             let selected: std::rc::Rc<dyn Fn(&App) -> String> = std::rc::Rc::from(selected);
             Box::new(move |filter: &str, _window: &Window, cx: &App| {
-                composer_model_data(&store, &selected, filter, cx)
+                composer_model_data(&store, &key, &selected, filter, cx)
             }) as Box<dyn Fn(&str, &Window, &App) -> PickerData>
         };
         let mut picker = FilteredPicker::new(
@@ -4863,6 +4875,7 @@ fn composer_model_picker(
 /// groups and the filtered, deduped models.
 fn composer_model_data(
     store: &Entity<Store>,
+    key: &str,
     selected: &std::rc::Rc<dyn Fn(&App) -> String>,
     filter: &str,
     cx: &App,
@@ -4871,17 +4884,23 @@ fn composer_model_data(
     let accent = store.read(cx).accent.accent;
     let selected_value = selected(cx);
     let filter = filter.to_lowercase();
+    // the draft's own harness scopes the rows: the two catalogs overlap on
+    // names, and an opencode key means nothing to a dsh server
+    let harness = store
+        .read(cx)
+        .tile_by_key(key)
+        .map(|tile| tile.harness)
+        .unwrap_or_default();
     let mut models: Vec<String> = store
         .read(cx)
-        .models
-        .iter()
+        .model_keys_for(harness)
+        .into_iter()
         .filter(|model| {
             let model = model.trim();
             !model.is_empty()
                 && !model.starts_with('(')
                 && (filter.is_empty() || model.to_lowercase().contains(&filter))
         })
-        .cloned()
         .collect();
     models.sort_by(|a, b| {
         model_provider(a)
@@ -4945,6 +4964,8 @@ fn composer_model_data(
         fonts,
         accent,
         show_tooltips: false,
+        // the composer has no refresh button; the settings card owns that
+        refreshing: false,
     }
 }
 

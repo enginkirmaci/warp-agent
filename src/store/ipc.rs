@@ -53,7 +53,11 @@ impl Store {
             IpcCommand::CancelRun { run, reply } => {
                 let _ = reply.send(self.ipc_cancel_run(run, cx));
             }
-            IpcCommand::Models { harness, reply } => self.ipc_models(harness, reply, cx),
+            IpcCommand::Models {
+                harness,
+                refresh,
+                reply,
+            } => self.ipc_models(harness, refresh, reply, cx),
             IpcCommand::Status { reply } => {
                 let _ = reply.send(Ok(json!({"workspaces": self.ipc_status_workspaces()})));
             }
@@ -305,14 +309,35 @@ impl Store {
         Ok(json!({"cancelled": true}))
     }
 
-    fn ipc_models(&mut self, harness: Option<HarnessKind>, reply: Reply, cx: &mut Context<Self>) {
-        let known = match harness {
-            Some(harness) => self.models_live.contains(&harness),
-            None => !self.model_infos.is_empty(),
-        };
-        if known {
-            let _ = reply.send(Ok(self.models_payload(harness)));
-            return;
+    fn ipc_models(
+        &mut self,
+        harness: Option<HarnessKind>,
+        refresh: bool,
+        reply: Reply,
+        cx: &mut Context<Self>,
+    ) {
+        if refresh {
+            // a refresh is a request to re-read the backend, not a cache
+            // lookup: drop the "live" marker so the answer lands only after
+            // the fresh catalog does, and a later plain request re-lists too
+            match harness {
+                Some(harness) => {
+                    self.models_live.remove(&harness);
+                }
+                None => {
+                    let _ = reply.send(Err("refresh requires a harness".into()));
+                    return;
+                }
+            }
+        } else {
+            let known = match harness {
+                Some(harness) => self.models_live.contains(&harness),
+                None => !self.model_infos.is_empty(),
+            };
+            if known {
+                let _ = reply.send(Ok(self.models_payload(harness)));
+                return;
+            }
         }
         if harness == Some(HarnessKind::Dsh) {
             let running = self.runtimes.contains_key(DSH_SERVER_KEY);
@@ -329,7 +354,9 @@ impl Store {
                 return;
             };
             if !self.workspaces.iter().any(|w| w.folder_path() == path) {
-                self.add_workspace(&path, cx);
+                // install without selecting: a settings refresh must not move
+                // the user's focused workspace
+                self.install_workspace(&path, cx);
             }
             if self.runtimes.contains_key(&path) {
                 self.net.send(NetCommand::Request {
@@ -341,7 +368,7 @@ impl Store {
                 self.start_workspace(&path, cx);
             }
         }
-        self.ipc_models_waiter = Some((harness, reply));
+        self.ipc_models_waiters.push((harness, reply));
     }
 
     /// One `models` answer: the legacy flat key list plus the harness and

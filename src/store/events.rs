@@ -109,16 +109,16 @@ impl Store {
                     } else {
                         HarnessKind::OpenCode
                     };
-                    let waiting = self
-                        .ipc_models_waiter
-                        .as_ref()
-                        .is_some_and(|(requested, _)| requested.is_none_or(|h| h == harness));
-                    if waiting {
-                        let (_, reply) = self
-                            .ipc_models_waiter
-                            .take()
-                            .expect("a matching models waiter was checked just above");
-                        let _ = reply.send(Err(format!("server failed to start: {err:#}")));
+                    if self.models_refreshing == Some(harness) {
+                        self.models_refreshing = None;
+                    }
+                    let waiters = std::mem::take(&mut self.ipc_models_waiters);
+                    for (requested, reply) in waiters {
+                        if requested.is_none_or(|h| h == harness) {
+                            let _ = reply.send(Err(format!("server failed to start: {err:#}")));
+                        } else {
+                            self.ipc_models_waiters.push((requested, reply));
+                        }
                     }
                     self.announce(&format!("Failed to start: {err:#}"), true, cx);
                     self.ipc_fail_parked_runs(
@@ -127,6 +127,8 @@ impl Store {
                         cx,
                     );
                     self.ipc_push_status();
+                    // the settings refresh spinner is parked on this start
+                    cx.notify();
                 }
             },
             UiEvent::ServerStopped => {}
@@ -669,6 +671,9 @@ impl Store {
             UiEvent::ModelsLoaded { harness, result } => {
                 match result {
                     Ok(models) => {
+                        if self.models_refreshing == Some(harness) {
+                            self.models_refreshing = None;
+                        }
                         self.models_live.insert(harness);
                         // merge: every running server contributes; existing entries stay for its own tiles
                         let restore: Vec<(String, Option<String>, Option<String>)> = self
@@ -737,32 +742,29 @@ impl Store {
                         // the door's models command parked while a server spun
                         // up: the requested harness's catalog answers it (an
                         // un-harnessed request takes whichever list lands first)
-                        let waiting = self
-                            .ipc_models_waiter
-                            .as_ref()
-                            .is_some_and(|(requested, _)| requested.is_none_or(|h| h == harness));
-                        if waiting {
-                            let (requested, reply) = self
-                                .ipc_models_waiter
-                                .take()
-                                .expect("a matching models waiter was checked just above");
-                            let _ = reply.send(Ok(self.models_payload(requested)));
+                        let waiters = std::mem::take(&mut self.ipc_models_waiters);
+                        for (requested, reply) in waiters {
+                            if requested.is_none_or(|h| h == harness) {
+                                let _ = reply.send(Ok(self.models_payload(requested)));
+                            } else {
+                                self.ipc_models_waiters.push((requested, reply));
+                            }
                         }
                     }
                     Err(err) => {
-                        let waiting = self
-                            .ipc_models_waiter
-                            .as_ref()
-                            .is_some_and(|(requested, _)| requested.is_none_or(|h| h == harness));
-                        if waiting {
-                            let (_, reply) = self
-                                .ipc_models_waiter
-                                .take()
-                                .expect("a matching models waiter was checked just above");
-                            let _ = reply.send(Err(format!(
-                                "could not load {} models: {err:#}",
-                                harness.label()
-                            )));
+                        if self.models_refreshing == Some(harness) {
+                            self.models_refreshing = None;
+                        }
+                        let waiters = std::mem::take(&mut self.ipc_models_waiters);
+                        for (requested, reply) in waiters {
+                            if requested.is_none_or(|h| h == harness) {
+                                let _ = reply.send(Err(format!(
+                                    "could not load {} models: {err:#}",
+                                    harness.label()
+                                )));
+                            } else {
+                                self.ipc_models_waiters.push((requested, reply));
+                            }
                         }
                     }
                 }

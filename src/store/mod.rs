@@ -99,6 +99,16 @@ fn highest_variant(variants: &[String]) -> Option<String> {
     variants.iter().max_by_key(|v| variant_rank(v)).cloned()
 }
 
+/// The variants one harness/model pair reports; empty until that harness's
+/// catalog lands (or when the model has no tiers).
+fn variants_for_entry(model_infos: &[ModelInfo], harness: HarnessKind, model: &str) -> Vec<String> {
+    model_infos
+        .iter()
+        .find(|entry| entry.harness == harness && entry.key == model)
+        .map(|entry| entry.variants.clone())
+        .unwrap_or_default()
+}
+
 /// The tile's `@`-mention token: the last `@` that starts a token (text start
 /// or right after whitespace) with no whitespace between it and the end.
 /// Returns the byte index of the `@` and the query typed after it.
@@ -295,6 +305,9 @@ pub struct Store {
     /// cache-loaded list still answers one door request with a refresh, so
     /// clients see real variants instead of the cache's empty ones.
     models_live: HashSet<HarnessKind>,
+    /// The harness whose settings refresh is waiting on `ModelsLoaded`; the
+    /// picker's refresh button spins until the event clears it.
+    pub models_refreshing: Option<HarnessKind>,
     variants_by_model: HashMap<String, Vec<String>>,
     context_limit_by_model: HashMap<String, i64>,
     subagent_by_session: HashMap<String, SubagentInfo>,
@@ -345,7 +358,10 @@ pub struct Store {
     deleted_sessions: HashSet<String>,
     /// the door's models command parked while a server spins up, with the
     /// harness it asked for (None = any)
-    ipc_models_waiter: Option<(Option<HarnessKind>, crate::ipc::Reply)>,
+    /// Door `models` requests parked on a server start or a refresh. A list,
+    /// not a single slot: a second client (or the settings refresh while the
+    /// page's first load is still in flight) must not drop the first reply.
+    ipc_models_waiters: Vec<(Option<HarnessKind>, crate::ipc::Reply)>,
     /// reused checkout dummy for `with_tile` — hot stream events would
     /// otherwise build a throwaway ChatTile each
     tile_placeholder: Option<ChatTile>,
@@ -473,6 +489,7 @@ impl Store {
             running_by_session: HashSet::new(),
             model_infos,
             models_live: HashSet::new(),
+            models_refreshing: None,
             variants_by_model,
             context_limit_by_model,
             subagent_by_session: HashMap::new(),
@@ -495,7 +512,7 @@ impl Store {
             ipc_runs: HashMap::new(),
             hidden_sessions: HashSet::new(),
             deleted_sessions: ui.deleted_sessions.iter().cloned().collect(),
-            ipc_models_waiter: None,
+            ipc_models_waiters: Vec::new(),
             commands: HashMap::new(),
             file_results: None,
             mcp_names: HashMap::new(),
@@ -612,6 +629,25 @@ impl Store {
             .clone()
             .or_else(|| self.settings.default_model.clone())
     }
+
+    /// The model keys one harness lists, in load order. The settings picker
+    /// scopes its rows to the harness the segmented control shows; the
+    /// merged `models` list cannot distinguish the two catalogs.
+    pub fn model_keys_for(&self, harness: HarnessKind) -> Vec<String> {
+        self.model_infos
+            .iter()
+            .filter(|model| model.harness == harness)
+            .map(|model| model.key.clone())
+            .collect()
+    }
+
+    /// The variants one harness/model pair reports. Empty until that
+    /// harness's catalog lands (or when the model has no tiers), which the
+    /// settings Variant picker explains instead of showing an empty list.
+    pub fn variants_for(&self, harness: HarnessKind, model: &str) -> Vec<String> {
+        variants_for_entry(&self.model_infos, harness, model)
+    }
+
     pub fn seed_variant(&self) -> Option<String> {
         self.settings.default_variant.clone()
     }
@@ -1060,6 +1096,52 @@ impl Store {
             folder: ".".into(),
         });
         let _ = cx;
+    }
+
+    /// Re-reads one harness's model catalog for the settings picker. Starts
+    /// the backend when it is not up; `ModelsLoaded` refreshes the rows. The
+    /// dsh path shares the one `dsh web` server; opencode uses the built-in
+    /// General workspace, the same place the door's first models request goes.
+    pub fn refresh_models(&mut self, harness: HarnessKind, cx: &mut Context<Self>) {
+        // the picker's refresh button spins until the catalog lands
+        self.models_refreshing = Some(harness);
+        match harness {
+            HarnessKind::Dsh => {
+                let running = self.runtimes.contains_key(DSH_SERVER_KEY);
+                self.ensure_dsh(cx);
+                if running {
+                    self.net.send(NetCommand::Request {
+                        ws_key: DSH_SERVER_KEY.into(),
+                        request: ApiRequest::ListModels,
+                    });
+                }
+                // otherwise ServerStarted asks for the list on its own
+            }
+            HarnessKind::OpenCode => {
+                let general = crate::paths::AppPaths::general_workspace_path()
+                    .to_string_lossy()
+                    .to_string();
+                if !self.workspaces.iter().any(|ws| ws.folder_path() == general) {
+                    self.install_workspace(&general, cx);
+                }
+                if !self.workspaces.iter().any(|ws| ws.folder_path() == general) {
+                    // no workspace to host the server: fail the spinner
+                    // instead of parking until the next unrelated event
+                    self.models_refreshing = None;
+                    self.repaint(cx);
+                    return;
+                }
+                if self.runtimes.contains_key(&general) {
+                    self.net.send(NetCommand::Request {
+                        ws_key: general,
+                        request: ApiRequest::ListModels,
+                    });
+                } else {
+                    self.start_workspace(&general, cx);
+                }
+            }
+        }
+        self.repaint(cx);
     }
 
     /// Refreshes every workspace's dsh chat list from the shared server. Each
@@ -2056,5 +2138,40 @@ mod time_tests {
         assert_eq!(relative_time_label(ago(14)), "2w");
         assert_eq!(relative_time_label(ago(60)), "2mo");
         assert_eq!(relative_time_label(ago(400)), "1y");
+    }
+}
+
+#[cfg(test)]
+mod variant_lookup_tests {
+    use super::{HarnessKind, ModelInfo, variants_for_entry};
+
+    fn info(key: &str, harness: HarnessKind, variants: &[&str]) -> ModelInfo {
+        ModelInfo {
+            key: key.into(),
+            harness,
+            variants: variants.iter().map(|v| (*v).to_string()).collect(),
+            context_limit: 0,
+        }
+    }
+
+    /// The same model key exists in both catalogs; a variant pick must stay
+    /// scoped to the harness the settings page is showing.
+    #[test]
+    fn variants_resolve_per_harness_and_model() {
+        let infos = [
+            info("zai/glm", HarnessKind::OpenCode, &["low", "max"]),
+            info("zai/glm", HarnessKind::Dsh, &["max"]),
+            info("no/tiers", HarnessKind::OpenCode, &[]),
+        ];
+        assert_eq!(
+            variants_for_entry(&infos, HarnessKind::OpenCode, "zai/glm"),
+            ["low", "max"]
+        );
+        assert_eq!(
+            variants_for_entry(&infos, HarnessKind::Dsh, "zai/glm"),
+            ["max"]
+        );
+        assert!(variants_for_entry(&infos, HarnessKind::OpenCode, "no/tiers").is_empty());
+        assert!(variants_for_entry(&infos, HarnessKind::OpenCode, "missing").is_empty());
     }
 }

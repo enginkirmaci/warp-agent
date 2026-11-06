@@ -175,6 +175,19 @@ impl SettingsSection {
     }
 }
 
+/// The Chat defaults harness control: the key is the wire id (the callback
+/// and the button's element id use it), the label is the product name the
+/// button draws. Keeping this separate from the render is what the unit test
+/// pins: a display label must never leak into the key.
+fn harness_choices(current: crate::settings::HarnessKind) -> Vec<kit::Choice> {
+    crate::settings::HarnessKind::ALL
+        .iter()
+        .map(|harness| {
+            kit::Choice::new(harness.label(), harness.option_label(), *harness == current)
+        })
+        .collect()
+}
+
 /// One track of the grid inside `grid_width`.
 fn tile_track_width(grid_width: f32, columns: usize) -> f32 {
     let columns = columns.max(1) as f32;
@@ -343,6 +356,9 @@ pub struct WarpWindow {
     settings_buffers: SettingsBuffers,
     /// The Settings page's open section.
     settings_section: SettingsSection,
+    /// The harness the Chat defaults page is configuring: the segmented
+    /// control writes it and the model picker scopes its catalog to it.
+    settings_harness: Entity<crate::ui::settings::HarnessChoice>,
     /// E2E hook: WARP_AGENT_PAGE=settings[-chat|-permissions|-server] opens
     /// the rail's Settings section after the first window exists (the pointer
     /// cannot reach a hidden window, and probes need the page).
@@ -359,6 +375,9 @@ pub struct WarpWindow {
     settings_leafs: Vec<(&'static str, Entity<InputLeaf>)>,
     /// the Model field + its standalone picker component
     settings_model_picker: Option<Entity<FilteredPicker>>,
+    /// the Variant field + its standalone picker component; scoped to the
+    /// selected model's variants
+    settings_variant_picker: Option<Entity<FilteredPicker>>,
     /// session being renamed + its edit field (state for the Enter
     /// subscription, leaf for the per-keystroke renderer)
     rename: Option<(String, Entity<InputState>, Entity<InputLeaf>)>,
@@ -395,6 +414,8 @@ impl WarpWindow {
         let (menu_tx, menu_rx) = async_channel::unbounded::<MenuState>();
         let (folder_tx, folder_rx) = async_channel::unbounded::<String>();
         let settings_buffers = SettingsBuffers::from_settings(&store.read(cx).settings);
+        let settings_harness =
+            cx.new(|_| crate::ui::settings::HarnessChoice(settings_buffers.harness()));
         let font_meta = store.read(cx).fonts.font_meta;
         let tooltip_overlay = tooltip::install(cx, font_meta);
         Self {
@@ -408,6 +429,7 @@ impl WarpWindow {
             add_folder_receiver: folder_rx,
             settings_buffers,
             settings_section: SettingsSection::Appearance,
+            settings_harness,
             open_settings_on_first_render: match std::env::var("WARP_AGENT_PAGE").as_deref() {
                 Ok("settings") => Some(SettingsSection::Appearance),
                 Ok("settings-chat") => Some(SettingsSection::ChatDefaults),
@@ -420,6 +442,7 @@ impl WarpWindow {
             settings_committed_seq: 0,
             settings_leafs: Vec::new(),
             settings_model_picker: None,
+            settings_variant_picker: None,
             rename: None,
             sidebar_filter: String::new(),
             sidebar_scope: SidebarScope::All,
@@ -620,12 +643,13 @@ impl Render for WarpWindow {
 }
 
 /// The settings-page composer state: labeled buffers, labeled leaves and the
-/// optional model picker.
-type SettingsFields = (
-    Vec<(&'static str, Entity<InputState>)>,
-    Vec<(&'static str, Entity<InputLeaf>)>,
-    Option<Entity<FilteredPicker>>,
-);
+/// two catalog pickers (Model and its dependent Variant).
+struct SettingsFields {
+    fields: Vec<(&'static str, Entity<InputState>)>,
+    leafs: Vec<(&'static str, Entity<InputLeaf>)>,
+    model_picker: Option<Entity<FilteredPicker>>,
+    variant_picker: Option<Entity<FilteredPicker>>,
+}
 
 impl WarpWindow {
     fn sync_rename_field(
@@ -661,7 +685,6 @@ impl WarpWindow {
                 // rename field must not re-render the window
                 let leaf = cx.new(|_| InputLeaf {
                     state: entity.clone(),
-                    disabled: false,
                     mono: false,
                     icon: None,
                 });
@@ -699,10 +722,16 @@ impl WarpWindow {
             s.is_settings_open = true;
         });
         self.settings_buffers = SettingsBuffers::from_settings(&self.store.read(cx).settings);
-        let (fields, leafs, model_picker) = self.make_settings_fields(window, cx);
-        self.settings_fields = fields;
-        self.settings_leafs = leafs;
-        self.settings_model_picker = model_picker;
+        let harness = self.settings_buffers.harness();
+        self.settings_harness.update(cx, |scope, cx| {
+            scope.0 = harness;
+            cx.notify();
+        });
+        let settings = self.make_settings_fields(window, cx);
+        self.settings_fields = settings.fields;
+        self.settings_leafs = settings.leafs;
+        self.settings_model_picker = settings.model_picker;
+        self.settings_variant_picker = settings.variant_picker;
         cx.notify();
     }
 
@@ -1016,7 +1045,6 @@ impl WarpWindow {
             .detach();
             self.sidebar_filter_leaf = Some(cx.new(|_| InputLeaf {
                 state,
-                disabled: false,
                 // the prototype's filter is prose with a search icon, not a
                 // mono value field
                 mono: false,
@@ -2105,6 +2133,8 @@ impl WarpWindow {
         let mut fields = Vec::new();
         let mut leafs = Vec::new();
         let mut model_picker = None;
+        let mut model_state = None;
+        let mut variant_state = None;
         for (key, value) in rows {
             if key == "model" {
                 let state = cx.new(|cx| {
@@ -2121,9 +2151,27 @@ impl WarpWindow {
                 })
                 .detach();
                 let store = self.store.clone();
-                let picker = settings_model_picker(state.clone(), store, window, cx);
+                let harness = self.settings_harness.clone();
+                let picker = settings_model_picker(state.clone(), store, harness, window, cx);
+                model_state = Some(state.clone());
                 fields.push((key, state));
                 model_picker = Some(picker);
+            } else if key == "variant" {
+                let state = cx.new(|cx| {
+                    InputState::new(window, cx)
+                        .placeholder("")
+                        .default_value(value)
+                });
+                cx.subscribe(&state, |this, _, event: &InputEvent, cx| {
+                    if matches!(event, InputEvent::Change) {
+                        this.schedule_settings_commit(cx);
+                    }
+                })
+                .detach();
+                // the picker is the visible control; the field only carries
+                // the picked value into `commit_settings`
+                variant_state = Some(state.clone());
+                fields.push((key, state));
             } else {
                 let entity = cx.new(|cx| {
                     InputState::new(window, cx)
@@ -2138,7 +2186,6 @@ impl WarpWindow {
                 .detach();
                 let leaf = cx.new(|_| InputLeaf {
                     state: entity.clone(),
-                    disabled: false,
                     // a settings value is the prototype's `.field text`
                     mono: true,
                     icon: None,
@@ -2147,7 +2194,25 @@ impl WarpWindow {
                 leafs.push((key, leaf));
             }
         }
-        (fields, leafs, model_picker)
+        // the Variant picker lists the selected model's tiers; a model switch
+        // clears the field, and both pickers observe it
+        let variant_picker = match (model_state, variant_state) {
+            (Some(model), Some(variant)) => Some(settings_variant_picker(
+                variant,
+                model,
+                self.store.clone(),
+                self.settings_harness.clone(),
+                window,
+                cx,
+            )),
+            _ => None,
+        };
+        SettingsFields {
+            fields,
+            leafs,
+            model_picker,
+            variant_picker,
+        }
     }
 
     /// One commit a beat after the last keystroke: the buffers re-parse on
@@ -2172,19 +2237,10 @@ impl WarpWindow {
     }
 
     fn settings_field_wrap(&self, key: &str, cx: &mut App) -> gpui::AnyElement {
-        // the Variant default is inert while "always highest" is checked;
-        // pushed into the leaf with a click-rate notify when it flips
-        let disabled = key == "variant" && self.settings_buffers.variant_highest;
         self.settings_leafs
             .iter()
             .find(|(k, _)| *k == key)
             .map(|(_, leaf)| {
-                leaf.update(cx, |leaf, cx| {
-                    if leaf.disabled != disabled {
-                        leaf.disabled = disabled;
-                        cx.notify();
-                    }
-                });
                 // the field box owns the focus/a11y node; this wrapper only
                 // names and sizes the field (a second track_focus here made
                 // two nodes claim a11y focus in one frame)
@@ -2471,7 +2527,14 @@ impl WarpWindow {
                     .text_color(theme::text())
                     .child("Settings"),
             )
-            .child(rows);
+            .child(
+                div()
+                    .id("settings-sections-scroll")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .child(rows),
+            );
 
         let head = div()
             .flex_shrink_0()
@@ -2626,16 +2689,6 @@ impl WarpWindow {
                     warpui_kit_core::palette_control(),
                     rows.is_empty(),
                 ));
-                rows.push(kit::row_with_desc(
-                    "settings-row-Typeface",
-                    "Typeface",
-                    "Interface and code fonts",
-                    div()
-                        .text_size(px(fonts.font_body))
-                        .text_color(theme::text())
-                        .child("Inter + JetBrains Mono"),
-                    rows.is_empty(),
-                ));
                 toggle!(
                     "Reduce motion",
                     Some("Turns off transitions and keeps spinners still. Busy labels stay"),
@@ -2660,11 +2713,25 @@ impl WarpWindow {
                     rows.push(kit::row(
                         "settings-row-Model",
                         "Model",
+                        // long provider/model keys (opencode-go/deepseek-v4.1-flash)
+                        // were truncated at 320; 440 keeps the full name readable
+                        div().w(px(440.)).flex_shrink_0().child(picker),
+                        rows.is_empty(),
+                    ));
+                }
+                if let Some(picker) = self.settings_variant_picker.clone() {
+                    // "always highest" owns the default: the list stays
+                    // readable but does not open while the switch is on
+                    picker.update(cx, |picker, cx| {
+                        picker.set_disabled(buffers.variant_highest, cx);
+                    });
+                    rows.push(kit::row(
+                        "settings-row-Variant",
+                        "Variant",
                         div().w(px(240.)).flex_shrink_0().child(picker),
                         rows.is_empty(),
                     ));
                 }
-                field!("Variant", "variant", None::<&str>);
                 toggle!(
                     "Always select the highest variant by default",
                     None::<&str>,
@@ -2768,22 +2835,46 @@ impl WarpWindow {
         _fonts: &theme::FontTokens,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
-        let current_dsh = self.settings_buffers.default_harness_dsh;
-        let choices = crate::settings::HarnessKind::ALL
-            .iter()
-            .map(|harness| {
-                let dsh = harness.option_label() == "dsh";
-                kit::Choice::new(harness.option_label(), harness.label(), dsh == current_dsh)
-            })
-            .collect();
+        let current = self.settings_buffers.harness();
+        let choices = harness_choices(current);
         let entity = cx.entity();
+        let scope = self.settings_harness.clone();
         kit::segmented(
             "settings-harness",
             choices,
-            move |key, _, cx: &mut gpui::App| {
+            move |key, window, cx: &mut gpui::App| {
+                let picked = crate::settings::HarnessKind::from_wire(key.as_ref())
+                    .unwrap_or(crate::settings::HarnessKind::OpenCode);
                 entity.update(cx, |this, cx| {
-                    this.settings_buffers.default_harness_dsh = key.as_ref() == "dsh";
+                    let was = this.settings_buffers.harness();
+                    if was == picked {
+                        return;
+                    }
+                    this.settings_buffers.default_harness_dsh =
+                        picked == crate::settings::HarnessKind::Dsh;
+                    // the model and variant belong to the harness they were
+                    // listed under; a switch starts at the new server default
+                    for key in ["model", "variant"] {
+                        if let Some((_, field)) =
+                            this.settings_fields.iter().find(|(name, _)| *name == key)
+                        {
+                            field.update(cx, |state, cx| state.set_value("", window, cx));
+                        }
+                    }
+                    this.settings_buffers.default_model.clear();
+                    this.settings_buffers.default_variant.clear();
                     this.commit_settings(cx);
+                    scope.update(cx, |scope, cx| {
+                        scope.0 = picked;
+                        cx.notify();
+                    });
+                    let store = this.store.clone();
+                    store.update(cx, |store, cx| {
+                        store.retarget_untouched_drafts(was, picked, cx);
+                        if picked == crate::settings::HarnessKind::Dsh {
+                            store.ensure_dsh(cx);
+                        }
+                    });
                     cx.notify();
                 });
             },
@@ -2827,7 +2918,6 @@ impl WarpWindow {
 /// handle for reading values; this view is only the renderer.
 struct InputLeaf {
     state: Entity<InputState>,
-    disabled: bool,
     /// The prototype's `.field text`: a settings value (a path, an executable,
     /// a model) is mono, while a filter or a chat title is the UI face.
     mono: bool,
@@ -2840,7 +2930,7 @@ impl Render for InputLeaf {
         // the family's one field; the wrapper around this leaf owns the width
         let handle = self.state.read(cx).focus_handle(cx);
         let mono = self.mono;
-        let input = warpui_kit_core::field::input(&self.state).disabled(self.disabled);
+        let input = warpui_kit_core::field::input(&self.state);
         let field = warpui_kit_core::field::boxed(
             "input-leaf",
             &handle,
@@ -2880,6 +2970,7 @@ const PICKER_ICONS: PickerIcons = PickerIcons {
 fn settings_model_picker(
     state: Entity<InputState>,
     store: Entity<Store>,
+    harness: Entity<crate::ui::settings::HarnessChoice>,
     window: &mut Window,
     cx: &mut Context<WarpWindow>,
 ) -> Entity<FilteredPicker> {
@@ -2890,8 +2981,8 @@ fn settings_model_picker(
         icons: PICKER_ICONS,
         trigger_icon: None,
         provider_badge: true,
-        refresh: false,
-        refresh_label: "",
+        refresh: true,
+        refresh_label: "Refresh models",
         stop_trigger_mousedown: false,
         visible_rows: 10,
         selected_accent: false,
@@ -2908,18 +2999,58 @@ fn settings_model_picker(
         filter_selector: Some("model-dd-filter"),
         list_id: Some("model-dd-list"),
     };
+    // the page that owns the field: a pick must commit through it, since
+    // set_value emits no Change event for the field's subscription. Weak, so
+    // the picker's callback cannot keep the window (and itself) alive.
+    let page = cx.entity().downgrade();
     cx.new(|cx| {
         let data = {
             let state = state.clone();
             let store = store.clone();
+            let harness = harness.clone();
             Box::new(move |filter: &str, _window: &Window, cx: &App| {
-                model_data(&state, &store, filter, cx)
+                model_data(&state, &harness, &store, filter, cx)
             }) as Box<dyn Fn(&str, &Window, &App) -> PickerData>
         };
-        let mut picker =
-            FilteredPicker::new(spec, PickerTarget::Field(state.clone()), data, window, cx);
+        // a pick lands through set_value, which emits no Change event: write
+        // the field, clear the variant (it belonged to the old model) and
+        // commit the page here, or the pick would vanish on reopen
+        let mut picker = FilteredPicker::new(
+            spec,
+            PickerTarget::Callback(Box::new({
+                let state = state.clone();
+                move |value, window, cx| {
+                    state.update(cx, |state, cx| state.set_value(value, window, cx));
+                    let Some(page) = page.upgrade() else {
+                        return;
+                    };
+                    page.update(cx, |this, cx| {
+                        let variant = this
+                            .settings_fields
+                            .iter()
+                            .find(|(key, _)| *key == "variant")
+                            .map(|(_, field)| field.clone());
+                        if let Some(variant) = variant {
+                            variant.update(cx, |state, cx| state.set_value("", window, cx));
+                        }
+                        this.commit_settings(cx);
+                        cx.notify();
+                    });
+                }
+            })),
+            data,
+            window,
+            cx,
+        );
+        let refresh_store = store.clone();
+        let refresh_harness = harness.clone();
+        picker.set_on_refresh(Box::new(move |cx| {
+            let harness = refresh_harness.read(cx).0;
+            refresh_store.update(cx, |store, cx| store.refresh_models(harness, cx));
+        }));
         picker.observe_entity(&store, cx);
         picker.observe_entity(&state, cx);
+        picker.observe_entity(&harness, cx);
         picker
     })
 }
@@ -2928,6 +3059,7 @@ fn settings_model_picker(
 /// groups and the filtered, deduped models.
 fn model_data(
     state: &Entity<InputState>,
+    harness: &Entity<crate::ui::settings::HarnessChoice>,
     store: &Entity<Store>,
     filter: &str,
     cx: &App,
@@ -2935,18 +3067,19 @@ fn model_data(
     let fonts = store.read(cx).fonts;
     let accent = store.read(cx).accent.accent;
     let selected = state.read(cx).value().trim().to_string();
+    let harness = harness.read(cx).0;
+    let refreshing = store.read(cx).models_refreshing == Some(harness);
     let filter = filter.to_lowercase();
     let mut models: Vec<String> = store
         .read(cx)
-        .models
-        .iter()
+        .model_keys_for(harness)
+        .into_iter()
         .filter(|model| {
             let model = model.trim();
             !model.is_empty()
                 && !model.starts_with('(')
                 && (filter.is_empty() || model.to_lowercase().contains(&filter))
         })
-        .cloned()
         .collect();
     // one lowercase allocation per model, not per comparison
     models.sort_by_cached_key(|model| (model_provider(model).to_lowercase(), model.to_lowercase()));
@@ -2965,7 +3098,14 @@ fn model_data(
     if models.is_empty() {
         rows.push(PickerRow::Message {
             id: "model-message".into(),
-            label: "No models yet. Start a workspace to load models.".to_string(),
+            label: match harness {
+                crate::settings::HarnessKind::Dsh => {
+                    "No dsh models yet. Refresh once dsh is running.".to_string()
+                }
+                crate::settings::HarnessKind::OpenCode => {
+                    "No models yet. Start a workspace or refresh.".to_string()
+                }
+            },
         });
     } else {
         let mut last_provider = String::new();
@@ -3007,7 +3147,168 @@ fn model_data(
         fonts,
         accent,
         show_tooltips: false,
+        refreshing,
     }
+}
+
+/// The settings "variant" slot: the selected model's variants (as the
+/// catalog reports them), written straight into the hidden variant field.
+fn settings_variant_picker(
+    state: Entity<InputState>,
+    model: Entity<InputState>,
+    store: Entity<Store>,
+    harness: Entity<crate::ui::settings::HarnessChoice>,
+    window: &mut Window,
+    cx: &mut Context<WarpWindow>,
+) -> Entity<FilteredPicker> {
+    let spec = PickerSpec {
+        key: "variant",
+        trigger_label: "Variant",
+        filter_placeholder: "Filter variants",
+        icons: PICKER_ICONS,
+        trigger_icon: None,
+        provider_badge: false,
+        refresh: false,
+        refresh_label: "",
+        stop_trigger_mousedown: false,
+        visible_rows: 10,
+        selected_accent: false,
+        // a settings slot floats: the list covers the rows under it instead
+        // of stretching the form around itself
+        overlay: true,
+        anchor: OverlayAnchor::Field,
+        trigger_scale: TriggerScale::Regular,
+        trigger_rounded_lg: true,
+        trigger_min_h: Some(26.),
+        panel_chrome: PanelChrome::Cards,
+        trigger_id: Some("variant-dd-toggle"),
+        panel_id: None,
+        filter_selector: Some("variant-dd-filter"),
+        list_id: Some("variant-dd-list"),
+    };
+    // the page that owns the field: a pick must commit through it, since
+    // set_value emits no Change event for the field's subscription. Weak, so
+    // the picker's callback cannot keep the window (and itself) alive.
+    let page = cx.entity().downgrade();
+    cx.new(|cx| {
+        let data = {
+            let state = state.clone();
+            let model = model.clone();
+            let store = store.clone();
+            let harness = harness.clone();
+            Box::new(move |filter: &str, _window: &Window, cx: &App| {
+                variant_data(&state, &model, &harness, &store, filter, cx)
+            }) as Box<dyn Fn(&str, &Window, &App) -> PickerData>
+        };
+        // a pick lands through set_value, which emits no Change event: write
+        // the field and commit the page here, or the pick would vanish on
+        // reopen
+        let mut picker = FilteredPicker::new(
+            spec,
+            PickerTarget::Callback(Box::new({
+                let state = state.clone();
+                move |value, window, cx| {
+                    state.update(cx, |state, cx| state.set_value(value, window, cx));
+                    let Some(page) = page.upgrade() else {
+                        return;
+                    };
+                    page.update(cx, |this, cx| {
+                        this.commit_settings(cx);
+                        cx.notify();
+                    });
+                }
+            })),
+            data,
+            window,
+            cx,
+        );
+        picker.observe_entity(&store, cx);
+        picker.observe_entity(&state, cx);
+        picker.observe_entity(&model, cx);
+        picker.observe_entity(&harness, cx);
+        picker
+    })
+}
+
+/// One render's worth of the Variant picker: the "Default" row, then the
+/// selected model's variants, or a message saying why there are none.
+fn variant_data(
+    state: &Entity<InputState>,
+    model: &Entity<InputState>,
+    harness: &Entity<crate::ui::settings::HarnessChoice>,
+    store: &Entity<Store>,
+    filter: &str,
+    cx: &App,
+) -> PickerData {
+    let fonts = store.read(cx).fonts;
+    let accent = store.read(cx).accent.accent;
+    let model = model.read(cx).value().trim().to_string();
+    let selected = state.read(cx).value().trim().to_string();
+    let harness = harness.read(cx).0;
+    let filter = filter.to_lowercase();
+    let variants: Vec<String> = store
+        .read(cx)
+        .variants_for(harness, &model)
+        .into_iter()
+        .filter(|variant| filter.is_empty() || variant.to_lowercase().contains(&filter))
+        .collect();
+
+    PickerData {
+        body: PickerBody::Rows(variant_rows(&model, &variants, &selected)),
+        selected: Selection {
+            badge: None,
+            label: if selected.is_empty() {
+                "Default".to_string()
+            } else {
+                selected.clone()
+            },
+            value: selected,
+        },
+        footer: None,
+        fonts,
+        accent,
+        show_tooltips: false,
+        refreshing: false,
+    }
+}
+
+/// The rows under the Variant filter. An empty model says what to pick first;
+/// a model with no tiers says so instead of showing an empty list.
+fn variant_rows(model: &str, variants: &[String], selected: &str) -> Vec<PickerRow> {
+    let mut rows = Vec::with_capacity(variants.len() + 2);
+    rows.push(PickerRow::Item(PickerItem {
+        id: "variant-row-default".into(),
+        selector: "variant-row-default".into(),
+        value: String::new(),
+        label: "Default".to_string(),
+        selected: selected.is_empty(),
+        muted: false,
+        trailing_delete: None,
+    }));
+    if model.is_empty() {
+        rows.push(PickerRow::Message {
+            id: "variant-message-pick-model".into(),
+            label: "Pick a model to see its variants.".to_string(),
+        });
+    } else if variants.is_empty() {
+        rows.push(PickerRow::Message {
+            id: "variant-message-empty".into(),
+            label: "This model reports no variants.".to_string(),
+        });
+    } else {
+        for variant in variants {
+            rows.push(PickerRow::Item(PickerItem {
+                id: format!("variant-row-{variant}"),
+                selector: format!("variant-row-{variant}"),
+                value: variant.clone(),
+                label: variant.clone(),
+                selected: variant.eq_ignore_ascii_case(selected),
+                muted: false,
+                trailing_delete: None,
+            }));
+        }
+    }
+    rows
 }
 
 #[cfg(test)]
@@ -3084,5 +3385,90 @@ mod scope_tests {
         assert!(workspace_in_scope(&waiting, SidebarScope::Running, 1));
         assert!(!workspace_in_scope(&idle, SidebarScope::Running, 0));
         assert!(workspace_in_scope(&idle, SidebarScope::All, 0));
+    }
+}
+
+#[cfg(test)]
+mod harness_tests {
+    use super::harness_choices;
+    use crate::settings::HarnessKind;
+
+    /// The regression this pins: a display label ("DeepSeek (dsh)") used as
+    /// the choice key made every click select opencode, and the dsh button
+    /// never rendered as selected.
+    #[test]
+    fn the_harness_choice_keys_are_wire_ids_and_exactly_one_is_selected() {
+        for (current, expected) in [
+            (HarnessKind::OpenCode, "opencode"),
+            (HarnessKind::Dsh, "dsh"),
+        ] {
+            let choices = harness_choices(current);
+            assert_eq!(choices.len(), 2);
+            let selected: Vec<&str> = choices
+                .iter()
+                .filter(|choice| choice.selected)
+                .map(|choice| choice.key.as_ref())
+                .collect();
+            assert_eq!(selected, [expected], "current = {current:?}");
+
+            let dsh = choices
+                .iter()
+                .find(|choice| choice.key == "dsh")
+                .expect("the dsh choice is keyed by its wire id");
+            assert_eq!(dsh.label.as_ref(), "DeepSeek (dsh)");
+            // the display label is not a wire id: a past regression compared
+            // against "DeepSeek (dsh)" and could never select the harness
+            assert_eq!(HarnessKind::from_wire("DeepSeek (dsh)"), None);
+        }
+    }
+}
+
+#[cfg(test)]
+mod variant_rows_tests {
+    use super::{PickerRow, variant_rows};
+
+    fn labels(rows: &[PickerRow]) -> Vec<String> {
+        rows.iter()
+            .filter_map(|row| match row {
+                PickerRow::Item(item) => Some(item.label.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn message(rows: &[PickerRow]) -> Option<&str> {
+        rows.iter().find_map(|row| match row {
+            PickerRow::Message { label, .. } => Some(label.as_str()),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn an_empty_model_asks_for_one_instead_of_listing_nothing() {
+        let rows = variant_rows("", &[], "");
+        assert_eq!(labels(&rows), ["Default"]);
+        assert_eq!(message(&rows), Some("Pick a model to see its variants."));
+    }
+
+    #[test]
+    fn a_model_without_tiers_explains_the_empty_list() {
+        let rows = variant_rows("zai/glm", &[], "");
+        assert_eq!(labels(&rows), ["Default"]);
+        assert_eq!(message(&rows), Some("This model reports no variants."));
+    }
+
+    #[test]
+    fn the_models_variants_follow_default_and_the_saved_pick_is_selected() {
+        let rows = variant_rows("zai/glm", &["low".into(), "max".into()], "max");
+        assert_eq!(labels(&rows), ["Default", "low", "max"]);
+        assert_eq!(message(&rows), None);
+        let selected: Vec<&str> = rows
+            .iter()
+            .filter_map(|row| match row {
+                PickerRow::Item(item) if item.selected => Some(item.value.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(selected, ["max"], "Default is not selected once a tier is");
     }
 }

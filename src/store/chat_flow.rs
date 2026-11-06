@@ -9,29 +9,69 @@ impl Store {
     pub(super) fn create_tile(&mut self, cx: &mut Context<Self>) -> &mut ChatTile {
         let key = format!("t{}", self.next_tile_key);
         self.next_tile_key += 1;
-        let mut tile = ChatTile::new(
-            key.clone(),
-            self.seed_model(),
-            self.seed_agent(),
-            self.seed_variant(),
-        );
-        tile.harness = self.settings.default_harness;
-        if tile.harness == HarnessKind::Dsh {
-            // the seed names an opencode model ("provider/model" of the
-            // workspace server); the dsh catalog has its own — start from the
-            // server default and warm the shared server so the picker lists
-            // the real catalog by the time it opens
-            tile.selected_model = None;
-            tile.selected_variant = None;
-            self.ensure_dsh(cx);
-        }
+        let harness = self.settings.default_harness;
+        let model = self.seed_model_for(harness);
+        // a variant only makes sense next to a model; the model's own list
+        // decides the rest when the tile is built
+        let variant = model.as_ref().and_then(|_| self.seed_variant());
+        let mut tile = ChatTile::new(key.clone(), model, self.seed_agent(), variant);
+        tile.harness = harness;
         tile.apply_variant_list(
             &self.variants_by_model,
             self.settings.default_variant_highest,
         );
         tile.rev = Some(cx.new(|_| ()));
+        // switching a draft to dsh warms the shared server so the picker can
+        // list its catalog by the time it opens
+        if harness == HarnessKind::Dsh {
+            self.ensure_dsh(cx);
+        }
         self.open_tiles.push(tile);
         self.tile_by_key_mut(&key).unwrap()
+    }
+
+    /// The seed model for a new chat: the last model used, then the settings
+    /// default, but only when the chosen harness lists it. The UI remembers
+    /// one last-used key across both backends, and an opencode key means
+    /// nothing to dsh.
+    fn seed_model_for(&self, harness: HarnessKind) -> Option<String> {
+        seed_model_for_harness(
+            self.ui.model.as_deref(),
+            self.settings.default_model.as_deref(),
+            &self.model_infos,
+            harness,
+        )
+    }
+
+    /// Moves untouched drafts from the old default harness to the new one.
+    /// A draft that already carries a session, text or a manual harness pick
+    /// is left alone, and a switch clears the model/variant that belonged to
+    /// the old harness.
+    pub fn retarget_untouched_drafts(
+        &mut self,
+        from: HarnessKind,
+        to: HarnessKind,
+        cx: &mut Context<Self>,
+    ) {
+        if from == to {
+            return;
+        }
+        let mut changed = false;
+        for tile in &mut self.open_tiles {
+            if tile.background || !tile.is_untouched() || tile.harness != from {
+                continue;
+            }
+            tile.harness = to;
+            tile.selected_model = None;
+            tile.selected_variant = None;
+            changed = true;
+        }
+        if changed {
+            if to == HarnessKind::Dsh {
+                self.ensure_dsh(cx);
+            }
+            self.repaint(cx);
+        }
     }
 
     /// New chat: focus the trailing untouched draft or open a new tile, then connect.
@@ -850,5 +890,85 @@ impl Store {
             tile.selected_agent = Some(next);
         }
         self.persist_composer();
+    }
+}
+
+/// The seed model for a new chat: the last model used, then the settings
+/// default, but only when the chosen harness lists it. The UI remembers one
+/// last-used key across both backends, and an opencode key means nothing to
+/// dsh (and vice versa). An empty catalog cannot validate, so it keeps the
+/// candidate rather than dropping it.
+fn seed_model_for_harness(
+    last_used: Option<&str>,
+    default: Option<&str>,
+    infos: &[crate::oc::ModelInfo],
+    harness: HarnessKind,
+) -> Option<String> {
+    let fits = |key: &str| {
+        infos.is_empty()
+            || infos
+                .iter()
+                .any(|model| model.harness == harness && model.key == key)
+    };
+    last_used
+        .filter(|model| fits(model))
+        .or_else(|| default.filter(|model| fits(model)))
+        .map(str::to_string)
+}
+
+#[cfg(test)]
+mod seed_tests {
+    use super::seed_model_for_harness;
+    use crate::oc::ModelInfo;
+    use crate::settings::HarnessKind;
+
+    fn info(key: &str, harness: HarnessKind) -> ModelInfo {
+        ModelInfo {
+            key: key.into(),
+            harness,
+            variants: Vec::new(),
+            context_limit: 0,
+        }
+    }
+
+    #[test]
+    fn the_last_used_model_only_wins_when_the_new_harness_lists_it() {
+        let infos = [
+            info("opencode/a", HarnessKind::OpenCode),
+            info("deepseek/b", HarnessKind::Dsh),
+        ];
+
+        // same harness: the last-used key stays
+        assert_eq!(
+            seed_model_for_harness(
+                Some("opencode/a"),
+                Some("opencode/c"),
+                &infos,
+                HarnessKind::OpenCode
+            )
+            .as_deref(),
+            Some("opencode/a")
+        );
+        // switched to dsh: the opencode key is dropped, the dsh default wins
+        assert_eq!(
+            seed_model_for_harness(
+                Some("opencode/a"),
+                Some("deepseek/b"),
+                &infos,
+                HarnessKind::Dsh
+            )
+            .as_deref(),
+            Some("deepseek/b")
+        );
+        // neither candidate is a dsh model: the server default is safer
+        assert_eq!(
+            seed_model_for_harness(Some("opencode/a"), None, &infos, HarnessKind::Dsh),
+            None
+        );
+        // an empty catalog cannot validate; keep the candidate
+        assert_eq!(
+            seed_model_for_harness(Some("opencode/a"), None, &[], HarnessKind::Dsh).as_deref(),
+            Some("opencode/a")
+        );
     }
 }

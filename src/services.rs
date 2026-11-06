@@ -57,17 +57,65 @@ pub fn init_font_scale(store: &Entity<Store>, cx: &mut App) {
     });
 }
 
+thread_local! {
+    /// Set while a panic is expected and about to be caught (`quietly`): the
+    /// crash net must not read it as a crash.
+    static QUIET: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Runs `f` with the crash net silent on this thread. Only a caller that
+/// catches the panic itself may use it: the Markdown guard probes a parser
+/// that is known to panic on some texts, and a captured backtrace per probe
+/// would flood the log while a message streams.
+pub fn quietly<R>(f: impl FnOnce() -> R) -> R {
+    struct Restore(bool);
+
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            QUIET.with(|quiet| quiet.set(self.0));
+        }
+    }
+
+    let previous = QUIET.with(|quiet| quiet.replace(true));
+    let _restore = Restore(previous);
+    f()
+}
+
+/// True while a `catch_unwind` on this thread is waiting for the panic that
+/// `quietly` silenced.
+fn panic_is_handled() -> bool {
+    QUIET.try_with(|quiet| quiet.get()).unwrap_or(false)
+}
+
 /// The crash net, terminal-side: panics are logged with their payload and a
 /// captured backtrace so the rolling log can name the failing frame on a
 /// machine where the reporter cannot reproduce it. gpui unwinds handler panics
 /// per frame; the app keeps running and the rest of the sessions stay alive.
 pub fn install_panic_hook() {
     std::panic::set_hook(Box::new(move |info| {
+        // a panic raised where a catch_unwind is waiting for it is handled,
+        // not a crash — see quietly()
+        if panic_is_handled() {
+            return;
+        }
         let message = info.to_string();
         let backtrace = std::backtrace::Backtrace::force_capture();
         tracing::error!("panic: {message}\n{backtrace}");
         eprintln!("[warp-agent] panic: {message}");
     }));
+}
+
+#[cfg(test)]
+mod quiet_tests {
+    use super::{panic_is_handled, quietly};
+
+    #[test]
+    fn a_handled_panic_is_quiet_only_inside_quietly() {
+        assert!(!panic_is_handled());
+        assert!(quietly(panic_is_handled));
+        // restored on the way out, or the crash net stays silent for good
+        assert!(!panic_is_handled());
+    }
 }
 
 #[cfg(test)]

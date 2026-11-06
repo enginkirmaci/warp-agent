@@ -16,9 +16,18 @@
 //! - the kit re-lays-out only what changed, so the tile feeds a cached,
 //!   pointer-stable SharedString per message (TileView.md_text) and the
 //!   editor only sees set_value when the text actually moved.
+//!
+//! The surfaces the transcript still draws with gpui-base's `TextView` (user
+//! messages, reasoning, tool titles and details, questions, notes) go through
+//! [`text_view`] here: that parser panics on some texts, and the guard renders
+//! such a text as plain prose instead of letting one message take the window
+//! down with it.
+
+use std::cell::RefCell;
+use std::collections::VecDeque;
 
 use gpui::prelude::*;
-use gpui::{AnyElement, Entity, div, px};
+use gpui::{AnyElement, Entity, SharedString, div, px};
 use warpui_kit_markdown::{CodeBlock, LiveEditor, LiveEditorState};
 
 use crate::ui::tile::TileView;
@@ -103,4 +112,149 @@ pub fn render_markdown(
                 .code_block_overlay(overlay),
         )
         .into_any_element()
+}
+
+// ---------------------------------------------------------------------------
+// The guard for the TextView surfaces
+// ---------------------------------------------------------------------------
+
+/// Verdicts by text, most recently used at the back, held up to this many
+/// bytes. A repaint walks every transcript surface the tile holds; without the
+/// memo each one would be parsed again only to re-learn the verdict it already
+/// had.
+const VERDICT_BYTES: usize = 4 * 1024 * 1024;
+
+thread_local! {
+    static VERDICTS: RefCell<VecDeque<(String, bool)>> = const { RefCell::new(VecDeque::new()) };
+}
+
+/// One warning per run is enough to name the library bug: a streaming message
+/// that carries the offending shape probes a new text every chunk.
+static WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// One transcript text: gpui-base's Markdown `TextView` when the parser can
+/// take it, plain prose when it cannot. `max_lines` is the `TextView`'s
+/// single-line clamp (the tool-title row); the plain branch truncates to match.
+///
+/// The plain branch gives up text selection on that one text. The alternative
+/// is giving up the window: `TextView` parses on the UI thread while laying out
+/// and does not catch the parser, so a text that trips a `markdown` bug aborts
+/// the frame. 1.0.0 has one — a setext heading, then a thematic break, then
+/// another heading hits `expect("Cannot push to non-parent")` in `to_mdast` —
+/// and that is precisely the shape a diff of deleted Markdown writes line for
+/// line, which is how a wand prompt killed the app before its first frame.
+pub fn text_view(
+    id: gpui::ElementId,
+    text: impl Into<SharedString>,
+    max_lines: Option<usize>,
+) -> AnyElement {
+    let text = text.into();
+    if renders_as_markdown(&text) {
+        let view = gpui_kit::base::text::TextView::markdown(id, text);
+        return match max_lines {
+            Some(lines) => view.max_lines(lines),
+            None => view,
+        }
+        .into_any_element();
+    }
+    div()
+        .when(max_lines.is_some(), |row| row.truncate())
+        .child(text)
+        .into_any_element()
+}
+
+/// Whether `TextView`'s parser can render `text`, decided by running it under
+/// `catch_unwind` with the options the TextView uses.
+fn renders_as_markdown(text: &str) -> bool {
+    if let Some(known) = remembered(text) {
+        return known;
+    }
+    let verdict = probe(text);
+    if !verdict && !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        tracing::warn!(
+            bytes = text.len(),
+            "markdown parser panics on this text; rendering it as plain text"
+        );
+    }
+    remember(text, verdict);
+    verdict
+}
+
+/// The options gpui-base gives `TextView::markdown` (`MarkdownExtensions`
+/// defaults in `gpui-base/src/text/markdown_ext.rs`): GFM plus both math
+/// constructs, frontmatter off. They are not public there, so they are
+/// mirrored here — the probe predicts the TextView only while the two agree,
+/// which makes this the place to look when gpui-base moves.
+fn parse_options() -> markdown::ParseOptions {
+    let mut options = markdown::ParseOptions::gfm();
+    options.constructs.math_text = true;
+    options.constructs.math_flow = true;
+    options
+}
+
+fn probe(text: &str) -> bool {
+    let options = parse_options();
+    // the panic is the expected outcome here, so it must not reach the crash
+    // net: a backtrace per probe would flood the log as a message streams
+    crate::services::quietly(|| {
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            markdown::to_mdast(text, &options)
+        }))
+        .is_ok()
+    })
+}
+
+fn remembered(text: &str) -> Option<bool> {
+    VERDICTS.with(|verdicts| {
+        let mut verdicts = verdicts.borrow_mut();
+        let at = verdicts
+            .iter()
+            .position(|(known, _)| known.as_str() == text)?;
+        let entry = verdicts.remove(at)?;
+        let verdict = entry.1;
+        verdicts.push_back(entry);
+        Some(verdict)
+    })
+}
+
+fn remember(text: &str, verdict: bool) {
+    VERDICTS.with(|verdicts| {
+        let mut verdicts = verdicts.borrow_mut();
+        let mut held: usize = verdicts.iter().map(|(known, _)| known.len()).sum();
+        while held + text.len() > VERDICT_BYTES {
+            let Some((dropped, _)) = verdicts.pop_front() else {
+                break;
+            };
+            held -= dropped.len();
+        }
+        // a text that alone exceeds the budget is still kept: it is the one
+        // whose re-parse costs the most
+        verdicts.push_back((text.to_string(), verdict));
+    });
+}
+
+#[cfg(test)]
+mod guard_tests {
+    use super::renders_as_markdown;
+
+    /// The `markdown` 1.0.0 compiler bug the guard exists for. A diff of
+    /// deleted Markdown spells this out exactly: its empty lines read `-`, its
+    /// rules `----`.
+    const PANICS: &str = "-a\n-\n----\n@@ -1 +0,0 @@\n----";
+
+    #[test]
+    fn text_that_panics_the_parser_falls_back_to_plain() {
+        // a second call proves the memo answers without parsing (and without
+        // panicking) again
+        assert!(!renders_as_markdown(PANICS));
+        assert!(!renders_as_markdown(PANICS));
+    }
+
+    #[test]
+    fn ordinary_markdown_still_renders() {
+        assert!(renders_as_markdown("# Title\n\n- one\n- two\n\n`code`\n"));
+        // a setext heading on its own is fine: the guard is not guessing at
+        // headings, it asks the parser
+        assert!(renders_as_markdown("a\n-"));
+    }
 }

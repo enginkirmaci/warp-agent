@@ -74,6 +74,9 @@ pub enum IpcCommand {
         /// None answers with every catalog the app knows; a harness starts
         /// that backend when it has no models yet and answers when loaded.
         harness: Option<HarnessKind>,
+        /// Ask the backend for a fresh list instead of answering from the
+        /// in-memory catalog. The settings refresh button sets it.
+        refresh: bool,
         reply: Reply,
     },
     Status {
@@ -383,6 +386,10 @@ async fn serve_request(
             };
             Some(IpcCommand::Models {
                 harness,
+                refresh: request
+                    .get("refresh")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
                 reply: reply_tx,
             })
         }
@@ -518,9 +525,14 @@ mod tests {
                 IpcCommand::Status { reply } => {
                     let _ = reply.send(Ok(json!({"workspaces": []})));
                 }
-                IpcCommand::Models { harness, reply } => {
+                IpcCommand::Models {
+                    harness,
+                    refresh,
+                    reply,
+                } => {
                     let _ = reply.send(Ok(json!({
                         "harness": harness.map(|harness| harness.label()),
+                        "refresh": refresh,
                     })));
                 }
                 _ => {}
@@ -602,6 +614,18 @@ mod tests {
         assert_eq!(models["id"], 4);
         assert!(models["ok"].as_bool().unwrap());
         assert_eq!(models["harness"], "dsh");
+
+        // refresh is carried to the store: a client asks the door to re-read
+        // the backend instead of answering from its in-memory catalog
+        say(
+            &mut good,
+            json!({"id": 6, "cmd": cmd::MODELS, "harness": "dsh", "refresh": true}),
+        )
+        .await;
+        let refreshed = hear(&mut good).await;
+        assert_eq!(refreshed["id"], 6);
+        assert!(refreshed["ok"].as_bool().unwrap());
+        assert_eq!(refreshed["refresh"], true);
 
         say(
             &mut good,

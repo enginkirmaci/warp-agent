@@ -5,6 +5,12 @@ use crate::store::Store;
 use crate::theme;
 use gpui::Entity;
 
+/// The harness the Chat defaults page is configuring. A tiny entity because
+/// the model picker's data closure outlives a render and must re-scope when
+/// the segmented control changes without borrowing the window view.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HarnessChoice(pub crate::settings::HarnessKind);
+
 #[derive(Clone)]
 pub struct SettingsBuffers {
     pub open_code_executable: String,
@@ -32,6 +38,15 @@ pub struct SettingsBuffers {
 }
 
 impl SettingsBuffers {
+    /// The harness the buffers currently select.
+    pub fn harness(&self) -> crate::settings::HarnessKind {
+        if self.default_harness_dsh {
+            crate::settings::HarnessKind::Dsh
+        } else {
+            crate::settings::HarnessKind::OpenCode
+        }
+    }
+
     pub fn from_settings(s: &crate::settings::AppSettings) -> Self {
         Self {
             open_code_executable: s.open_code_executable.clone(),

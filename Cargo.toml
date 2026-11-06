@@ -28,6 +28,10 @@ warpui-kit-picker = { path = "../../kits/warpui-kit-picker" }
 # chat answers render through the suite's live markdown engine in read-only
 # mode; the same tree-sitter languages the TextView-era highlighting had
 warpui-kit-markdown = { path = "../../kits/warpui-kit-markdown", features = ["mermaid", "all-languages"] }
+# the same parser gpui-base's TextView runs: the Markdown guard probes a text
+# with it before that text reaches a TextView (a parser panic there would abort
+# the render); keep the major in step with gpui-base's `markdown` requirement
+markdown = "1"
 
 gpui-kit = { version = "0.9", features = [
     # tree-sitter grammars for chat code-block highlighting

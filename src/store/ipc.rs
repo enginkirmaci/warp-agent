@@ -24,6 +24,23 @@ pub struct IpcRun {
     pub reply: Reply,
 }
 
+/// The workspace a door command names. `general` — the empty string too — is
+/// the built-in Tasks workspace, which is where a client sends a run that
+/// carries its own context (the wands do); anything else is a folder path that
+/// must exist on disk.
+fn resolve_workspace(workspace: &str) -> Result<String, String> {
+    if workspace.is_empty() || workspace == "general" {
+        return Ok(AppPaths::general_workspace_path()
+            .to_string_lossy()
+            .into_owned());
+    }
+    let normalized = normalize_dir(workspace);
+    if !std::path::Path::new(&normalized).exists() {
+        return Err(format!("folder does not exist: {normalized}"));
+    }
+    Ok(normalized)
+}
+
 impl Store {
     /// Entry from the door, relayed through the UiEvent pump.
     pub fn handle_ipc(&mut self, command: IpcCommand, cx: &mut Context<Self>) {
@@ -71,7 +88,7 @@ impl Store {
         folder: &str,
         cx: &mut Context<Self>,
     ) -> Result<Value, String> {
-        let path = self.ipc_resolve_workspace(folder)?;
+        let path = resolve_workspace(folder)?;
         if !self.workspaces.iter().any(|w| w.folder_path() == path) {
             self.add_workspace(&path, cx);
             if !self.workspaces.iter().any(|w| w.folder_path() == path) {
@@ -86,21 +103,6 @@ impl Store {
         Ok(json!({"workspace": path}))
     }
 
-    /// "general" names the built-in workspace; anything else is a folder
-    /// path that must exist on disk.
-    fn ipc_resolve_workspace(&self, workspace: &str) -> Result<String, String> {
-        if workspace.is_empty() || workspace == "general" {
-            return Ok(AppPaths::general_workspace_path()
-                .to_string_lossy()
-                .into_owned());
-        }
-        let normalized = normalize_dir(workspace);
-        if !std::path::Path::new(&normalized).exists() {
-            return Err(format!("folder does not exist: {normalized}"));
-        }
-        Ok(normalized)
-    }
-
     fn ipc_new_chat(
         &mut self,
         workspace: &str,
@@ -109,7 +111,7 @@ impl Store {
         model: DoorModel,
         cx: &mut Context<Self>,
     ) -> Result<Value, String> {
-        let path = self.ipc_resolve_workspace(workspace)?;
+        let path = resolve_workspace(workspace)?;
         self.open_workspace_at(&path, cx)?;
         self.new_chat(cx);
         let Some(tile_key) = self.focused_tile.clone() else {
@@ -167,7 +169,7 @@ impl Store {
         reply: Reply,
         cx: &mut Context<Self>,
     ) {
-        let path = match self.ipc_resolve_workspace(workspace) {
+        let path = match resolve_workspace(workspace) {
             Ok(path) => path,
             Err(err) => {
                 let _ = reply.send(Err(err));
@@ -349,7 +351,7 @@ impl Store {
                 });
             }
         } else {
-            let Ok(path) = self.ipc_resolve_workspace("general") else {
+            let Ok(path) = resolve_workspace("general") else {
                 let _ = reply.send(Err("general workspace unavailable".into()));
                 return;
             };
@@ -528,5 +530,17 @@ mod tests {
         let all = models_payload(&infos, None);
         assert_eq!(all["models"], json!(["a/x", "b/y"]));
         assert_eq!(all["catalog"].as_array().unwrap().len(), 2);
+    }
+
+    /// The wands send `general`: it must name the built-in Tasks workspace,
+    /// not a folder on disk (which would be worked as a repo path).
+    #[test]
+    fn the_general_name_is_the_tasks_workspace() {
+        let tasks = AppPaths::general_workspace_path()
+            .to_string_lossy()
+            .into_owned();
+        assert_eq!(resolve_workspace("general").unwrap(), tasks);
+        assert_eq!(resolve_workspace("").unwrap(), tasks);
+        assert!(resolve_workspace("/no/such/folder/for-warp-agent").is_err());
     }
 }

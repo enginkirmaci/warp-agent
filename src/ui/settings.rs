@@ -2,7 +2,6 @@
 //! plain strings until Save parses and persists them.
 
 use crate::store::Store;
-use crate::theme;
 use gpui::Entity;
 
 /// The harness the Chat defaults page is configuring. A tiny entity because
@@ -34,7 +33,6 @@ pub struct SettingsBuffers {
     pub lunch_end: String,
     pub off_hours_start: String,
     pub workday_start: String,
-    pub accent_key: String,
 }
 
 impl SettingsBuffers {
@@ -70,7 +68,6 @@ impl SettingsBuffers {
             lunch_end: s.lunch_end_hour.to_string(),
             off_hours_start: s.off_hours_start_hour.to_string(),
             workday_start: s.workday_start_hour.to_string(),
-            accent_key: theme::normalize_accent(s.accent.as_deref()).key.to_string(),
         }
     }
 
@@ -143,7 +140,6 @@ impl SettingsBuffers {
                 Self::parse_int(&self.off_hours_start, set.off_hours_start_hour, 18);
             set.workday_start_hour =
                 Self::parse_int(&self.workday_start, set.workday_start_hour, 8);
-            set.accent = Some(self.accent_key.clone());
             s.apply_saved_settings(cx);
         });
     }

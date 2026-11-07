@@ -62,11 +62,13 @@ fn main() {
             warpui_kit_core::bootstrap::init(cx, text_size.as_deref(), reduce_motion, {
                 let store = store.clone();
                 move |cx: &mut gpui::App| {
-                    store.update(cx, |s, _| s.fonts = theme::active_tokens());
-                    let (accent, fonts) = {
-                        let s = store.read(cx);
+                    // a palette switch moves both the surfaces and the accent;
+                    // keep the store's accent family in step before re-mapping
+                    let (accent, fonts) = store.update(cx, |s, _| {
+                        s.fonts = theme::active_tokens();
+                        s.accent = theme::accent_colors();
                         (s.accent, s.fonts)
-                    };
+                    });
                     theme::apply_kit_theme(accent, &fonts, cx);
                 }
             });

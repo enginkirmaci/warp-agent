@@ -103,8 +103,6 @@ pub struct AppSettings {
     pub workday_start_hour: i64,
     #[serde(rename = "FontScale", default)]
     pub font_scale: Option<String>,
-    #[serde(rename = "Accent", default)]
-    pub accent: Option<String>,
     #[serde(rename = "ShowToolTips", default = "tru")]
     pub show_tool_tips: bool,
     /// Turns the family motion off, spinners included; busy words stay.
@@ -175,7 +173,6 @@ impl Default for AppSettings {
             off_hours_start_hour: 18,
             workday_start_hour: 8,
             font_scale: None,
-            accent: None,
             show_tool_tips: true,
             reduce_motion: false,
             mcp_disabled: false,

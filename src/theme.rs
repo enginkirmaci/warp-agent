@@ -6,21 +6,28 @@
 
 pub use warpui_kit_core::fonts::{FontTokens, active_tokens, code_font, ui_font};
 // every shared color const stays reachable as `theme::X`; the fixed semantic
-// colors stay constants (they never follow the palette), and the accent
-// preset system rides along
+// colors stay constants (they never follow the palette), while surfaces and
+// the accent family come from the live palette ramp
 pub use warpui_kit_core::palette::{
     ADD, AccentColors, BEHIND, BRANCH, CHANGES, DANGER, DEL, HOVER, RUNNING, SUCCESS_BRIGHT, WARN,
-    WORKING, normalize_accent, tint,
+    WORKING, tint,
 };
 // ---- gpui-kit theme mapping ------------------------------------------------
 
 /// Map the WarpAgent palette onto gpui-kit's shadcn-style theme tokens so kit
 /// components (Input/Textarea/TextView/popovers) render in our colors.
-/// The accent family and font tokens are parameters so a settings-page preset
-/// swap can re-run the mapping (`Theme::update` refreshes every window). Call
-/// after [`gpui_kit::init`], before opening windows.
+/// The accent family and font tokens are parameters so a palette or text-size
+/// change can re-run the mapping (`Theme::update` refreshes every window).
+/// Call after [`gpui_kit::init`], before opening windows.
 pub fn apply_kit_theme(accent: AccentColors, fonts: &FontTokens, cx: &mut gpui::App) {
     warpui_kit_core::apply_kit_theme(accent, fonts, window_chrome(), cx);
+}
+
+/// The live accent family: the palette ramp's own accent, so switching the
+/// shared palette recolors fills, rings and selection in the same click. The
+/// app keeps no accent preset of its own.
+pub fn accent_colors() -> AccentColors {
+    warpui_kit_core::palette::current_ramp().accent_colors()
 }
 
 // ---- metrics ---------------------------------------------------------------

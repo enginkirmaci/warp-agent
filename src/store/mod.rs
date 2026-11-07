@@ -397,7 +397,6 @@ impl Store {
         if settings.auto_allow_always.is_none() && ui.auto_allow_always.is_some() {
             // keep reading from ui state like the C# fallback until settings has it
         }
-        let accent_preset = theme::normalize_accent(settings.accent.as_deref());
         let fonts = theme::active_tokens();
         let auto_allow = ui.auto_allow_always.unwrap_or(true);
 
@@ -444,7 +443,7 @@ impl Store {
         let mut store = Self {
             settings: settings.clone(),
             ui: ui.clone(),
-            accent: AccentColors::for_preset(accent_preset),
+            accent: theme::accent_colors(),
             fonts,
             tool_tips_visible: settings.show_tool_tips,
             workspaces: Vec::new(),
@@ -1775,6 +1774,7 @@ impl Store {
     /// font_size.
     pub fn rescale_fonts(&mut self, cx: &mut Context<Self>) {
         self.fonts = theme::active_tokens();
+        self.accent = theme::accent_colors();
         theme::apply_kit_theme(self.accent, &self.fonts, cx);
         crate::ui::tooltip::sync_settings(cx, self.tool_tips_visible, self.fonts.font_meta);
         cx.notify();
@@ -1786,8 +1786,7 @@ impl Store {
             self.auto_allow = allowed;
         }
         self.ui.auto_allow_always = Some(self.auto_allow);
-        self.accent =
-            AccentColors::for_preset(theme::normalize_accent(self.settings.accent.as_deref()));
+        self.accent = theme::accent_colors();
         // re-map the kit theme so input selection/ring/primary follow the preset
         // (Theme::update refreshes every window)
         theme::apply_kit_theme(self.accent, &self.fonts, cx);

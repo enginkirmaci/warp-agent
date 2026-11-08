@@ -22,7 +22,7 @@ fn workspace_display_name(path: &str) -> String {
 /// Tasks on top.
 pub(super) fn workspace_order_key(
     path: &str,
-    favorites: &std::collections::HashMap<String, bool>,
+    favorites: &warpui_kit_platform::config::KeyMap<bool>,
 ) -> (bool, bool, String) {
     let general = path == crate::paths::AppPaths::general_workspace_path().to_string_lossy();
     (
@@ -35,7 +35,7 @@ pub(super) fn workspace_order_key(
 /// Sidebar order: Tasks leads, then favorites, the rest alphabetical.
 pub(super) fn sort_workspaces(
     workspaces: &mut [WorkspaceState],
-    favorites: &std::collections::HashMap<String, bool>,
+    favorites: &warpui_kit_platform::config::KeyMap<bool>,
 ) {
     workspaces.sort_by_key(|w| workspace_order_key(&w.path, favorites));
 }
@@ -51,7 +51,10 @@ pub struct WorkspaceItem {
 }
 
 impl WorkspaceItem {
-    pub fn new(state: WorkspaceState, favorites: &std::collections::HashMap<String, bool>) -> Self {
+    pub fn new(
+        state: WorkspaceState,
+        favorites: &warpui_kit_platform::config::KeyMap<bool>,
+    ) -> Self {
         let name = workspace_display_name(&state.path);
         let is_favorite = favorites.contains_key(&state.path);
         Self {

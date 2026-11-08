@@ -57,7 +57,7 @@ fn main() {
             // rescaled the type.
             let (text_size, reduce_motion) = {
                 let s = store.read(cx);
-                (s.settings.font_scale.clone(), s.settings.reduce_motion)
+                (s.settings.text_size.clone(), s.settings.reduce_motion)
             };
             warpui_kit_core::bootstrap::init(cx, text_size.as_deref(), reduce_motion, {
                 let store = store.clone();

@@ -26,7 +26,7 @@ impl AppPaths {
         Self::config_dir().join("ui.json")
     }
     pub fn models_cache_file() -> PathBuf {
-        Self::config_dir().join("models.cache.json")
+        Self::config_dir().join("cache").join("models.json")
     }
     /// Cwd of the built-in General workspace: general-purpose chats that belong
     /// to no project folder. The server still needs a directory; this one is ours.
@@ -41,6 +41,7 @@ impl AppPaths {
     pub fn migrate_legacy_layout() {
         paths::adopt_legacy_logs(&legacy_dir().join("logs"));
         paths::adopt_legacy_dir(&legacy_dir(), &Self::config_dir());
+        migrate_cache_file();
     }
 
     /// Copies a legacy opencode-agent file into `~/.warp/agent` when the new copy does not exist yet.
@@ -73,6 +74,23 @@ impl AppPaths {
     }
 }
 
+/// The model cache moved from the agent folder's root into `cache/`.
+fn migrate_cache_file() {
+    let source = AppPaths::config_dir().join("models.cache.json");
+    if !source.exists() {
+        return;
+    }
+    let cache = AppPaths::config_dir().join("cache");
+    let dest = cache.join("models.json");
+    if dest.exists() {
+        let _ = std::fs::remove_file(&source);
+        return;
+    }
+    if std::fs::create_dir_all(&cache).is_ok() {
+        let _ = std::fs::rename(&source, &dest);
+    }
+}
+
 /// The folder this app owned before the suite layout: `~/.warp-agent`.
 fn legacy_dir() -> PathBuf {
     paths::home().join(".warp-agent")
@@ -88,6 +106,10 @@ mod tests {
         assert_eq!(AppPaths::logs_dir(), paths::suite_root().join("logs"));
         assert!(AppPaths::settings_file().ends_with("settings.json"));
         assert!(AppPaths::general_workspace_path().ends_with("general"));
+        assert_eq!(
+            AppPaths::models_cache_file(),
+            AppPaths::config_dir().join("cache").join("models.json")
+        );
     }
 
     #[test]

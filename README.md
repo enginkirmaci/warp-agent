@@ -16,9 +16,10 @@ cargo run --release  # release build (LTO, stripped)
 ```
 
 First build fetches GPUI from the zed git repo and takes a while. Needs the
-usual Wayland/Vulkan dev packages. State (settings.json, ui.json, the model cache,
-the built-in General workspace, the door endpoint) lives in `~/.warp/agent`;
-the rolling logs go to the suite's shared `~/.warp/logs`.
+usual Wayland/Vulkan dev packages. State (versioned `settings.json` and
+`ui.json`, `cache/models.json`, the built-in General workspace and the door
+endpoint) lives in `~/.warp/agent`; the rolling logs go to the suite's shared
+`~/.warp/logs`.
 
 ## DevTools door
 
@@ -92,7 +93,7 @@ This directory only carries the assets: `packaging/linux/{*.desktop,icons}`,
 | `src/ui/tile.rs` | ChatTile.axaml(+cs) | Transcript item cards (user/assistant/reasoning/tool/image/permission/question/note), tasks+agents flyout, model/variant/agent pickers, queue rows, attachments |
 | `src/ui/window.rs` | MainWindow.axaml(+cs) | Titlebar (drag/zoom/close/toggle), workspace + chat tree with context menus, drag-resizable sidebar, settings page, restore banner |
 | `src/services.rs` | TerminalLauncher + SystemFontScale | `Open in opencode` terminal probe (alacritty→…), gsettings text-scale follower |
-| `src/settings.rs`, `src/paths.rs`, `src/logging.rs` | AppSettings/UiState/AppPaths/AppLogging | Same files, same defaults; `~/.warp-agent` is adopted on first run |
+| `src/settings.rs`, `src/paths.rs`, `src/logging.rs` | AppSettings/UiState/AppPaths/AppLogging | Versioned snake_case settings/UI state, one-time legacy import; `~/.warp-agent` is adopted on first run |
 | `assets/` | — | Icons + spark logo (embedded) |
 
 Verified against opencode 1.18.32.

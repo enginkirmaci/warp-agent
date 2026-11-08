@@ -445,7 +445,7 @@ impl Store {
             ui: ui.clone(),
             accent: theme::accent_colors(),
             fonts,
-            tool_tips_visible: settings.show_tool_tips,
+            tool_tips_visible: settings.show_tooltips,
             workspaces: Vec::new(),
             selected_workspace: None,
             sessions: Vec::new(),
@@ -515,7 +515,7 @@ impl Store {
             commands: HashMap::new(),
             file_results: None,
             mcp_names: HashMap::new(),
-            mcp_disabled: ui.mcp_disabled_ws.iter().cloned().collect(),
+            mcp_disabled: ui.mcp_disabled_workspaces.iter().cloned().collect(),
         };
 
         // heal paths saved by older builds: fs::canonicalize used to leak the
@@ -660,7 +660,7 @@ impl Store {
     pub fn save_state(&mut self) {
         self.ui.active_workspace = self.selected_workspace.clone();
         self.ui.auto_allow_always = Some(self.auto_allow);
-        self.ui.mcp_disabled_ws = {
+        self.ui.mcp_disabled_workspaces = {
             let mut paths: Vec<String> = self.mcp_disabled.iter().cloned().collect();
             paths.sort();
             paths
@@ -1188,7 +1188,7 @@ impl Store {
     /// expanded workspace used to leave it running forever. The shared dsh
     /// process is exempt (one singleton, started on demand).
     fn sweep_idle_servers(&mut self, cx: &mut Context<Self>) {
-        let idle_min = self.settings.server_idle_stop_min;
+        let idle_min = self.settings.server_idle_stop_minutes;
         if idle_min <= 0 {
             return;
         }
@@ -1251,7 +1251,7 @@ impl Store {
             .unwrap_or_else(|| path.to_string());
         tracing::info!(
             "stopping the {name} server ({} min idle)",
-            self.settings.server_idle_stop_min
+            self.settings.server_idle_stop_minutes
         );
         self.net.send(NetCommand::StopServer {
             ws_key: path.into(),
@@ -1497,7 +1497,7 @@ impl Store {
             return;
         };
         let folder = ws.folder_path().to_string();
-        let executable = self.settings.open_code_executable.clone();
+        let executable = self.settings.opencode_executable.clone();
         tracing::info!("starting server for {}", ws.name);
         self.net.send(NetCommand::StartServer {
             ws_key: folder,
@@ -1790,7 +1790,7 @@ impl Store {
         // re-map the kit theme so input selection/ring/primary follow the preset
         // (Theme::update refreshes every window)
         theme::apply_kit_theme(self.accent, &self.fonts, cx);
-        self.tool_tips_visible = self.settings.show_tool_tips;
+        self.tool_tips_visible = self.settings.show_tooltips;
         warpui_kit_core::motion::set_reduced(
             self.settings.reduce_motion || warpui_kit_core::motion::system_prefers_reduced(),
         );

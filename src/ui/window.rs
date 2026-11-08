@@ -2115,7 +2115,7 @@ impl WarpWindow {
     ) -> SettingsFields {
         let b = self.settings_buffers.clone();
         let rows: Vec<(&'static str, String)> = vec![
-            ("executable", b.open_code_executable),
+            ("executable", b.opencode_executable),
             ("dsh_executable", b.dsh_executable),
             ("model", b.default_model),
             ("variant", b.default_variant),
@@ -2698,8 +2698,8 @@ impl WarpWindow {
                 toggle!(
                     "Show tooltips on hover",
                     None::<&str>,
-                    buffers.show_tool_tips,
-                    show_tool_tips
+                    buffers.show_tooltips,
+                    show_tooltips
                 );
             }
             SettingsSection::ChatDefaults => {
@@ -2890,7 +2890,7 @@ impl WarpWindow {
         for (key, field) in &self.settings_fields {
             let text = field.read(cx).value().to_string();
             match *key {
-                "executable" => buffers.open_code_executable = text,
+                "executable" => buffers.opencode_executable = text,
                 "dsh_executable" => buffers.dsh_executable = text,
                 "model" => buffers.default_model = text,
                 "variant" => buffers.default_variant = text,

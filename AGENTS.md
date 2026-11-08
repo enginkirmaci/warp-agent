@@ -26,6 +26,10 @@ Prefer adding a library boundary before adding a view-level probe to this app.
 - `src/ui/` — the window, sidebar, tile grid, settings and markdown view.
 - `src/settings.rs`, `paths.rs`, `logging.rs`, `services.rs`, `theme.rs`.
 
+Settings and UI state are versioned snake_case documents; the contract is
+`../../docs/agents/settings-schema.md`. The model cache lives in
+`~/.warp/agent/cache/models.json` and is disposable.
+
 ## Startup order
 
 1. `paths::AppPaths::migrate_legacy_layout()` — absorb `~/.warp-agent` before

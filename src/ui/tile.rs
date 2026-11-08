@@ -67,7 +67,7 @@ use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::Arc;
-use warpui_kit_core::{motion, shell};
+use warpui_kit_core::{motion, shell, text_menu};
 use warpui_kit_diff::{render_code, render_diff, sniff_lang};
 use warpui_kit_markdown::LiveEditorState;
 
@@ -330,12 +330,14 @@ impl TileView {
         text: &str,
         id_name: &'static str,
         max_lines: Option<usize>,
+        cx: &gpui::App,
     ) -> gpui::AnyElement {
         let stable = self.md_text(cache_key, text);
         crate::ui::markdown::text_view(
             gpui::ElementId::NamedInteger(id_name.into(), Self::hash(cache_key)),
             stable,
             max_lines,
+            text_menu::focus(cx),
         )
     }
 
@@ -852,6 +854,7 @@ impl TileView {
                                         ),
                                         text.clone(),
                                         None,
+                                        None,
                                     )),
                             )
                             .child(
@@ -1031,6 +1034,7 @@ impl TileView {
                                 ),
                                 body,
                                 None,
+                                text_menu::focus(cx),
                             )),
                         )
                     })
@@ -1139,7 +1143,7 @@ impl TileView {
                                                 .text_size(px(fonts.font_body))
                                                 .text_color(theme::DANGER)
                                                 .child(self.transcript_text(
-                                                    item_id, text, "errnote", None,
+                                                    item_id, text, "errnote", None, cx,
                                                 )),
                                         ),
                                 ),
@@ -1153,7 +1157,7 @@ impl TileView {
                         .text_color(theme::text_muted())
                         .italic()
                         .py_0p5()
-                        .child(self.transcript_text(item_id, text, "sysnote", None))
+                        .child(self.transcript_text(item_id, text, "sysnote", None, cx))
                         .into_any_element()
                 }
             }
@@ -1206,6 +1210,7 @@ impl TileView {
                                 &tool.title,
                                 "tooltitle",
                                 Some(1),
+                                cx,
                             )),
                     )
                     .child(
@@ -1248,12 +1253,16 @@ impl TileView {
                             "fold-diff".into(),
                             Self::hash(item_id),
                         ))
-                        .child(render_diff(
-                            tool.diff.as_deref().unwrap_or(""),
-                            Some(&tool.file_path),
-                            fonts.font_meta,
-                            window,
-                            cx,
+                        .child(text_menu::attach(
+                            gpui::ElementId::Name(format!("tool-diff-menu-{item_id}").into()),
+                            render_diff(
+                                tool.diff.as_deref().unwrap_or(""),
+                                Some(&tool.file_path),
+                                fonts.font_meta,
+                                window,
+                                cx,
+                            ),
+                            text_menu::focus(cx),
                         )),
                     )
                 })
@@ -1366,7 +1375,7 @@ impl TileView {
                     .text_size(px(fonts.font_meta))
                     .font_family(theme::code_font())
                     .text_color(color)
-                    .child(self.transcript_text(cache_key, text, "tooldetails", None)),
+                    .child(self.transcript_text(cache_key, text, "tooldetails", None, cx)),
             })
             .into_any_element()
     }
@@ -1600,12 +1609,18 @@ impl TileView {
                                             Self::hash(item_id),
                                         ))
                                         .child(
-                                            render_diff(
-                                                perm.diff.as_deref().unwrap_or(""),
-                                                None,
-                                                fonts.font_meta,
-                                                window,
-                                                cx,
+                                            text_menu::attach(
+                                                gpui::ElementId::Name(
+                                                    format!("perm-diff-menu-{}", perm.id).into(),
+                                                ),
+                                                render_diff(
+                                                    perm.diff.as_deref().unwrap_or(""),
+                                                    None,
+                                                    fonts.font_meta,
+                                                    window,
+                                                    cx,
+                                                ),
+                                                text_menu::focus(cx),
                                             ),
                                         ),
                                     )
@@ -1836,6 +1851,7 @@ impl TileView {
                         resolution,
                         "qres",
                         None,
+                        cx,
                     )),
             );
         }
@@ -1949,6 +1965,7 @@ impl TileView {
                         &entry.question,
                         "qtext",
                         None,
+                        cx,
                     )),
             );
         for (oi, option) in entry.options.iter().enumerate() {

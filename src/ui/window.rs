@@ -18,6 +18,7 @@ use std::rc::Rc;
 use warpui_kit_core::A11y as _;
 use warpui_kit_core::settings as kit;
 use warpui_kit_core::shell;
+use warpui_kit_core::text_menu::{self, TextMenuAnchor};
 use warpui_kit_picker::{
     FilteredPicker, OverlayAnchor, PanelChrome, PickerBody, PickerData, PickerIcons, PickerItem,
     PickerRow, PickerSpec, PickerTarget, Selection, TriggerScale, model_name, model_provider,
@@ -348,6 +349,8 @@ pub struct WarpWindow {
     /// the app's tooltip overlay (also reachable via the TooltipHost global);
     /// rendered as the last child so popups paint above everything
     tooltip_overlay: Entity<gpui_kit::base::TooltipOverlay>,
+    /// the read-only text menu's action anchor; rendered once at the root
+    text_menu: Entity<TextMenuAnchor>,
     menu_sender_cell: async_channel::Sender<MenuState>,
     menu_receiver: async_channel::Receiver<MenuState>,
     menu: Option<MenuState>,
@@ -418,10 +421,12 @@ impl WarpWindow {
             cx.new(|_| crate::ui::settings::HarnessChoice(settings_buffers.harness()));
         let font_meta = store.read(cx).fonts.font_meta;
         let tooltip_overlay = tooltip::install(cx, font_meta);
+        let text_menu = text_menu::install(cx);
         Self {
             store,
             tile_views: HashMap::new(),
             tooltip_overlay,
+            text_menu,
             menu_sender_cell: menu_tx,
             menu_receiver: menu_rx,
             menu: None,
@@ -552,6 +557,7 @@ impl Render for WarpWindow {
             // mounts the window's selection machinery: the diff bodies and
             // markdown views register with it for drag selection and copy
             .child(gpui_kit::base::TextSelectionLayer)
+            .child(self.text_menu.clone())
             .child(self.render_titlebar(window, cx))
             .child(content);
 

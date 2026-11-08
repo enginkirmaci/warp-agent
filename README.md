@@ -102,5 +102,4 @@ Verified against opencode 1.18.32.
 
 - Tooltips render on hover (built on gpui_base's overlay); the "Show tooltips on hover" setting gates them.
 - The transcript is not virtualized (the C# one wasn't either).
-- The composer input has no text selection yet (no select-all/copy inside the field; message copy via right-click menus works).
 - IME composition is not wired (dead-key/CJK input in the composer falls back to plain key events).

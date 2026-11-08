@@ -147,15 +147,20 @@ pub fn text_view(
     id: gpui::ElementId,
     text: impl Into<SharedString>,
     max_lines: Option<usize>,
+    menu: Option<gpui::FocusHandle>,
 ) -> AnyElement {
     let text = text.into();
     if renders_as_markdown(&text) {
-        let view = gpui_kit::base::text::TextView::markdown(id, text);
-        return match max_lines {
+        let view = gpui_kit::base::text::TextView::markdown(id.clone(), text);
+        let view = match max_lines {
             Some(lines) => view.max_lines(lines),
             None => view,
         }
         .into_any_element();
+        return match menu {
+            Some(focus) => warpui_kit_core::text_menu::attach(id, view, Some(focus)),
+            None => view,
+        };
     }
     div()
         .when(max_lines.is_some(), |row| row.truncate())

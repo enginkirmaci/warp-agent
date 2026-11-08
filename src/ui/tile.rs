@@ -16,6 +16,9 @@ use warpui_kit_picker::{
 const TILE_HEAD_HEIGHT: f32 = 44.;
 /// A message's measure: a tile can be far wider than a line should read.
 const MESSAGE_WIDTH: f32 = 760.;
+/// Space below one transcript row. The flex column this replaced supplied it
+/// with `gap_2p5`; a list lays rows out flush, so each row carries its own.
+const TRANSCRIPT_GAP: f32 = 10.;
 const CARD_WIDTH: f32 = 640.;
 const PILL_HEIGHT: f32 = 28.;
 const SEND_SIZE: f32 = 30.;
@@ -56,8 +59,8 @@ use crate::ui::tooltip::tip;
 use gpui::prelude::*;
 use gpui::{
     AccessibleAction, Animation, AnimationExt as _, App, Bounds, Context, Entity, Focusable,
-    ImageFormat, MouseButton, Pixels, Render, Role, ScrollHandle, SharedString, Toggled, Window,
-    actions, canvas, div, img, px, relative,
+    FollowMode, ImageFormat, ListAlignment, ListState, MouseButton, Pixels, Render, Role,
+    SharedString, Toggled, Window, actions, canvas, div, img, list, px, relative,
 };
 use gpui_kit::base::ElementExt as _;
 use gpui_kit::component::input::{
@@ -123,20 +126,120 @@ enum ContextMenu {
 }
 
 /// One cached assistant-message editor: the entity, the text it was last
-/// fed, and the content height the tile last saw (the tile re-renders only
-/// on real height moves — see `md_editor`).
+/// fed, and the selection/height the tile last saw (the tile re-renders only
+/// when one of those moves — see `md_editor`).
 struct MdEditor {
     fed: SharedString,
     editor: Entity<LiveEditorState>,
-    seen_height: Rc<Cell<f32>>,
+    seen: Rc<Cell<(usize, usize, f32)>>,
+}
+
+/// One row of the transcript: a single card, or a run of two or more
+/// consecutive tool calls folded into one disclosure. The virtualized list
+/// renders these by index; `key` is the row's identity, what the splice
+/// compares so a streaming append leaves the rows above it untouched.
+///
+/// A row carries the item's index and id, not the `Arc<ChatItem>`: a row lives
+/// across frames, and a held Arc would turn every streaming update's
+/// `Arc::make_mut` into a full copy of the text. The payload is read from the
+/// store when the row renders, and the id catches an index that moved.
+enum Row {
+    Item {
+        index: usize,
+        id: String,
+    },
+    ToolGroup {
+        key: String,
+        members: Vec<(usize, String)>,
+        open: bool,
+    },
+}
+
+impl Row {
+    fn key(&self) -> &str {
+        match self {
+            Row::Item { id, .. } => id,
+            Row::ToolGroup { key, .. } => key,
+        }
+    }
+}
+
+/// Flattens the tile's items into transcript rows: a run of two or more
+/// consecutive tool calls becomes one collapsible row, everything else one
+/// row each.
+fn transcript_rows(items: &[Arc<ChatItem>], expanded: &HashSet<String>) -> Vec<Row> {
+    let mut rows = Vec::with_capacity(items.len());
+    let mut idx = 0;
+    while idx < items.len() {
+        if matches!(items[idx].as_ref(), ChatItem::Tool(_)) {
+            let mut end = idx + 1;
+            while end < items.len() && matches!(items[end].as_ref(), ChatItem::Tool(_)) {
+                end += 1;
+            }
+            if end - idx >= 2 {
+                let key = format!("toolgroup:{}", items[idx].id());
+                rows.push(Row::ToolGroup {
+                    open: expanded.contains(&key),
+                    key,
+                    members: (idx..end).map(|at| (at, items[at].id())).collect(),
+                });
+                idx = end;
+                continue;
+            }
+        }
+        rows.push(Row::Item {
+            index: idx,
+            id: items[idx].id(),
+        });
+        idx += 1;
+    }
+    rows
+}
+
+/// The splice that takes `old` to `new`: the range of old rows that changed
+/// and how many new rows replace it. `None` when the keys line up, so an
+/// unchanged transcript costs a comparison, not a list reset. A streaming
+/// append touches only the last row.
+fn row_splice(old: &[Row], new: &[Row]) -> Option<(std::ops::Range<usize>, usize)> {
+    let mut prefix = 0;
+    while prefix < old.len() && prefix < new.len() && old[prefix].key() == new[prefix].key() {
+        prefix += 1;
+    }
+    let mut suffix = 0;
+    while suffix < old.len() - prefix
+        && suffix < new.len() - prefix
+        && old[old.len() - 1 - suffix].key() == new[new.len() - 1 - suffix].key()
+    {
+        suffix += 1;
+    }
+    let old_end = old.len() - suffix;
+    let new_end = new.len() - suffix;
+    (old_end != prefix || new_end != prefix).then_some((prefix..old_end, new_end - prefix))
 }
 
 pub struct TileView {
     pub key: String,
     store: Entity<Store>,
-    scroll: ScrollHandle,
-    pinned: bool,
-    last_max: Pixels,
+    /// The transcript as a virtualized list: only the rows in view are built
+    /// and laid out, so a chat with a thousand messages costs a screenful per
+    /// frame instead of the whole transcript.
+    list_state: ListState,
+    /// The rows the list's item count mirrors, built on the last render. A
+    /// changed tail is spliced into the list rather than reset, which keeps
+    /// the measured heights of everything above it.
+    rows: Rc<Vec<Row>>,
+    /// `fold_rev` the rows were built with: a fold toggle changes which tools
+    /// are rows (and which group is open).
+    rows_fold_rev: u64,
+    /// Mirror of the list's follow state, refreshed from render and from the
+    /// list's scroll events: the jump-to-latest button reads it.
+    following: bool,
+    /// One pending re-read of the follow state after a scroll: the list
+    /// re-engages following inside its layout, after this frame's render.
+    follow_check: Option<gpui::Task<()>>,
+    /// `font_body` of the last render: a text-size change moves every line,
+    /// and the list only invalidates its cached heights on a width change.
+    last_font_body: f32,
     expanded: HashSet<String>, // fold state by item id
     /// Bumped on every fold toggle: `expanded` is unordered, so the cache-key
     /// fingerprint hashes this counter instead of the set.
@@ -176,9 +279,9 @@ pub struct TileView {
     /// (set_value emits no Change) — replaces render-time value reads
     last_field_text: String,
     question_inputs: HashMap<String, Entity<QuestionField>>,
-    /// question input keys touched by the current render pass — the prune
-    /// after the transcript loop drops inputs of resolved/removed questions
-    question_keys_seen: HashSet<String>,
+    /// question input keys of the current transcript — the prune after the
+    /// transcript loop drops inputs of resolved/removed questions
+    question_keys: HashSet<String>,
     last_composer_text: String,
     /// composer suggestion menu as its own leaf view: it subscribes to the
     /// composer state directly, so the filter re-evaluates per keystroke
@@ -279,7 +382,7 @@ impl TileView {
                 MdEditor {
                     fed: text,
                     editor: editor.clone(),
-                    seen_height: entry.seen_height.clone(),
+                    seen: entry.seen.clone(),
                 },
             );
             return editor;
@@ -291,17 +394,24 @@ impl TileView {
             editor
         });
         // the tile is a cached view: it re-renders only when it is notified,
-        // and plain reads register no dependency — so the height the message
-        // wrapper sizes itself from must be chased explicitly. Only real
-        // moves notify: the editor fires on every selection drag too, and a
-        // repaint per mouse move would rebuild the transcript for nothing.
-        let seen_height = Rc::new(Cell::new(f32::NAN));
+        // and the editor is not a view, so its own notify never invalidates
+        // this cached subtree. Two things must be chased explicitly:
+        // - the content height the message wrapper sizes itself from, and
+        // - the selection, which is painted by the editor but moved by the
+        //   mouse: without this the tile only showed a drag's highlight when
+        //   some unrelated store event happened to repaint it (the ticker
+        //   inside a streaming chat hid it; an idle one did not).
+        // Both are compared here so hover moves and identical re-notifies stay
+        // free.
+        let seen = Rc::new(Cell::new((usize::MAX, usize::MAX, f32::NAN)));
         {
-            let seen_height = seen_height.clone();
+            let seen = seen.clone();
             cx.observe(&editor, move |_, editor, cx| {
-                let height = editor.read(cx).content_height();
-                if height != seen_height.get() {
-                    seen_height.set(height);
+                let editor = editor.read(cx);
+                let range = editor.selection_range();
+                let next = (range.start, range.end, editor.content_height());
+                if seen.get() != next {
+                    seen.set(next);
                     cx.notify();
                 }
             })
@@ -312,7 +422,7 @@ impl TileView {
             MdEditor {
                 fed: text,
                 editor: editor.clone(),
-                seen_height,
+                seen,
             },
         );
         editor
@@ -573,8 +683,8 @@ impl TileView {
             if let InputEvent::PressEnter { shift: false, .. } = event {
                 let key = key_for_send.clone();
                 store_handle.update(cx, move |s, cx| s.send_from_tile(&key, cx));
-                this.pinned = true;
-                this.scroll.scroll_to_bottom();
+                // sending re-pins: the reply lands at the tail of the chat
+                this.list_state.set_follow_mode(FollowMode::Tail);
                 cx.notify();
             }
         })
@@ -629,12 +739,30 @@ impl TileView {
             menu
         });
 
+        // top-aligned so a chat shorter than the tile keeps its first message
+        // at the top (the flex column's look); the tail follow below puts a
+        // longer chat at its newest message and keeps it there while it
+        // streams, and scrolling up stops it until the view returns to the
+        // bottom (the list owns that state now)
+        let list_state = ListState::new(0, ListAlignment::Top, px(800.));
+        list_state.set_follow_mode(FollowMode::Tail);
+        {
+            let tile = cx.entity().downgrade();
+            list_state.set_scroll_handler(move |event, _window, cx| {
+                let following = event.is_following_tail;
+                let _ = tile.update(cx, |this, cx| this.on_transcript_scrolled(following, cx));
+            });
+        }
+
         Self {
             key,
             store,
-            scroll: ScrollHandle::new(),
-            pinned: true,
-            last_max: px(0.),
+            list_state,
+            rows: Rc::new(Vec::new()),
+            rows_fold_rev: u64::MAX,
+            following: true,
+            follow_check: None,
+            last_font_body: 0.,
             expanded: HashSet::new(),
             fold_rev: 0,
             live_keys: HashSet::new(),
@@ -650,7 +778,7 @@ impl TileView {
             composer_focused: false,
             last_field_text: initial_text,
             question_inputs: HashMap::new(),
-            question_keys_seen: HashSet::new(),
+            question_keys: HashSet::new(),
             last_composer_text: String::new(),
             suggest,
             flyout_open: false,
@@ -769,12 +897,127 @@ impl TileView {
         self.suggest
             .update(cx, |menu, cx| menu.recompute(&text, false, cx));
     }
-    /// Instant scroll to `y`, counting distance scrolled down — the handle
-    /// stores the offset negative-down (0 at top, -max at bottom).
-    fn scroll_to(&mut self, y: Pixels, cx: &mut Context<Self>) {
-        self.scroll
-            .set_offset(gpui::point(self.scroll.offset().x, -y));
-        cx.notify();
+
+    /// Aligns the list's item count with `rows`, splicing only the range that
+    /// actually moved: a streaming append adds one row and leaves every
+    /// measured height above it in place.
+    fn sync_rows(&mut self, rows: Vec<Row>) {
+        if let Some((range, count)) = row_splice(self.rows.as_slice(), &rows) {
+            // the splice keeps the list's scroll anchor: an append at the tail
+            // of a pinned chat stays pinned
+            self.list_state.splice(range, count);
+        }
+        self.rows = Rc::new(rows);
+    }
+
+    /// Whether `rows` still describes `items`: the same items, in the same
+    /// order and grouping. Row ids derive from the items, so a matching id
+    /// sequence means the rows have not moved and a repaint can reuse them
+    /// instead of building a String per item. The ids are compared without
+    /// allocating, and a text update under the same id leaves the rows valid.
+    /// `rows_fold_rev` covers the other input, the folds.
+    fn rows_match(&self, items: &[Arc<ChatItem>]) -> bool {
+        if self.rows_fold_rev != self.fold_rev {
+            return false;
+        }
+        let mut next = 0usize;
+        for row in self.rows.iter() {
+            match row {
+                Row::Item { id, .. } => {
+                    if !items.get(next).is_some_and(|item| item.matches_id(id)) {
+                        return false;
+                    }
+                    next += 1;
+                }
+                Row::ToolGroup { members, .. } => {
+                    for (_, id) in members {
+                        if !items.get(next).is_some_and(|item| item.matches_id(id)) {
+                            return false;
+                        }
+                        next += 1;
+                    }
+                }
+            }
+        }
+        next == items.len()
+    }
+
+    /// A wheel tick over the transcript, from the list's scroll handler. The
+    /// list reports whether it is still following the tail; a change repaints
+    /// the tile so the jump-to-latest button tracks it.
+    fn on_transcript_scrolled(&mut self, following: bool, cx: &mut Context<Self>) {
+        if self.following != following {
+            self.following = following;
+            cx.notify();
+        }
+        if !following {
+            // a scroll that reaches the bottom re-engages following inside the
+            // list's layout, after this frame's render: one deferred read
+            // catches it, and a newer scroll replaces the pending check
+            self.follow_check = Some(cx.spawn(async move |this, cx| {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(32))
+                    .await;
+                let _ = this.update(cx, |this, cx| {
+                    let following = this.list_state.is_following_tail();
+                    if this.following != following {
+                        this.following = following;
+                        cx.notify();
+                    }
+                });
+            }));
+        }
+    }
+
+    /// One list row: a card, or a tool group with its members when open. The
+    /// gap the old flex column supplied lives here, because a list lays rows
+    /// out flush.
+    ///
+    /// The row names its item by index and id; the payload comes from the
+    /// store, so a text update that kept the id renders fresh without the row
+    /// holding an `Arc` the store would have to copy around.
+    fn render_row(
+        &mut self,
+        row: &Row,
+        fonts: theme::FontTokens,
+        accent: gpui::Rgba,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let body = match row {
+            Row::Item { index, id } => match self.store_item(cx, *index, id) {
+                Some(item) => self.render_item(id, item.as_ref(), fonts, accent, window, cx),
+                None => div().into_any_element(),
+            },
+            Row::ToolGroup { key, members, open } => {
+                let mut run: Vec<(&str, Arc<ChatItem>)> = Vec::with_capacity(members.len());
+                for (index, id) in members {
+                    if let Some(item) = self.store_item(cx, *index, id) {
+                        run.push((id.as_str(), item));
+                    }
+                }
+                self.render_tool_group(&run, key, *open, fonts, accent, window, cx)
+            }
+        };
+        div()
+            .w_full()
+            .pb(px(TRANSCRIPT_GAP))
+            .child(body)
+            .into_any_element()
+    }
+
+    /// A row's item out of the store. The index is a fast path; when it no
+    /// longer names the row's id (the list kept a row across a structural
+    /// change), the id finds it.
+    fn store_item(&self, cx: &gpui::App, index: usize, id: &str) -> Option<Arc<ChatItem>> {
+        let store = self.store.read(cx);
+        let items = &store.tile_by_key(&self.key)?.items;
+        if let Some(item) = items.get(index)
+            && item.matches_id(id)
+        {
+            return Some(Arc::clone(item));
+        }
+        items.iter().find(|item| item.matches_id(id)).cloned()
     }
 
     fn render_item(
@@ -1388,7 +1631,7 @@ impl TileView {
     )]
     fn render_tool_group(
         &mut self,
-        run: &[(String, Arc<ChatItem>)],
+        run: &[(&str, Arc<ChatItem>)],
         group_key: &str,
         open: bool,
         fonts: theme::FontTokens,
@@ -1491,9 +1734,9 @@ impl TileView {
                     this.expanded.remove(&key);
                 } else {
                     this.expanded.insert(key.clone());
-                    // the body grows below the header — stop pinning to the tail
-                    // or the expanded content lands above the viewport
-                    this.pinned = false;
+                    // the body grows below the header — stop pinning to the
+                    // tail or the expanded content lands above the viewport
+                    this.list_state.pause_following_tail();
                 }
                 this.fold_rev = this.fold_rev.wrapping_add(1);
                 cx.notify();
@@ -1893,7 +2136,6 @@ impl TileView {
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let input_key = format!("{}#{qi}", question.id);
-        self.question_keys_seen.insert(input_key.clone());
         // custom-answer field, created lazily as its own leaf view: typing
         // must not re-render the transcript (see QuestionField below)
         if let std::collections::hash_map::Entry::Vacant(slot) =
@@ -2123,7 +2365,10 @@ struct TileSnap {
     ctx: String,
     ctx_frac: f32,
     has_ctx: bool,
-    items: Vec<(String, Arc<ChatItem>)>,
+    /// Transcript rows, built with the fold state applied: a tool run is one
+    /// row when it is longer than one call. `None` when the last render's rows
+    /// still describe the tile.
+    rows: Option<Vec<Row>>,
     queue_keys: Vec<usize>,
     queue: Vec<crate::store::QueueEntry>,
     attachments: Vec<crate::store::AttachmentItem>,
@@ -3849,32 +4094,37 @@ impl TileView {
             focus.dispatch_action(&Escape, window, cx);
         }
     }
-    /// A cheap content fingerprint for the cache-prune key set: item ids,
-    /// the tool/question keys derived from them, attachments and the fold
+    /// A cheap content fingerprint for the cache-prune key set: row keys, the
+    /// tool/question sub-keys derived from them, attachments and the fold
     /// revision. Text changes under the same ids do not move it (the prune
     /// set is about which keys exist, not their contents).
     fn live_fingerprint(
-        items: &[(String, std::sync::Arc<ChatItem>)],
-        visible_tools: &HashSet<String>,
+        rows: &[Row],
+        items: &[Arc<ChatItem>],
         attachments: &[crate::store::AttachmentItem],
         fold_rev: u64,
     ) -> u64 {
         use std::hash::{Hash as _, Hasher as _};
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        for (id, item) in items {
-            id.hash(&mut hasher);
-            match item.as_ref() {
-                ChatItem::Tool(tool) => {
-                    true.hash(&mut hasher);
-                    visible_tools.contains(id).hash(&mut hasher);
-                    tool.has_details().hash(&mut hasher);
+        for row in rows {
+            row.key().hash(&mut hasher);
+            match row {
+                Row::Item { index, .. } => {
+                    if let Some(item) = items.get(*index) {
+                        Self::item_state_fingerprint(item, &mut hasher);
+                    }
                 }
-                ChatItem::Question(question) => {
-                    false.hash(&mut hasher);
-                    question.questions.len().hash(&mut hasher);
-                    question.resolution.is_some().hash(&mut hasher);
+                // an open group adds its members' title/details slots, which
+                // is what `fold_rev` also moves; a fold that adds a sub-key
+                // without changing the shape moves the fold revision
+                Row::ToolGroup { open, members, .. } => {
+                    open.hash(&mut hasher);
+                    for (index, _) in members {
+                        if *open && let Some(item) = items.get(*index) {
+                            Self::item_state_fingerprint(item, &mut hasher);
+                        }
+                    }
                 }
-                _ => 0u8.hash(&mut hasher),
             }
         }
         attachments.len().hash(&mut hasher);
@@ -3883,6 +4133,85 @@ impl TileView {
         }
         fold_rev.hash(&mut hasher);
         hasher.finish()
+    }
+
+    /// The cache keys `rows` may keep: every item id, the tool sub-surfaces
+    /// the transcript actually draws (a folded group hides its members'
+    /// title/details), question input keys and attachments.
+    fn live_keys(
+        rows: &[Row],
+        items: &[Arc<ChatItem>],
+        attachments: &[crate::store::AttachmentItem],
+    ) -> (HashSet<String>, HashSet<String>) {
+        let mut live = HashSet::new();
+        let mut questions = HashSet::new();
+        for row in rows {
+            match row {
+                Row::Item { index, id } => {
+                    live.insert(id.clone());
+                    let Some(item) = items.get(*index) else {
+                        continue;
+                    };
+                    Self::item_sub_keys(id, item, &mut live);
+                    if let ChatItem::Question(question) = item.as_ref() {
+                        for qi in 0..question.questions.len() {
+                            questions.insert(format!("{}#{qi}", question.id));
+                        }
+                    }
+                }
+                Row::ToolGroup { members, open, .. } => {
+                    for (index, id) in members {
+                        live.insert(id.clone());
+                        if *open && let Some(item) = items.get(*index) {
+                            Self::item_sub_keys(id, item, &mut live);
+                        }
+                    }
+                }
+            }
+        }
+        live.extend(attachments.iter().map(|a| format!("att{}", a.key)));
+        (live, questions)
+    }
+
+    /// The derived cache keys of one item: the text slots a tool row or a
+    /// question card owns besides its own id.
+    fn item_sub_keys(id: &str, item: &ChatItem, live: &mut HashSet<String>) {
+        match item {
+            ChatItem::Tool(tool) => {
+                live.insert(format!("{id}:title"));
+                if tool.has_details() {
+                    live.insert(format!("{id}:details"));
+                }
+            }
+            ChatItem::Question(question) => {
+                for qi in 0..question.questions.len() {
+                    live.insert(format!("{id}#{qi}"));
+                }
+                if question.resolution.is_some() {
+                    live.insert(format!("{id}:res"));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// The state bits of one item that decide which cache keys exist: a tool's
+    /// details slot, a question's input and resolution slots. The item's id is
+    /// hashed by the caller.
+    fn item_state_fingerprint(item: &ChatItem, hasher: &mut impl std::hash::Hasher) {
+        use std::hash::Hash as _;
+        match item {
+            ChatItem::Tool(tool) => {
+                true.hash(hasher);
+                tool.has_details().hash(hasher);
+            }
+            ChatItem::Question(question) => {
+                false.hash(hasher);
+                question.questions.len().hash(hasher);
+                question.resolution.is_some().hash(hasher);
+            }
+            _ => 0u8.hash(hasher),
+        }
     }
 }
 
@@ -3911,8 +4240,10 @@ impl Render for TileView {
                 ctx: tile.context_text.clone().unwrap_or_default(),
                 ctx_frac: tile.context_frac,
                 has_ctx: tile.has_context(),
-                // Arc'd items: this snapshot is pointer copies, the payloads stay put
-                items: tile.items.iter().map(|i| (i.id(), Arc::clone(i))).collect(),
+                // built only when the items or the folds moved: a scroll
+                // repaint reuses the rows (see rows_match)
+                rows: (!self.rows_match(&tile.items))
+                    .then(|| transcript_rows(&tile.items, &self.expanded)),
                 queue_keys: tile.queue_rows.clone(),
                 queue: store.queue.clone(),
                 attachments: tile.attachments.clone(),
@@ -3971,134 +4302,43 @@ impl Render for TileView {
             self.last_spring_seen = false;
         }
 
-        // transcript auto-scroll: keep pinned while content grows
-        let max_now = self.scroll.max_offset().y;
-        if self.pinned && max_now > self.last_max + px(0.5) && max_now > px(0.) {
-            self.scroll.scroll_to_bottom();
+        // the transcript's rows: matched against the last render's, so a
+        // streaming append splices one row into the list instead of rebuilding
+        // the rows above it
+        if let Some(rows) = snap.rows.take() {
+            self.rows_fold_rev = self.fold_rev;
+            self.sync_rows(rows);
         }
-        if max_now != self.last_max {
-            self.last_max = max_now;
+        // a text-size change moves every line; the list only invalidates its
+        // cached heights on a width change, so drop them explicitly
+        if self.last_font_body != fonts.font_body {
+            self.last_font_body = fonts.font_body;
+            self.list_state.remeasure();
         }
 
-        // moved out rather than cloned — snap's other fields stay usable
-        let items = std::mem::take(&mut snap.items);
-        self.question_keys_seen.clear();
-        let mut transcript = div()
-            .id("transcript")
-            .role(Role::Log)
-            .aria_label("Transcript")
-            .flex_1()
-            .min_h_0()
-            .overflow_hidden()
-            .track_scroll(&self.scroll.clone())
-            .on_scroll(cx.listener(|this, event: &gpui::ScrollEvent, window, cx| {
-                // the wheel no longer scrolls natively (overflow_hidden keeps
-                // the handle-driven offset) — each delta applies straight to
-                // the handle offset, no glide
-                let delta = event.delta.pixel_delta(window.line_height()).y;
-                if delta == px(0.) {
-                    return;
-                }
-                let max = this.scroll.max_offset();
-                // wheel deltas are positive-up; the offset counts down
-                let before = -this.scroll.offset().y;
-                let next = (before - delta).clamp(px(0.), max.y);
-                let pinned = next >= max.y - px(1.);
-                let turned = pinned != this.pinned;
-                this.pinned = pinned;
-                // a tick at either end changes nothing: repainting the
-                // whole transcript for it is what made scrolling feel
-                // heavy
-                if next != before {
-                    this.scroll_to(next, cx);
-                } else if turned {
-                    cx.notify();
-                }
-                // the transcript consumed the tick: a scrollable inside a
-                // message (or a scrollbar hover over one) must not see the
-                // same tick scroll it too
-                cx.stop_propagation();
-            }))
-            // the transcript fills the tile: bubbles keep their 760 measure at
-            // the edges (the reply left, the prompt right), so a wide tile is
-            // used instead of reading as a narrow centred column
-            .w_full()
-            .p_3()
-            .flex()
-            .flex_col()
-            .gap_2p5();
-        // consecutive tool calls collapse into one disclosure row; the run is
-        // split by anything non-tool (permission cards, notes) in between.
-        // visible_tools feeds the cache-prune set below: members hidden inside
-        // a collapsed group drop their text cache slots
-        let mut visible_tools: HashSet<String> = HashSet::new();
-        let mut idx = 0;
-        while idx < items.len() {
-            let (item_id, item) = &items[idx];
-            if matches!(item.as_ref(), ChatItem::Tool(_)) {
-                let mut end = idx + 1;
-                while end < items.len() && matches!(items[end].1.as_ref(), ChatItem::Tool(_)) {
-                    end += 1;
-                }
-                let run = &items[idx..end];
-                if run.len() >= 2 {
-                    let group_key = format!("toolgroup:{item_id}");
-                    let open = self.expanded.contains(&group_key);
-                    if open {
-                        visible_tools.extend(run.iter().map(|(id, _)| id.clone()));
-                    }
-                    transcript = transcript.child(
-                        self.render_tool_group(run, &group_key, open, fonts, accent, window, cx),
-                    );
-                    idx = end;
-                    continue;
-                }
-                visible_tools.insert(item_id.clone());
-            }
-            transcript = transcript.child(self.render_item(
-                item_id,
-                item.as_ref(),
-                fonts,
-                accent,
-                window,
-                cx,
-            ));
-            idx += 1;
-        }
-        let transcript_empty = items.is_empty();
-        // Cache entries only live as long as the transcript/composer entries
-        // they serve; question inputs die with their question. Building the
-        // key set costs a String per item plus a format! per sub-surface, so
-        // it is rebuilt only when the content fingerprint moves — caret
-        // blinks, scrolling and resizes reuse it.
-        let fingerprint =
-            Self::live_fingerprint(&items, &visible_tools, &snap.attachments, self.fold_rev);
-        if self.live_fingerprint != Some(fingerprint) {
-            let mut live: HashSet<String> = items.iter().map(|(id, _)| id.clone()).collect();
-            for (id, item) in &items {
-                match item.as_ref() {
-                    ChatItem::Tool(tool) => {
-                        if !visible_tools.contains(id) {
-                            continue;
-                        }
-                        live.insert(format!("{id}:title"));
-                        if tool.has_details() {
-                            live.insert(format!("{id}:details"));
-                        }
-                    }
-                    ChatItem::Question(q) => {
-                        for qi in 0..q.questions.len() {
-                            live.insert(format!("{id}#{qi}"));
-                        }
-                        if q.resolution.is_some() {
-                            live.insert(format!("{id}:res"));
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            live.extend(snap.attachments.iter().map(|a| format!("att{}", a.key)));
+        // Cache entries only live as long as the transcript rows that serve
+        // them; question inputs die with their question. Building the key set
+        // costs a String per item plus a format! per sub-surface, so it is
+        // rebuilt only when the content fingerprint moves — caret blinks,
+        // scrolling and resizes reuse it.
+        let fingerprint = {
+            let store = self.store.read(cx);
+            store.tile_by_key(&self.key).map(|tile| {
+                Self::live_fingerprint(&self.rows, &tile.items, &snap.attachments, self.fold_rev)
+            })
+        };
+        if let Some(fingerprint) = fingerprint
+            && self.live_fingerprint != Some(fingerprint)
+        {
+            let (live, questions) = {
+                let store = self.store.read(cx);
+                let Some(tile) = store.tile_by_key(&self.key) else {
+                    return div().into_any_element();
+                };
+                Self::live_keys(&self.rows, &tile.items, &snap.attachments)
+            };
             self.live_keys = live;
+            self.question_keys = questions;
             self.live_fingerprint = Some(fingerprint);
             // prune only when the set can have changed; `live_keys` is taken
             // out so the &mut self call does not see it borrowed
@@ -4107,9 +4347,45 @@ impl Render for TileView {
             self.live_keys = live;
         }
         self.question_inputs
-            .retain(|k, _| self.question_keys_seen.contains(k));
+            .retain(|k, _| self.question_keys.contains(k));
 
-        let jump_visible = !self.pinned && snap.has_messages;
+        // the transcript fills the tile: bubbles keep their 760 measure at
+        // the edges (the reply left, the prompt right), so a wide tile is
+        // used instead of reading as a narrow centred column. The list builds
+        // only the rows its viewport (plus overdraw) covers
+        let rows = self.rows.clone();
+        let tile = cx.entity().downgrade();
+        let transcript = div()
+            .id("transcript")
+            .role(Role::Log)
+            .aria_label("Transcript")
+            .relative()
+            .flex_1()
+            .min_h_0()
+            .w_full()
+            .p_3()
+            .flex()
+            .flex_col()
+            .child(
+                list(self.list_state.clone(), move |ix, window, cx| {
+                    tile.update(cx, |this, cx| {
+                        let Some(row) = rows.get(ix) else {
+                            return div().into_any_element();
+                        };
+                        this.render_row(row, fonts, accent, window, cx)
+                    })
+                    .unwrap_or_else(|_| div().into_any_element())
+                })
+                .flex_1()
+                .min_h_0()
+                .w_full(),
+            );
+        let transcript_empty = self.rows.is_empty();
+
+        // mirrored for the button: a scroll event repaints the tile when the
+        // follow state turns, and the render below reads the settled value
+        self.following = self.list_state.is_following_tail();
+        let jump_visible = !self.following && snap.has_messages;
 
         let header = self.render_header(&snap, cx);
         let queue_el = self.render_queue_strip(&snap);
@@ -4120,7 +4396,7 @@ impl Render for TileView {
 
         // an opened chat with no messages yet still explains itself; the hint
         // is a plain overlay (no handlers), so wheel events reach the
-        // scroll-tracked transcript underneath
+        // transcript list underneath
         // a chat with nothing in it yet either explains itself or, while its
         // first turn runs, thinks out loud with three dots
         let empty_overlay = div()
@@ -4267,9 +4543,10 @@ impl Render for TileView {
                                 .p_2()
                                 .cursor_pointer()
                                 .on_click(cx.listener(|this, _, _, cx| {
-                                    this.pinned = true;
-                                    let target = this.scroll.max_offset().y;
-                                    this.scroll_to(target, cx);
+                                    // re-arm following: the list scrolls to the
+                                    // end and stays there as the reply streams
+                                    this.list_state.set_follow_mode(FollowMode::Tail);
+                                    cx.notify();
                                 })),
                             "Jump to latest",
                         )
@@ -4998,5 +5275,104 @@ mod bidi_tests {
         assert_eq!(strip_bidi_overrides(rtl).as_ref(), rtl);
         let marks = "a\u{200b}\u{200e}b";
         assert_eq!(strip_bidi_overrides(marks).as_ref(), marks);
+    }
+}
+
+#[cfg(test)]
+mod transcript_row_tests {
+    use super::{Row, row_splice, transcript_rows};
+    use crate::store::{ChatItem, ToolItem};
+    use std::collections::HashSet;
+    use std::sync::Arc;
+
+    fn user(key: usize) -> Arc<ChatItem> {
+        Arc::new(ChatItem::UserMessage {
+            key,
+            text: format!("prompt {key}"),
+            created_ms: 0,
+        })
+    }
+
+    fn reply(key: &str) -> Arc<ChatItem> {
+        Arc::new(ChatItem::AssistantText {
+            key: key.into(),
+            text: format!("reply {key}"),
+            meta_label: String::new(),
+            created_ms: 0,
+        })
+    }
+
+    fn tool(id: &str) -> Arc<ChatItem> {
+        Arc::new(ChatItem::Tool(ToolItem::stub(id)))
+    }
+
+    fn keys(rows: &[Row]) -> Vec<&str> {
+        rows.iter().map(Row::key).collect()
+    }
+
+    #[test]
+    fn a_tool_run_collapses_into_one_row() {
+        let items = [user(1), tool("a"), tool("b"), tool("c"), reply("p1")];
+        let rows = transcript_rows(&items, &HashSet::new());
+        assert_eq!(keys(&rows), ["u1", "toolgroup:ta", "ap1"]);
+        let Row::ToolGroup { members, open, .. } = &rows[1] else {
+            panic!("a run of three tool calls is one group row");
+        };
+        assert_eq!(members.len(), 3);
+        assert!(!open, "a group starts folded");
+    }
+
+    #[test]
+    fn a_lone_tool_call_keeps_its_own_row() {
+        let items = [tool("a"), user(1), tool("b")];
+        let rows = transcript_rows(&items, &HashSet::new());
+        assert_eq!(keys(&rows), ["ta", "u1", "tb"]);
+    }
+
+    #[test]
+    fn a_non_tool_item_splits_two_runs() {
+        let items = [tool("a"), tool("b"), reply("p1"), tool("c"), tool("d")];
+        let rows = transcript_rows(&items, &HashSet::new());
+        assert_eq!(keys(&rows), ["toolgroup:ta", "ap1", "toolgroup:tc"]);
+    }
+
+    #[test]
+    fn a_folded_open_run_marks_its_group() {
+        let mut expanded = HashSet::new();
+        expanded.insert("toolgroup:ta".to_string());
+        let rows = transcript_rows(&[tool("a"), tool("b")], &expanded);
+        assert!(matches!(&rows[0], Row::ToolGroup { open: true, .. }));
+    }
+
+    #[test]
+    fn a_streaming_append_splices_only_the_tail() {
+        let old = transcript_rows(&[user(1), reply("p1")], &HashSet::new());
+        let new = transcript_rows(&[user(1), reply("p1"), tool("a")], &HashSet::new());
+        assert_eq!(row_splice(&old, &new), Some((2..2, 1)));
+    }
+
+    #[test]
+    fn a_growing_tool_run_is_the_same_row() {
+        // the group is keyed by its first call, so a run that grows reuses the
+        // row (and re-measures when the list lays it out)
+        let old = transcript_rows(&[tool("a"), tool("b")], &HashSet::new());
+        let new = transcript_rows(&[tool("a"), tool("b"), tool("c")], &HashSet::new());
+        assert_eq!(row_splice(&old, &new), None);
+    }
+
+    #[test]
+    fn a_replaced_item_splices_its_own_range() {
+        let old = transcript_rows(&[user(1), reply("p1"), user(2)], &HashSet::new());
+        let new = transcript_rows(&[user(1), reply("p2"), user(2)], &HashSet::new());
+        assert_eq!(row_splice(&old, &new), Some((1..2, 1)));
+    }
+
+    #[test]
+    fn a_cleared_transcript_removes_every_row() {
+        let old = transcript_rows(&[user(1)], &HashSet::new());
+        assert_eq!(row_splice(&old, &[]), Some((0..1, 0)));
+        assert_eq!(row_splice(&[], &old), Some((0..0, 1)));
+        assert_eq!(row_splice(&[], &[]), None);
+        assert_eq!(row_splice(&old, &old), None);
     }
 }

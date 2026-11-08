@@ -76,6 +76,26 @@ impl ToolDetails {
 }
 
 impl ToolItem {
+    /// A minimal completed tool card for unit tests: `state_sig` is private to
+    /// the store module, so a test outside it cannot build the struct field by
+    /// field.
+    #[cfg(test)]
+    pub(crate) fn stub(part_id: &str) -> Self {
+        ToolItem {
+            part_id: part_id.into(),
+            tool: "read".into(),
+            status: "completed".into(),
+            title: String::new(),
+            file_path: String::new(),
+            diff: None,
+            numstat: None,
+            is_error: false,
+            error_preview: String::new(),
+            details: ToolDetails::default(),
+            state_sig: None,
+        }
+    }
+
     pub fn is_running(&self) -> bool {
         self.status == "running"
     }

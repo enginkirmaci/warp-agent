@@ -1,9 +1,9 @@
 ; Inno Setup 6 script — per-user installer for Warp Agent.
-; build.ps1 -Installer invokes this with /DMyAppVersion=<cargo version>;
+; build.ps1 invokes this with /DMyAppVersion=<suite version>;
 ; the fallback below keeps plain `ISCC warp-agent.iss` working too.
 
 #ifndef MyAppVersion
-#define MyAppVersion "2.0.0"
+#define MyAppVersion "0.1.0"
 #endif
 
 #define MyAppName "Warp Agent"

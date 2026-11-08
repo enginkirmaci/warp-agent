@@ -1,75 +1,63 @@
 [package]
 name = "warp-agent"
-version = "2.0.0"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
 description = "WarpAgent — a tile-grid chat client for opencode serve, rebuilt on GPUI"
+license.workspace = true
+publish = false
 
-[[bin]]
-name = "warp-agent"
-path = "src/main.rs"
-
-[target.'cfg(windows)'.build-dependencies]
-winresource = "0.1"
-
-[target.'cfg(unix)'.dependencies]
-# PR_SET_PDEATHSIG for the spawned serve/dsh children
-libc = "0.2"
+# Binary-only by design: there is no lib.rs boundary and the one integration
+# probe targets the markdown kit (see AGENTS.md).
 
 [dependencies]
-# gpui-pre: crates.io snapshots of zed's gpui, pinned to the exact rev
-# gpui-kit 0.9 is built against these exact 0.3.11 snapshots. Bump together with gpui-kit.
-gpui = { package = "gpui-pre", version = "=0.3.11" }
-gpui_platform = { package = "gpui-pre-platform", version = "=0.3.11", features = ["wayland", "x11"] }
-# the shared component family (local sibling repos; swap to version deps to publish)
-warpui-kit-core = { path = "../../kits/warpui-kit-core" }
-warpui-kit-platform = { path = "../../kits/warpui-kit-platform" }
-warpui-kit-diff = { path = "../../kits/warpui-kit-diff", features = ["all-languages"] }
-warpui-kit-picker = { path = "../../kits/warpui-kit-picker" }
-# chat answers render through the suite's live markdown engine in read-only
-# mode; the same tree-sitter languages the TextView-era highlighting had
-warpui-kit-markdown = { path = "../../kits/warpui-kit-markdown", features = ["mermaid", "all-languages"] }
+# suite crates — the paths live in [workspace.dependencies]
+warpui-kit-core = { workspace = true }
+# all-languages also feeds the chat code-block grammars; a removed diff dep
+# would take every tree-sitter grammar with it
+warpui-kit-diff = { workspace = true, features = ["all-languages"] }
+warpui-kit-markdown = { workspace = true, features = ["mermaid", "all-languages"] }
+warpui-kit-picker = { workspace = true }
+warpui-kit-platform = { workspace = true }
+
+# the gpui stack, pinned at the workspace root
+gpui = { workspace = true }
+gpui_platform = { workspace = true }
+gpui-kit = { workspace = true }
+
+# third-party
+anyhow = { workspace = true }
+async-channel = { workspace = true }
+chrono = { workspace = true }
+futures-util = { workspace = true }
+image = { workspace = true }
 # the same parser gpui-base's TextView runs: the Markdown guard probes a text
 # with it before that text reaches a TextView (a parser panic there would abort
 # the render); keep the major in step with gpui-base's `markdown` requirement
 markdown = "1"
-
-gpui-kit = { version = "0.9", features = [
-    # tree-sitter grammars for chat code-block highlighting
-    "tree-sitter-bash",
-    "tree-sitter-c",
-    "tree-sitter-cpp",
-    "tree-sitter-css",
-    "tree-sitter-go",
-    "tree-sitter-html",
-    "tree-sitter-python",
-    "tree-sitter-rust",
-    "tree-sitter-toml",
-    "tree-sitter-tsx",
-    "tree-sitter-typescript",
-    "tree-sitter-yaml",
-] }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "time", "net", "io-util", "sync"] }
-reqwest = { version = "0.13", default-features = false, features = ["json", "query", "rustls", "stream"] }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-async-channel = "2"
-futures-util = "0.3"
-# dsh web client: plain ws:// on loopback, no TLS features needed
-tokio-tungstenite = { version = "0.30", default-features = false, features = ["connect"] }
-smallvec = "1"
-unicode-segmentation = "1"
-image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp"] }
-anyhow = "1"
-chrono = { version = "0.4", default-features = false, features = ["clock"] }
+reqwest = { workspace = true, features = ["query"] }
 # debug-embed: embed assets at compile time in debug builds too — without it
 # rust-embed resolves "assets" against the process CWD at runtime, so the app
 # only finds its icons when launched from the repo root
-rust-embed = { version = "8", features = ["debug-embed"] }
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
-tracing-appender = "0.2"
+rust-embed = { workspace = true, features = ["debug-embed"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+smallvec = { workspace = true }
+tokio = { workspace = true }
+# dsh web client: plain ws:// on loopback, no TLS features needed
+tokio-tungstenite = { version = "0.30", default-features = false, features = ["connect"] }
+tracing = { workspace = true }
+tracing-appender = { workspace = true }
+tracing-subscriber = { workspace = true }
+unicode-segmentation = { workspace = true }
 
 [dev-dependencies]
 # headless chat probes (tests/*_probe.rs); feature-unifies with the normal
 # gpui-kit dep only under `cargo test`
-gpui-kit = { version = "0.9", features = ["test-support"] }
+gpui-kit = { workspace = true, features = ["test-support"] }
+
+[target.'cfg(unix)'.dependencies]
+# PR_SET_PDEATHSIG for the spawned serve/dsh children
+libc = { workspace = true }
+
+[target.'cfg(windows)'.build-dependencies]
+winresource = { workspace = true }

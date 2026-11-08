@@ -6,7 +6,7 @@ app-specific facts. The user-facing description is in
 
 ## Shape
 
-warp-agent is a single binary crate (`warp-agent`, version 2.x) with **no
+warp-agent is a single binary crate (`warp-agent`) with **no
 `lib.rs` boundary**. That is deliberate today, and it has one consequence: a
 probe cannot build the app's views. The one integration probe
 (`tests/complex_markdown_probe.rs`) targets the shared markdown kit instead.

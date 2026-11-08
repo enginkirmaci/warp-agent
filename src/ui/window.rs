@@ -549,6 +549,9 @@ impl Render for WarpWindow {
                     cx.notify();
                 }
             }))
+            // mounts the window's selection machinery: the diff bodies and
+            // markdown views register with it for drag selection and copy
+            .child(gpui_kit::base::TextSelectionLayer)
             .child(self.render_titlebar(window, cx))
             .child(content);
 

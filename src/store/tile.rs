@@ -752,3 +752,84 @@ impl ChatTile {
         self.update_context_text();
     }
 }
+
+#[cfg(test)]
+mod tool_part_tests {
+    use super::*;
+    use crate::dsh::{DshSessionState, fold_event};
+    use serde_json::json;
+
+    /// Fold one wire event the way the dsh pump does and return its part updates.
+    fn fold(
+        state: &mut DshSessionState,
+        event_type: &str,
+        seq: i64,
+        data: serde_json::Value,
+    ) -> Vec<serde_json::Value> {
+        fold_event(
+            state,
+            "session-1",
+            &json!({
+                "type": event_type,
+                "seq": seq,
+                "time": 1_793_000_000_000i64 + seq,
+                "data": data,
+            }),
+        )
+        .part_updated
+    }
+
+    #[test]
+    fn a_dsh_edit_part_reaches_the_diff_fold() {
+        let mut state = DshSessionState::default();
+        let call = fold(
+            &mut state,
+            "tool/call",
+            1,
+            json!({
+                "turn": 1, "step": 1, "callId": "call-1", "name": "edit",
+                "arguments": "{\"file_path\":\"src/a.rs\",\"old_string\":\"a\",\"new_string\":\"b\"}",
+            }),
+        );
+        let result = fold(
+            &mut state,
+            "tool/result",
+            2,
+            json!({
+                "turn": 1, "step": 1,
+                "message": {
+                    "id": "m", "role": "tool", "toolCallId": "call-1", "isError": false,
+                    "content": [ { "type": "text", "text": "Edited src/a.rs" } ],
+                },
+                "meta": {
+                    "path": "/repo/src/a.rs",
+                    "diffs": [{
+                        "path": "/repo/src/a.rs",
+                        "oldText": "let a = 1;\n",
+                        "newText": "let b = 1;\n",
+                    }],
+                },
+            }),
+        );
+
+        let mut tile = ChatTile::new("tile".into(), None, None, None);
+        for part in call.iter().chain(result.iter()) {
+            assert!(tile.on_part_updated(&json!({ "part": part })));
+        }
+        let tool = tile
+            .items
+            .iter()
+            .find_map(|item| match item.as_ref() {
+                ChatItem::Tool(tool) => Some(tool),
+                _ => None,
+            })
+            .expect("the tool row");
+        assert!(tool.has_diff(), "a dsh edit must show the Changes fold");
+        assert_eq!(tool.file_path, "/repo/src/a.rs");
+        assert_eq!(tool.numstat.as_ref().map(|n| n.additions), Some(1));
+        assert_eq!(
+            tool.title, "src/a.rs",
+            "the row titles itself from the call"
+        );
+    }
+}

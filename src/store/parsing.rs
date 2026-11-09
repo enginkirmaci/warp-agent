@@ -1,4 +1,5 @@
 use super::*;
+use warpui_kit_diff::{DiffDocument, HunkText, patch_from_hunks};
 
 // ---- JSON shape parsing (ChatParsing port) -------------------------------
 
@@ -167,7 +168,9 @@ fn tool_label_from_input(state: &serde_json::Value) -> Option<String> {
             .values()
             .filter_map(|v| v.as_str())
             .map(str::trim)
-            .find(|s| !s.is_empty())
+            // a body with newlines (an apply_patch payload, a file's content)
+            // is not a label: keep the tool's own name instead
+            .find(|s| !s.is_empty() && !s.contains('\n'))
             .map(String::from)
     })?;
     let label = pick.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -211,7 +214,7 @@ pub(super) fn apply_tool_state(state: &serde_json::Value, tool: &mut ToolItem) {
 }
 
 pub(super) fn apply_tool_metadata(state: &serde_json::Value, tool: &mut ToolItem) {
-    let Some(md) = state.get("metadata").and_then(serde_json::Value::as_object) else {
+    let Some(md) = state.get("metadata") else {
         return;
     };
     if let Some(file_path) = md.get("filepath").and_then(serde_json::Value::as_str)
@@ -235,6 +238,68 @@ pub(super) fn apply_tool_metadata(state: &serde_json::Value, tool: &mut ToolItem
                 .unwrap_or(0),
         });
     }
+    if tool.diff.is_none() {
+        apply_applied_hunks(state, md, tool);
+    }
+}
+
+/// dsh reports a file change as the before/after text of each applied hunk
+/// (`meta.diffs`) instead of opencode's `metadata.filediff.patch`. Turn the
+/// hunks into a patch so both harnesses land in `ToolItem::diff` and the tile
+/// draws the same kit diff for either. A created file's metadata carries no
+/// hunks (there is no before-image), so its whole content comes from the call's
+/// own arguments.
+fn apply_applied_hunks(state: &serde_json::Value, md: &serde_json::Value, tool: &mut ToolItem) {
+    let mut hunks: Vec<HunkText<'_>> = Vec::new();
+    let entries = md
+        .get("diffs")
+        .and_then(serde_json::Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    for entry in entries {
+        let Some(path) = entry.get("path").and_then(serde_json::Value::as_str) else {
+            continue;
+        };
+        let new = entry
+            .get("newText")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("");
+        // null is a pure insertion (or a created file): there is no old text
+        let old = entry.get("oldText").and_then(serde_json::Value::as_str);
+        hunks.push(HunkText { path, old, new });
+    }
+    if hunks.is_empty() {
+        if md.get("operation").and_then(serde_json::Value::as_str) != Some("create") {
+            return;
+        }
+        let Some(path) = md.get("path").and_then(serde_json::Value::as_str) else {
+            return;
+        };
+        let Some(content) = state
+            .pointer("/input/content")
+            .and_then(serde_json::Value::as_str)
+        else {
+            return;
+        };
+        if content.is_empty() {
+            return;
+        }
+        hunks.push(HunkText {
+            path,
+            old: None,
+            new: content,
+        });
+    }
+    if let Some(path) = hunks.first().map(|hunk| hunk.path) {
+        tool.file_path = path.to_string();
+    }
+    let patch = patch_from_hunks(&hunks);
+    let doc = DiffDocument::parse(&patch);
+    tool.numstat = Some(Numstat {
+        additions: i64::from(doc.added()),
+        deletions: i64::from(doc.removed()),
+    });
+    tool.diff = Some(patch);
 }
 
 /// Last todowrite tool part in the restored transcript carries the session's todos.
@@ -343,4 +408,116 @@ pub(super) fn fork_transcript(tile: &ChatTile, stop_key: usize, source_title: &s
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn tool_after(state: &serde_json::Value) -> ToolItem {
+        let mut tool = ToolItem::stub("t1");
+        apply_tool_state(state, &mut tool);
+        apply_tool_metadata(state, &mut tool);
+        tool
+    }
+
+    #[test]
+    fn an_opencode_filediff_fills_the_diff_and_counts() {
+        let tool = tool_after(&json!({
+            "status": "completed",
+            "metadata": {
+                "filepath": "src/main.rs",
+                "filediff": {
+                    "patch": "--- a/src/main.rs\n+++ b/src/main.rs\n@@ -1,1 +1,1 @@\n-a\n+b\n",
+                    "additions": 1,
+                    "deletions": 1,
+                },
+            },
+        }));
+        assert!(tool.has_diff());
+        assert_eq!(tool.file_path, "src/main.rs");
+        let stats = tool.numstat.expect("numstat");
+        assert_eq!((stats.additions, stats.deletions), (1, 1));
+    }
+
+    #[test]
+    fn a_dsh_edit_meta_becomes_a_patch() {
+        // the shape dsh's `edit` result carries: applied hunks as text pairs
+        let tool = tool_after(&json!({
+            "status": "completed",
+            "input": { "file_path": "src/lib.rs", "old_string": "let a = 1;", "new_string": "let a = 2;" },
+            "metadata": {
+                "path": "/repo/src/lib.rs",
+                "diffs": [{
+                    "path": "/repo/src/lib.rs",
+                    "oldText": "fn main() {\n    let a = 1;\n}\n",
+                    "newText": "fn main() {\n    let a = 2;\n}\n",
+                }],
+            },
+        }));
+        assert!(tool.has_diff(), "a dsh edit must reach the diff fold");
+        assert_eq!(tool.file_path, "/repo/src/lib.rs");
+        let stats = tool.numstat.expect("numstat");
+        assert_eq!((stats.additions, stats.deletions), (1, 1));
+        let diff = tool.diff.expect("patch");
+        assert!(diff.contains("-    let a = 1;"), "{diff}");
+        assert!(diff.contains("+    let a = 2;"), "{diff}");
+        assert!(diff.contains(" fn main() {"), "{diff}");
+    }
+
+    #[test]
+    fn a_dsh_created_file_is_the_call_content() {
+        let tool = tool_after(&json!({
+            "status": "completed",
+            "input": { "file_path": "notes/new.md", "content": "# hi\nbody\n" },
+            "metadata": { "operation": "create", "path": "/repo/notes/new.md", "diffs": [] },
+        }));
+        assert!(tool.has_diff());
+        assert_eq!(tool.file_path, "/repo/notes/new.md");
+        let stats = tool.numstat.expect("numstat");
+        assert_eq!((stats.additions, stats.deletions), (2, 0));
+    }
+
+    #[test]
+    fn a_dsh_read_meta_does_not_invent_a_diff() {
+        let tool = tool_after(&json!({
+            "status": "completed",
+            "metadata": {
+                "path": "/repo/src/main.rs",
+                "offset": 10,
+                "lines": [{ "number": 10, "text": "fn main() {}" }],
+                "totalLines": 20,
+                "lang": "rust",
+            },
+        }));
+        assert!(!tool.has_diff());
+    }
+
+    #[test]
+    fn a_tool_row_titles_itself_from_its_input() {
+        let mut tool = ToolItem::stub("t1");
+        tool.tool = "bash".into();
+        tool.title = "bash".into();
+        apply_tool_state(
+            &json!({ "status": "running", "input": { "command": "cargo test -p warp-agent" } }),
+            &mut tool,
+        );
+        assert_eq!(tool.title, "cargo test -p warp-agent");
+    }
+
+    #[test]
+    fn a_patch_body_is_not_a_row_title() {
+        let mut tool = ToolItem::stub("t1");
+        tool.tool = "apply_patch".into();
+        tool.title = "apply_patch".into();
+        apply_tool_state(
+            &json!({
+                "status": "running",
+                "input": { "patch": "*** Begin Patch\n*** Update File: a.rs\n*** End Patch" },
+            }),
+            &mut tool,
+        );
+        assert_eq!(tool.title, "apply_patch");
+    }
 }

@@ -1277,7 +1277,9 @@ fn fold_tool_call(
         "messageID": message_id,
         "type": "tool",
         "tool": name,
-        "state": { "status": "running", "title": name, "input": input },
+        // no title: the row labels itself from the call's input (command, file
+        // path, query), the way opencode's server titles a part
+        "state": { "status": "running", "input": input },
     });
     if let Some(part) = upsert_part(message, part) {
         outcome.part_updated.push(part);
@@ -2067,6 +2069,8 @@ mod tests {
         let part = call.part_updated[0].clone();
         assert_eq!(part.pointer("/state/status"), Some(&json!("running")));
         assert_eq!(part.pointer("/state/input/path"), Some(&json!("notes.txt")));
+        // no title stamped from the tool name: the row titles itself from input
+        assert_eq!(part.pointer("/state/title"), None);
 
         // assistant message of the same step lands on the same message id
         let assistant = fold_event(

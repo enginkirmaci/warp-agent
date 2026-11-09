@@ -64,6 +64,10 @@ the tail follow still opens a longer chat at its newest message.
   `FollowMode::Tail`; opening a fold pauses it (`pause_following_tail`).
   `TileView::following` mirrors the list for the button, refreshed from the
   list's scroll handler.
+- A tool's change reaches the tile through `store::parsing`: opencode ships
+  `metadata.filediff.patch` and dsh ships `meta.diffs` (before/after text per
+  hunk). `patch_from_hunks` turns dsh's pairs into the same patch text, so one
+  kit diff draws both harnesses. Do not add a second diff renderer for dsh.
 
 ## Startup order
 

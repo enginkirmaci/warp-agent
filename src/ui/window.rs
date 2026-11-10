@@ -359,6 +359,14 @@ pub struct WarpWindow {
     settings_buffers: SettingsBuffers,
     /// The Settings page's open section.
     settings_section: SettingsSection,
+    /// About: which suite member the detail shows; the app you are in until
+    /// another is picked.
+    pub(crate) about_selected: warpui_kit_core::about::AppId,
+    /// The license card is up over the About screen.
+    pub(crate) about_license_open: bool,
+    /// The license document, built the first time the card opens: read-only
+    /// markdown, so the GPL reads as prose and its text is selectable.
+    pub(crate) about_license: Option<gpui::Entity<warpui_kit_markdown::LiveEditorState>>,
     /// The harness the Chat defaults page is configuring: the segmented
     /// control writes it and the model picker scopes its catalog to it.
     settings_harness: Entity<crate::ui::settings::HarnessChoice>,
@@ -366,6 +374,9 @@ pub struct WarpWindow {
     /// the rail's Settings section after the first window exists (the pointer
     /// cannot reach a hidden window, and probes need the page).
     open_settings_on_first_render: Option<SettingsSection>,
+    /// E2E hook: WARP_AGENT_PAGE=about opens the rail's About section, for the
+    /// same reason.
+    open_about_on_first_render: bool,
     settings_fields: Vec<(&'static str, Entity<InputState>)>,
     /// The pending debounced settings commit: every field keystroke bumps it,
     /// the task that fired for an older sequence stands down.
@@ -434,6 +445,9 @@ impl WarpWindow {
             add_folder_receiver: folder_rx,
             settings_buffers,
             settings_section: SettingsSection::Appearance,
+            about_selected: warpui_kit_core::about::AppId::Agent,
+            about_license_open: false,
+            about_license: None,
             settings_harness,
             open_settings_on_first_render: match std::env::var("WARP_AGENT_PAGE").as_deref() {
                 Ok("settings") => Some(SettingsSection::Appearance),
@@ -442,6 +456,10 @@ impl WarpWindow {
                 Ok("settings-server") => Some(SettingsSection::Server),
                 _ => None,
             },
+            open_about_on_first_render: matches!(
+                std::env::var("WARP_AGENT_PAGE").as_deref(),
+                Ok("about")
+            ),
             settings_fields: Vec::new(),
             settings_commit_seq: 0,
             settings_committed_seq: 0,
@@ -497,6 +515,10 @@ impl Render for WarpWindow {
             self.open_settings(window, cx);
             self.settings_section = section;
         }
+        if self.open_about_on_first_render {
+            self.open_about_on_first_render = false;
+            self.open_about(cx);
+        }
         // pending folder picks + menu requests from App-only closures
         while let Ok(path) = self.add_folder_receiver.try_recv() {
             self.store.update(cx, |s, cx| s.add_workspace(&path, cx));
@@ -527,8 +549,9 @@ impl Render for WarpWindow {
         let sidebar_visible = self.store.read(cx).sidebar_visible;
         // Settings brings its own section list; the chat tree steps aside
         let settings_open = self.store.read(cx).is_settings_open;
+        let page_open = settings_open || self.store.read(cx).is_about_open;
 
-        let list_shown = sidebar_visible && !settings_open && !self.grid_takes_the_list(window, cx);
+        let list_shown = sidebar_visible && !page_open && !self.grid_takes_the_list(window, cx);
         let mut content = shell::panes().child(self.render_rail(window, cx));
         if list_shown {
             content = content.child(self.render_sidebar(window, cx));
@@ -646,6 +669,26 @@ impl Render for WarpWindow {
             );
         }
 
+        if self.about_license_open {
+            let editor = self.about_license.get_or_insert_with(|| {
+                warpui_kit_markdown::read_only_document(
+                    crate::ui::about::LICENSE.into(),
+                    window,
+                    cx,
+                )
+            });
+            let body = warpui_kit_markdown::render_read_only_document_in_card(editor, cx);
+            root = root.child(warpui_kit_core::about::license_dialog(
+                "about-license",
+                "GNU General Public License v3.0",
+                body,
+                cx.listener(|this, _, _, cx| {
+                    this.about_license_open = false;
+                    cx.notify();
+                }),
+            ));
+        }
+
         // tooltips paint above everything, menus included
         root.child(self.tooltip_overlay.clone())
     }
@@ -727,6 +770,7 @@ impl WarpWindow {
         if self.store.read(cx).is_settings_open {
             return;
         }
+        self.close_about(cx);
         self.store.update(cx, |s, _| {
             s.is_settings_open = true;
         });
@@ -746,7 +790,7 @@ impl WarpWindow {
 
     /// Leaving the page flushes a pending field commit — the page has no
     /// Save, so the debounced write must not be lost to the section switch.
-    fn close_settings(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn close_settings(&mut self, cx: &mut Context<Self>) {
         if !self.store.read(cx).is_settings_open {
             return;
         }
@@ -759,10 +803,11 @@ impl WarpWindow {
     }
 
     fn render_rail(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
-        let (in_settings, ink, attention) = {
+        let (in_settings, in_about, ink, attention) = {
             let store = self.store.read(cx);
             (
                 store.is_settings_open,
+                store.is_about_open,
                 store.accent.text,
                 store.has_attention_needed(),
             )
@@ -774,12 +819,15 @@ impl WarpWindow {
                     "rail-chats",
                     "icons/chat-outline.svg",
                     "Chats",
-                    !in_settings,
+                    !in_settings && !in_about,
                     ink,
                 )
                 .debug_selector(|| "rail-chats".into())
                 .relative()
-                .on_click(cx.listener(|this, _, _, cx| this.close_settings(cx)))
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.close_settings(cx);
+                    this.close_about(cx);
+                }))
                 .when(attention, |d| {
                     d.child(
                         div()
@@ -793,6 +841,11 @@ impl WarpWindow {
                 }),
             )
             .child(div().flex_1())
+            .child(
+                shell::rail_item_inked("open-about", "icons/about.svg", "About", in_about, ink)
+                    .debug_selector(|| "rail-about".into())
+                    .on_click(cx.listener(|this, _, _, cx| this.open_about(cx))),
+            )
             .child(
                 shell::rail_item_inked(
                     "open-settings",
@@ -2282,10 +2335,13 @@ impl WarpWindow {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
-        // Settings is a rail section of its own: it replaces the grid rather
-        // than floating over it
+        // Settings and About are rail sections of their own: they replace the
+        // grid rather than floating over it
         if self.store.read(cx).is_settings_open {
             return self.render_settings(window, cx);
+        }
+        if self.store.read(cx).is_about_open {
+            return self.render_about(cx);
         }
         let fonts = self.store.read(cx).fonts;
 

@@ -262,6 +262,8 @@ pub struct Store {
     pub is_server_running: bool,
     pub auto_allow: bool,
     pub is_settings_open: bool,
+    /// The rail's About section: the family table, not a chat surface.
+    pub is_about_open: bool,
     /// the destructive menu row the user armed; the window shows Confirm
     pub menu_armed: Option<String>,
     pub show_restore_prompt: bool,
@@ -457,6 +459,7 @@ impl Store {
             is_server_running: false,
             auto_allow,
             is_settings_open: false,
+            is_about_open: false,
             menu_armed: None,
             show_restore_prompt: false,
             restore_prompt_text: String::new(),

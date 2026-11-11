@@ -22,37 +22,30 @@
 //! The renderer follows the surface's role. Each decision is recorded here so
 //! a rename or a refactor cannot migrate a surface silently:
 //!
-//! - **Assistant text** uses [`render_markdown`] (read-only `LiveEditor`, one
-//!   editor per item). This is the content rule's target shape.
+//! - **Assistant text, the user message, reasoning and the question card**
+//!   (entry text and resolution) use [`render_markdown`] (read-only
+//!   `LiveEditor`, one editor per item). This is the content rule's target
+//!   shape:
+//!   - the user message's menu appends Edit in input / Re-prompt / Fork from
+//!     here to the editor's Copy / Select all through
+//!     [`LiveEditor::host_menu`](warpui_kit_markdown::LiveEditor::host_menu);
+//!   - reasoning is fed through `LiveEditorState::apply_streamed`, so a chunk
+//!     keeps the reader's selection and scroll;
+//!   - a question's custom-answer `InputState` keeps the keyboard: the
+//!     read-only text never takes focus, and its menu belongs to the editor.
 //! - **Tool title** is plain `div`/`SharedString` text: a label, no markdown,
 //!   no selection menu.
-//! - **User message** uses [`text_view`]. It is one static document, so the
-//!   viewer would fit, but the bubble's right-click is the item menu (Copy /
-//!   Edit in input / Re-prompt / Fork) and the read-only `LiveEditor` always
-//!   installs its own Copy/Select-all menu and stops propagation. The kit has
-//!   no host-menu hook, so moving it now would lose the item actions. This is
-//!   a content-rule violation until that hook exists.
-//! - **Reasoning** uses [`text_view`]. It streams: every update replaces the
-//!   whole part text, and `LiveEditorState::set_value` resets the selection to
-//!   the document start and the scroll to 0, so a selection made mid-stream
-//!   would die on the next chunk. Do not move it until the kit can feed text
-//!   while mapping the selection through the unchanged prefix.
 //! - **Tool details** uses [`text_view`] for plain payloads; a payload that
 //!   parses as JSON goes to `warpui_kit_diff::render_code` instead, so code
 //!   keeps its gutter and highlighting. A tool owns up to three such payloads
 //!   (input/output/error), they can stream, and one editor per payload is the
 //!   design's "streaming tool payload" wrong-cost exception. The plain branch
 //!   therefore keeps the guard and `text_menu` deliberately.
-//! - **Question** (entry text and resolution) uses [`text_view`]. The card
-//!   owns a custom-answer `InputState` and the option rows; the read-only
-//!   editor's selection and context menu would compete with that input, and it
-//!   would add an editor per question entry to a virtualized row. It waits for
-//!   a focus/menu-ownership decision.
 //! - **System note** (including error notes) uses [`text_view`]. These are
 //!   app-authored status strings (`Context compacted.`, reconnect and failure
-//!   messages), so by role they are labels; the guard path also leaves their
-//!   error text selectable for copying. That is an open design choice (plain
-//!   status, or a copy affordance for errors), not a content migration.
+//!   messages), so by role they are labels; keeping the guard leaves their
+//!   error text selectable and copyable, which a real-view probe covers. That
+//!   is a deliberate status exception, not a content surface waiting to move.
 //!
 //! Every [`text_view`] surface keeps the parser guard: `TextView` parses on
 //! the UI thread while laying out and does not catch the parser, so a text
@@ -65,18 +58,25 @@ use std::cell::RefCell;
 use std::collections::VecDeque;
 
 use gpui::prelude::*;
-use gpui::{AnyElement, Entity, SharedString, div, px};
+use gpui::{AnyElement, Context, Entity, SharedString, Window, div, px};
+use gpui_kit::component::menu::PopupMenu;
+use std::rc::Rc;
 use warpui_kit_markdown::{CodeBlock, LiveEditor, LiveEditorState};
 
 use crate::ui::tile::TileView;
 
-/// Renders one assistant message's markdown. The read-only editor sizes
-/// itself to its content (the transcript scrolls as a whole; the editor
-/// never becomes an inner scroll area), and every fenced code block hosts a
-/// copy button in its top-right corner: clicking flashes the check icon in
-/// the accent color for a second — the same animation as the message copy
-/// buttons, driven through TileView.copied_flash with keys
-/// "{flash_base}#code{n}" (n = fenced block order in this message).
+/// Rows a host appends to a read-only markdown surface's context menu.
+pub type HostMenu = Rc<dyn Fn(PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu>;
+
+/// Renders one transcript markdown surface: an answer, the user message,
+/// reasoning or a question. The read-only editor sizes itself to its content
+/// (the transcript scrolls as a whole; the editor never becomes an inner
+/// scroll area), and every fenced code block hosts a copy button in its
+/// top-right corner: clicking flashes the check icon in the accent color for a
+/// second — the same animation as the message copy buttons, driven through
+/// TileView.copied_flash with keys "{flash_base}#code{n}" (n = fenced block
+/// order in this message). `host_menu` appends the host's action rows to the
+/// editor's Copy / Select all menu; only the user message passes one today.
 #[expect(
     clippy::too_many_arguments,
     reason = "the render inputs are one message's transient state; a struct would be rebuilt per message anyway"
@@ -89,6 +89,8 @@ pub fn render_markdown(
     flash_active: Option<&str>,
     view: gpui::WeakEntity<TileView>,
     accent: gpui::Rgba,
+    host_menu: Option<HostMenu>,
+    top_margin_em: Option<f32>,
     cx: &gpui::App,
 ) -> AnyElement {
     let flash_active = flash_active.map(str::to_string);
@@ -139,17 +141,18 @@ pub fn render_markdown(
     // the wrapper carries the laid-out content height (fit_content): the
     // editor notifies on moves, and TileView re-renders on that notify
     let height = editor.read(cx).content_height().max(1.);
-    div()
-        .w_full()
-        .h(px(height))
-        .child(
-            LiveEditor::new(editor)
-                .read_only(true)
-                .fit_content(true)
-                .text_size(px(font_px))
-                .code_block_overlay(overlay),
-        )
-        .into_any_element()
+    let mut live = LiveEditor::new(editor)
+        .read_only(true)
+        .fit_content(true)
+        .text_size(px(font_px))
+        .code_block_overlay(overlay);
+    if let Some(top) = top_margin_em {
+        live = live.top_margin_em(top);
+    }
+    if let Some(host) = host_menu {
+        live = live.host_menu(move |menu, window, cx| host(menu, window, cx));
+    }
+    div().w_full().h(px(height)).child(live).into_any_element()
 }
 
 // ---------------------------------------------------------------------------
@@ -170,9 +173,9 @@ thread_local! {
 /// that carries the offending shape probes a new text every chunk.
 static WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-/// One transcript text still on the guard path: user message, reasoning, tool
-/// details, question text/resolution and system note. gpui-base's Markdown
-/// `TextView` when the parser can take it, plain prose when it cannot.
+/// One transcript text still on the guard path: tool details and the system
+/// note. gpui-base's Markdown `TextView` when the parser can take it, plain
+/// prose when it cannot.
 /// `max_lines` is the `TextView`'s single-line clamp and the plain branch
 /// truncates to match; no caller passes one today (the tool-title row is a
 /// label and never takes this path).

@@ -74,8 +74,12 @@ the tail follow still opens a longer chat at its newest message.
 - The sidebar's flattened rows own a cursor separate from the open chat:
   arrows move it, `Enter` runs the row's click. The transcript takes focus on
   click and its arrows scroll it. A tool title is a label and stays plain
-  text; its details, a reasoning block, a question and a note stay markdown
-  with the Copy menu.
+  text. Tool details and system notes stay on the `TextView` guard with the
+  Copy menu; an answer, the user message, reasoning and a question's text use
+  the read-only `LiveEditor`. The user message's menu appends Edit in input /
+  Re-prompt / Fork to Copy / Select all through `LiveEditor::host_menu`, and
+  reasoning is fed with `LiveEditorState::apply_streamed` so a chunk keeps the
+  selection.
 - The OS title mirrors the titlebar chip through
   `warpui_kit_core::activity::activity_title`: `2 running — Warp Agent`, or
   the plain app name when idle.
@@ -148,11 +152,15 @@ cargo build -p warp-agent
 - `tests/transcript_keys_probe.rs` clicks the transcript in the real window
   and proves Down/Up/PageDown/Home/End move its `ListState` offset while the
   sidebar cursor stays put.
-- `tests/text_surfaces_probe.rs` drag-selects and right-clicks the reasoning
-  and tool-details surfaces through their Copy menu, checks the user message's
-  item menu, and proves a tool title opens no menu.
+- `tests/text_surfaces_probe.rs` selects the reasoning surface, streams a
+  chunk and proves the selection and Copy survive, checks the tool details and
+  system note Copy menus and the user message's host menu (Edit in input /
+  Re-prompt / Fork), and proves a tool title opens no menu.
 - `tests/title_probe.rs` proves the OS title is `<n> running — Warp Agent`
   while a chat runs and the plain app name otherwise.
+- `tests/question_text_probe.rs` proves a selection in a question's text
+  survives typing in the custom-answer field, the field keeps focus and the
+  selection's Copy menu still works.
 - The capture hook is `WARP_AGENT_PAGE`: `settings`, `settings-chat`,
   `settings-permissions`, `settings-server`.
 

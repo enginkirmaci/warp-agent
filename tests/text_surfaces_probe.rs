@@ -12,9 +12,11 @@ use gpui::{Modifiers, MouseButton, Pixels, Role, TestAppContext, VisualTestConte
 use gpui_kit::test::TestQueryExt as _;
 use std::ffi::OsString;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::Mutex;
 use warp_agent::store::{ChatItem, SessionItem, Store, ToolDetails, ToolItem};
 use warp_agent::ui::window::WarpWindow;
+use warpui_kit_markdown::read_only_selection_text;
 
 /// Surface selectors, stable across frames and shared with the render code.
 const USER_TEXT: &str = "text-user";
@@ -24,12 +26,15 @@ const TOOL_TITLE: &str = "tool-title";
 const REASONING_FOLD: &str = "fold-reasoning";
 const DETAILS_FOLD: &str = "fold-tool-details";
 const TILE_MENU: &str = "tile-menu";
-const TILE_MENU_COPY: &str = "tile-menu-row-0";
+const HOST_EDIT: &str = "host-edit";
+const HOST_REPROMPT: &str = "host-reprompt";
+const HOST_FORK: &str = "host-fork";
 
 const USER_MARKDOWN: &str = "## Probe question\n\nPlease **copy** this paragraph.";
 const REASONING_MARKDOWN: &str = "I should check the **guard** path before answering.";
 const TOOL_OUTPUT: &str = "tool output: the guard renders this line as selectable text";
 const TOOL_TITLE_TEXT: &str = "Read the probe file";
+const NOTE_TEXT: &str = "The request failed: the **guard** kept the error copyable.";
 
 static HOME_LOCK: Mutex<()> = Mutex::new(());
 
@@ -108,6 +113,12 @@ fn selected_text(cx: &mut VisualTestContext) -> String {
     cx.update(gpui_kit::base::TextSelection::selected_text)
 }
 
+/// A read-only `LiveEditor` owns its selection, so the host's Ctrl+C fallback
+/// global is the editor's equivalent of the window selection.
+fn editor_selected_text(cx: &mut VisualTestContext) -> String {
+    cx.update(|_, cx| read_only_selection_text(cx).unwrap_or_default())
+}
+
 fn clipboard_text(cx: &VisualTestContext) -> String {
     cx.read_from_clipboard()
         .and_then(|item| item.text())
@@ -153,7 +164,7 @@ fn content_text_keeps_its_copy_menu_and_a_tool_title_stays_plain(cx: &mut TestAp
     std::fs::create_dir_all(&workspace).expect("workspace folder");
     let store = cx.update(Store::for_probe);
     let folder = workspace.to_string_lossy().to_string();
-    store.update(cx, |store, cx| {
+    let key = store.update(cx, |store, cx| {
         store.add_workspace(&folder, cx);
         if let Some(workspace) = store
             .workspaces
@@ -192,25 +203,33 @@ fn content_text_keeps_its_copy_menu_and_a_tool_title_stays_plain(cx: &mut TestAp
                     error: String::new(),
                 },
             )),
+            ChatItem::SystemNote {
+                key: 1,
+                text: NOTE_TEXT.into(),
+                is_error: true,
+            },
         ];
         let key = store.seed_probe_tile(&folder, "probe-chat", "Probe chat", items, false, cx);
         // the real window renders a seeded tile only once it is the open chat
         store.focus_tile(&key, cx);
+        key
     });
 
-    let (_window, cx) = cx.add_window_view(|_, cx| WarpWindow::new(store.clone(), cx));
+    let (window, cx) = cx.add_window_view(|_, cx| WarpWindow::new(store.clone(), cx));
     draw(cx);
     draw(cx);
 
     // Reasoning and tool details are folded by default; open them through the
     // real headers so their text surfaces exist.
-    click(cx, REASONING_FOLD);
     click(cx, DETAILS_FOLD);
+    draw(cx);
+    click(cx, REASONING_FOLD);
+    draw(cx);
     assert_eq!(menu_count(cx), 0, "no menu is open before the right-clicks");
 
     // ---- content text: selection, menu, Copy ----
     select_surface(cx, REASONING_TEXT);
-    let selected = selected_text(cx);
+    let selected = editor_selected_text(cx);
     assert!(
         selected.contains("guard"),
         "a drag over the reasoning surface selects its markdown text, got {selected:?}"
@@ -234,7 +253,7 @@ fn content_text_keeps_its_copy_menu_and_a_tool_title_stays_plain(cx: &mut TestAp
              by its menu role and the clipboard action below"
         );
     }
-    let selected_after_press = selected_text(cx);
+    let selected_after_press = editor_selected_text(cx);
     assert!(
         !selected_after_press.is_empty(),
         "the right-press that opens the menu keeps the window selection the menu captures"
@@ -249,6 +268,59 @@ fn content_text_keeps_its_copy_menu_and_a_tool_title_stays_plain(cx: &mut TestAp
         clipboard_text(cx),
         selected_after_press,
         "the text menu's Copy item writes the selected text to the clipboard"
+    );
+
+    // A streamed chunk goes through apply_streamed: the reasoning text grows
+    // and the selection the reader made stays on the same words.
+    let tile = window
+        .read_with(cx, |window, _| window.tile_view_for_probe(&key))
+        .expect("the seeded tile renders a live view");
+    let before = tile
+        .read_with(cx, |tile, cx| {
+            tile.markdown_value_for_probe("rreasoning-1", cx)
+        })
+        .expect("the reasoning editor exists");
+    assert!(before.contains("guard"), "the editor holds the seeded text");
+    store.update(cx, |store, cx| {
+        if let Some(tile) = store.open_tiles.iter_mut().find(|tile| tile.key == key)
+            && let Some(item) = tile
+                .items
+                .iter_mut()
+                .find(|item| item.id() == "rreasoning-1")
+            && let ChatItem::Reasoning { text, .. } = Arc::make_mut(item)
+        {
+            text.push_str(" Added while the answer streamed.");
+        }
+        store.touch_tile(&key, cx);
+    });
+    draw(cx);
+    let after = tile
+        .read_with(cx, |tile, cx| {
+            tile.markdown_value_for_probe("rreasoning-1", cx)
+        })
+        .expect("the reasoning editor survives the stream");
+    assert!(
+        after.contains("Added while the answer streamed."),
+        "the streamed chunk reaches the editor: {after}"
+    );
+    let selected_after_chunk = editor_selected_text(cx);
+    assert!(
+        selected_after_chunk.contains("guard"),
+        "the streamed chunk keeps the selection, got {selected_after_chunk:?}"
+    );
+    right_click(cx, REASONING_TEXT);
+    assert_eq!(
+        menu_count(cx),
+        1,
+        "the streamed surface still opens its menu"
+    );
+    cx.simulate_keystrokes("down");
+    cx.simulate_keystrokes("enter");
+    draw(cx);
+    assert_eq!(
+        clipboard_text(cx),
+        selected_after_chunk,
+        "Copy still writes the preserved selection after the chunk"
     );
 
     // ---- tool details: the same content path through transcript_text ----
@@ -296,27 +368,84 @@ fn content_text_keeps_its_copy_menu_and_a_tool_title_stays_plain(cx: &mut TestAp
         );
     }
 
-    // ---- user message: content text with the tile's own Copy menu ----
+    // ---- user message: the editor menu with the message actions appended ----
+    let user_editor = window
+        .read_with(cx, |window, _| window.tile_view_for_probe(&key))
+        .expect("the seeded tile renders a live view")
+        .read_with(cx, |tile, _| tile.markdown_editor_for_probe("u0"))
+        .expect("the user message editor exists");
+    let copy_at = USER_MARKDOWN.find("copy").expect("the probe text has copy");
+    cx.update(|_, cx| {
+        user_editor.update(cx, |editor, cx| {
+            editor.set_selected_range(copy_at..copy_at + "copy".len(), cx)
+        })
+    });
+    draw(cx);
+    let user_selected = editor_selected_text(cx);
+    assert!(
+        user_selected.contains("copy"),
+        "a drag over the user message selects its text, got {user_selected:?}"
+    );
     right_click(cx, USER_TEXT);
-    assert!(
-        cx.debug_bounds(TILE_MENU).is_some(),
-        "the user message opens its context menu on a right-click"
+    assert_eq!(
+        menu_count(cx),
+        1,
+        "the user message opens its markdown editor's menu"
     );
-    if let Some(json) = a11y_json(cx) {
-        assert!(
-            json.contains("Copy"),
-            "the user message menu offers a Copy row: {json}"
-        );
-    }
-    click(cx, TILE_MENU_COPY);
     assert!(
-        cx.debug_bounds(TILE_MENU).is_none(),
-        "the Copy row closes the user message menu"
+        cx.debug_bounds(HOST_EDIT).is_some(),
+        "the menu carries Edit in input"
     );
+    assert!(
+        cx.debug_bounds(HOST_REPROMPT).is_some(),
+        "the menu carries Re-prompt"
+    );
+    assert!(
+        cx.debug_bounds(HOST_FORK).is_some(),
+        "the menu carries Fork from here"
+    );
+    cx.simulate_keystrokes("down");
+    cx.simulate_keystrokes("enter");
+    draw(cx);
+    assert_eq!(menu_count(cx), 0, "Copy dismisses the menu");
     assert_eq!(
         clipboard_text(cx),
-        USER_MARKDOWN,
-        "the user message Copy row writes the message text to the clipboard"
+        user_selected,
+        "the menu's Copy writes the selection to the clipboard"
+    );
+
+    // A host row still runs: Edit in input puts the message in the composer.
+    right_click(cx, USER_TEXT);
+    let edit = cx
+        .debug_bounds(HOST_EDIT)
+        .expect("Edit in input is in the menu");
+    cx.simulate_click(edit.center(), Modifiers::default());
+    draw(cx);
+    let composer = window
+        .read_with(cx, |window, _| window.tile_view_for_probe(&key))
+        .expect("the seeded tile renders a live view")
+        .read_with(cx, |tile, _| tile.composer_text_for_probe().to_string());
+    assert_eq!(
+        composer, USER_MARKDOWN,
+        "Edit in input writes the message into the composer"
+    );
+
+    // ---- system note: a status by role, kept copyable for errors ----
+    select_surface(cx, "text-error-note");
+    let note_selected = selected_text(cx);
+    assert!(
+        note_selected.contains("guard"),
+        "an error note stays selectable, got {note_selected:?}"
+    );
+    right_click(cx, "text-error-note");
+    assert_eq!(menu_count(cx), 1, "the note opens the text menu");
+    cx.simulate_keystrokes("down");
+    cx.simulate_keystrokes("enter");
+    draw(cx);
+    assert_eq!(
+        clipboard_text(cx),
+        note_selected,
+        "the note's Copy item writes the error text"
     );
 
     // The tile still renders after the menus; the probe closed it cleanly.

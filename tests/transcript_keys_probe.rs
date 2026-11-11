@@ -201,7 +201,9 @@ fn transcript_keys_scroll_the_real_window(cx: &mut TestAppContext) {
     // checked against it instead of against whatever End happens to report.
     let mut page_max = page_offset;
     let mut saturated = false;
-    for _ in 0..MESSAGES {
+    // The rows are real editors now, so a page is smaller than a message;
+    // four pages per message is comfortably past the bottom of this transcript.
+    for _ in 0..MESSAGES * 4 {
         cx.simulate_keystrokes("pagedown");
         draw(cx);
         let next = scrolled(cx, &tile);

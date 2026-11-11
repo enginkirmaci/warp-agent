@@ -54,7 +54,7 @@ impl TileDensity {
 
 /// A model pick from the composer pill: applies through the store/tile.
 type ModelPick = Box<dyn Fn(&str, &mut App)>;
-use crate::ui::markdown::render_markdown;
+use crate::ui::markdown::{HostMenu, render_markdown};
 use crate::ui::tooltip::tip;
 use gpui::prelude::*;
 use gpui::{
@@ -67,6 +67,7 @@ use gpui_kit::base::ElementExt as _;
 use gpui_kit::component::input::{
     Enter, Escape, InputEvent, InputState, MoveDown, MoveUp, Position, TextareaState,
 };
+use gpui_kit::component::menu::PopupMenuItem;
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
@@ -114,14 +115,6 @@ enum PickerKind {
 
 #[derive(Clone)]
 enum ContextMenu {
-    /// copy text
-    Copy(SharedString),
-    /// user message → back into the composer
-    EditInput(SharedString),
-    /// user message → send its text again in this chat
-    Reprompt(SharedString),
-    /// user message (by item key) → new session seeded with the transcript up to here
-    ForkFromHere(usize),
     /// copy image bytes
     CopyImage { png: Arc<Vec<u8>> },
 }
@@ -388,9 +381,10 @@ impl TileView {
         fresh
     }
 
-    /// The read-only live editor for one assistant message: created on first
-    /// render, then fed new text only when the message actually changed —
-    /// set_value rebuilds the document, so an unchanged render must skip it.
+    /// The read-only live editor for one assistant message or reasoning
+    /// block: created on first render, then fed new text only when the text
+    /// actually changed. An existing editor takes the stream through
+    /// `apply_streamed`, so a chunk keeps the reader's selection and scroll.
     fn md_editor(
         &mut self,
         item_id: &str,
@@ -403,7 +397,9 @@ impl TileView {
             if entry.fed == text {
                 return editor;
             }
-            editor.update(cx, |editor, cx| editor.set_value(text.clone(), window, cx));
+            editor.update(cx, |editor, cx| {
+                editor.apply_streamed(text.clone(), window, cx)
+            });
             self.md_editors.insert(
                 item_id.to_string(),
                 MdEditor {
@@ -494,6 +490,43 @@ impl TileView {
         self.list_state.scroll_px_offset_for_scrollbar().y
     }
 
+    /// The text currently held by a markdown surface's editor, for the
+    /// streaming probe.
+    #[doc(hidden)]
+    pub fn markdown_value_for_probe(&self, item_id: &str, cx: &gpui::App) -> Option<SharedString> {
+        self.md_editors
+            .get(item_id)
+            .map(|entry| entry.editor.read(cx).value())
+    }
+
+    /// The read-only editor behind a markdown surface, for selecting a phrase
+    /// in a probe.
+    #[doc(hidden)]
+    pub fn markdown_editor_for_probe(&self, item_id: &str) -> Option<Entity<LiveEditorState>> {
+        self.md_editors
+            .get(item_id)
+            .map(|entry| entry.editor.clone())
+    }
+
+    /// The custom-answer field's focus handle for a question entry.
+    #[doc(hidden)]
+    pub fn question_field_focus_for_probe(
+        &self,
+        question_id: &str,
+        qi: usize,
+        cx: &gpui::App,
+    ) -> Option<FocusHandle> {
+        self.question_inputs
+            .get(&format!("{question_id}#{qi}"))
+            .map(|field| field.read(cx).state.read(cx).focus_handle(cx))
+    }
+
+    /// The composer text the tile last mirrored, for the message-menu probe.
+    #[doc(hidden)]
+    pub fn composer_text_for_probe(&self) -> &str {
+        &self.last_field_text
+    }
+
     /// Decoded image for a transcript item or composer attachment, cached by a
     /// stable key (item id / "att{key}") — both name immutable bytes, so an
     /// entry never goes stale, only unreachable (pruned after each render).
@@ -544,6 +577,17 @@ struct TileMenu {
     items: Vec<ContextMenu>,
     x: f32,
     y: f32,
+}
+
+/// One host row in a read-only markdown surface's context menu: the label a
+/// person reads, a stable selector a probe can find, and the action it runs.
+fn host_action(
+    label: &'static str,
+    selector: &'static str,
+    on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
+) -> PopupMenuItem {
+    PopupMenuItem::element(move |_, _| div().debug_selector(move || selector.into()).child(label))
+        .on_click(on_click)
 }
 
 /// Miniature context-usage gauge: a ring of dots whose arc fills clockwise
@@ -1082,8 +1126,8 @@ impl TileView {
                 created_ms,
                 ..
             } => {
-                // cached, pointer-stable: keeps the kit from re-parsing the
-                // bubble's TextView on every render (same contract as md_text)
+                // cached, pointer-stable: the read-only editor is fed a new
+                // document only when the text actually moved
                 let text = self.md_text(item_id, text);
                 let time = crate::store::message_time_label(*created_ms);
                 let copy_text = text.clone();
@@ -1094,6 +1138,67 @@ impl TileView {
                 } else {
                     ("icons/copy.svg", theme::text_muted(), theme::hairline())
                 };
+                let editor = self.md_editor(item_id, text.clone(), window, cx);
+                let menu_store = self.store.clone();
+                let menu_composer = self.composer.clone();
+                let menu_tile = cx.entity().downgrade();
+                let menu_key = self.key.clone();
+                let menu_text = text.clone();
+                let msg_key = *msg_key;
+                let host_menu: HostMenu = Rc::new(move |menu, _window, _cx| {
+                    let store = menu_store.clone();
+                    let composer = menu_composer.clone();
+                    let tile = menu_tile.clone();
+                    let key = menu_key.clone();
+                    let text = menu_text.clone();
+                    let edit = host_action("Edit in input", "host-edit", {
+                        let store = store.clone();
+                        let composer = composer.clone();
+                        let tile = tile.clone();
+                        let key = key.clone();
+                        let text = text.clone();
+                        move |_, window, cx| {
+                            store.update(cx, {
+                                let key = key.clone();
+                                let text = text.clone();
+                                move |store, _| {
+                                    if let Some(tile) = store.tile_by_key_mut(&key) {
+                                        tile.input = text.to_string();
+                                        tile.reset_history();
+                                    }
+                                }
+                            });
+                            composer
+                                .update(cx, |field, cx| field.set_value(text.as_ref(), window, cx));
+                            let _ = tile.update(cx, |tv, _| {
+                                tv.last_field_text = text.to_string();
+                            });
+                        }
+                    });
+                    let reprompt = host_action("Re-prompt", "host-reprompt", {
+                        let store = store.clone();
+                        let key = key.clone();
+                        let text = text.clone();
+                        move |_, _, cx| {
+                            let key = key.clone();
+                            let text = text.clone();
+                            store.update(cx, move |store, cx| {
+                                store.reprompt(&key, text.as_ref(), cx)
+                            });
+                        }
+                    });
+                    let fork = host_action("Fork from here", "host-fork", {
+                        let store = store.clone();
+                        let key = key.clone();
+                        move |_, _, cx| {
+                            let key = key.clone();
+                            store.update(cx, move |store, cx| {
+                                store.fork_from_message(&key, msg_key, cx)
+                            });
+                        }
+                    });
+                    menu.separator().item(edit).item(reprompt).item(fork)
+                });
                 div()
                     .w_full()
                     .flex()
@@ -1107,44 +1212,26 @@ impl TileView {
                             .bg(theme::bubble_user())
                             .p_2()
                             .px_3()
-                            .on_mouse_down(MouseButton::Right, {
-                                let menu_text = text.clone();
-                                let msg_key = *msg_key;
-                                cx.listener(move |this, event: &gpui::MouseDownEvent, _, cx| {
-                                    let (x, y) = this.menu_anchor(event);
-                                    this.menu = Some(TileMenu {
-                                        items: vec![
-                                            ContextMenu::Copy(menu_text.clone()),
-                                            ContextMenu::EditInput(menu_text.clone()),
-                                            ContextMenu::Reprompt(menu_text.clone()),
-                                            ContextMenu::ForkFromHere(msg_key),
-                                        ],
-                                        x,
-                                        y,
-                                    });
-                                    cx.notify();
-                                })
-                            })
                             .flex()
                             .flex_col()
                             .gap_1()
                             .child(
-                                // markdown (not plain div text) so the user's
-                                // own message keeps inline styling; the guard
-                                // drops to plain prose if the parser would
-                                // panic on it
+                                // the same read-only markdown surface as an
+                                // answer; its menu carries the message actions
+                                // after Copy / Select all
                                 div()
-                                    .text_size(px(fonts.font_body))
-                                    .text_color(theme::text())
-                                    .child(crate::ui::markdown::text_view(
-                                        gpui::ElementId::NamedInteger(
-                                            "utext".into(),
-                                            TileView::hash(item_id),
-                                        ),
-                                        "text-user",
-                                        text.clone(),
-                                        None,
-                                        None,
+                                    .debug_selector(|| "text-user".into())
+                                    .child(render_markdown(
+                                        &editor,
+                                        fonts.font_body,
+                                        fonts.icon_medium,
+                                        item_id.to_string(),
+                                        self.copied_flash.as_deref(),
+                                        cx.entity().downgrade(),
+                                        accent,
+                                        Some(host_menu),
+                                        Some(0.0),
+                                        cx,
                                     )),
                             )
                             .child(
@@ -1224,6 +1311,8 @@ impl TileView {
                     self.copied_flash.as_deref(),
                     cx.entity().downgrade(),
                     accent,
+                    None,
+                    None,
                     cx,
                 );
                 div()
@@ -1303,6 +1392,7 @@ impl TileView {
             ChatItem::Reasoning { text, .. } => {
                 let open = self.expanded.contains(item_id);
                 let body = self.md_text(item_id, text);
+                let editor = self.md_editor(item_id, body, window, cx);
                 div()
                     .w_full()
                     .flex()
@@ -1317,22 +1407,22 @@ impl TileView {
                         cx,
                     ))
                     .when(open, |d| {
-                        d.child(
-                            self.fold_body(item_id)
-                                .max_w(px(MESSAGE_WIDTH))
-                                .text_size(px(fonts.font_meta))
-                                .text_color(theme::text_dim())
-                                .child(crate::ui::markdown::text_view(
-                                    gpui::ElementId::NamedInteger(
-                                        "rtext".into(),
-                                        TileView::hash(item_id),
-                                    ),
-                                    "text-reasoning",
-                                    body,
+                        d.child(self.fold_body(item_id).max_w(px(MESSAGE_WIDTH)).child(
+                            div().debug_selector(|| "text-reasoning".into()).child(
+                                crate::ui::markdown::render_markdown(
+                                    &editor,
+                                    fonts.font_meta,
+                                    fonts.icon_tiny,
+                                    item_id.to_string(),
+                                    self.copied_flash.as_deref(),
+                                    cx.entity().downgrade(),
+                                    accent,
                                     None,
-                                    text_menu::focus(cx),
-                                )),
-                        )
+                                    Some(0.0),
+                                    cx,
+                                ),
+                            ),
+                        ))
                     })
                     .into_any_element()
             }
@@ -2173,17 +2263,22 @@ impl TileView {
                     )),
             );
         } else if let Some(resolution) = &question.resolution {
+            let key = format!("{item_id}:res");
+            let body = self.md_text(&key, resolution);
+            let editor = self.md_editor(&key, body, window, cx);
             card = card.child(
                 div()
-                    .italic()
-                    .text_size(px(fonts.font_body))
-                    .text_color(theme::text_faint())
-                    .child(self.transcript_text(
-                        &format!("{item_id}:res"),
-                        resolution,
-                        "qres",
-                        "text-question-resolution",
+                    .debug_selector(|| "text-question-resolution".into())
+                    .child(render_markdown(
+                        &editor,
+                        fonts.font_body,
+                        fonts.icon_tiny,
+                        key,
+                        self.copied_flash.as_deref(),
+                        cx.entity().downgrade(),
+                        accent,
                         None,
+                        Some(0.0),
                         cx,
                     )),
             );
@@ -2277,6 +2372,9 @@ impl TileView {
         }
         let field = self.question_inputs.get(&input_key).cloned().unwrap();
         let entry_locked = entry.locked;
+        let question_key = format!("{item_id}#{qi}");
+        let question_body = self.md_text(&question_key, &entry.question);
+        let question_editor = self.md_editor(&question_key, question_body, window, cx);
         let mut column = div().flex().flex_col().gap_1().pb_1();
         column = column
             .when(!entry.header.is_empty(), |d| {
@@ -2290,14 +2388,17 @@ impl TileView {
             })
             .child(
                 div()
-                    .text_size(px(fonts.font_body))
-                    .text_color(theme::text())
-                    .child(self.transcript_text(
-                        &format!("{item_id}#{qi}"),
-                        &entry.question,
-                        "qtext",
-                        "text-question",
+                    .debug_selector(|| "text-question".into())
+                    .child(render_markdown(
+                        &question_editor,
+                        fonts.font_body,
+                        fonts.icon_tiny,
+                        question_key,
+                        self.copied_flash.as_deref(),
+                        cx.entity().downgrade(),
+                        accent,
                         None,
+                        Some(0.0),
                         cx,
                     )),
             );
@@ -3839,35 +3940,25 @@ impl TileView {
     fn render_menu(&mut self, snap: &TileSnap, cx: &mut Context<Self>) -> gpui::AnyElement {
         let fonts = snap.fonts;
         let tile_entity = cx.entity();
-        let menu_owner_key = self.key.clone();
         let mut menu_el: gpui::AnyElement = div().into_any_element();
         if let Some(menu) = self.menu.clone() {
-            let store_handle = self.store.clone();
-            let composer_handle = self.composer.clone();
             // click-elsewhere catcher closes the menu. Must close on full click,
             // not mouse-down: a down-handler unmounts the menu rows before
             // their on_click (mouse-up) can run, so actions never fire.
             let close_entity = tile_entity.clone();
             let mut rows = div().flex().flex_col();
             for (ix, item) in menu.items.iter().enumerate() {
-                let label = match item {
-                    ContextMenu::Copy(_) => "Copy",
-                    ContextMenu::EditInput(_) => "Edit in input",
-                    ContextMenu::Reprompt(_) => "Re-prompt",
-                    ContextMenu::ForkFromHere(_) => "Fork from here",
-                    ContextMenu::CopyImage { .. } => "Copy image",
-                };
-                let store_handle = store_handle.clone();
+                // The tile menu is the image menu now: a user message's
+                // actions live in its markdown editor's host menu.
+                let label = "Copy image";
                 let tile_entity = tile_entity.clone();
-                let menu_owner_key = menu_owner_key.clone();
-                let composer_handle = composer_handle.clone();
-                let item = item.clone();
-                let row_selector = match ix {
-                    0 => "tile-menu-row-0",
-                    1 => "tile-menu-row-1",
-                    2 => "tile-menu-row-2",
-                    3 => "tile-menu-row-3",
-                    _ => "tile-menu-row-more",
+                let png = match item {
+                    ContextMenu::CopyImage { png } => png.clone(),
+                };
+                let row_selector: &'static str = if ix == 0 {
+                    "tile-menu-row-0"
+                } else {
+                    "tile-menu-row-more"
                 };
                 rows = rows.child(div().debug_selector(move || row_selector.into()).child(
                     menu_row(
@@ -3875,57 +3966,13 @@ impl TileView {
                         label,
                         false,
                         fonts.font_body,
-                        move |_, window, cx| {
-                            match &item {
-                                ContextMenu::Copy(text) => {
-                                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(
-                                        text.to_string(),
-                                    ));
-                                }
-                                ContextMenu::EditInput(text) => {
-                                    let text = text.clone();
-                                    // the tile that showed the menu, not wherever focus happens to be
-                                    let key = menu_owner_key.clone();
-                                    let composer = composer_handle.clone();
-                                    store_handle.update(cx, {
-                                        let text = text.clone();
-                                        move |s, _| {
-                                            if let Some(tile) = s.tile_by_key_mut(&key) {
-                                                tile.input = text.to_string();
-                                                tile.reset_history();
-                                            }
-                                        }
-                                    });
-                                    // set_value emits no Change, so the store copy above stands
-                                    composer.update(cx, |field, cx| {
-                                        field.set_value(text.as_ref(), window, cx)
-                                    });
-                                    // keep the tile's field-text mirror in step
-                                    tile_entity
-                                        .update(cx, |tv, _| tv.last_field_text = text.to_string());
-                                }
-                                ContextMenu::Reprompt(text) => {
-                                    let key = menu_owner_key.clone();
-                                    let text = text.to_string();
-                                    store_handle
-                                        .update(cx, move |s, cx| s.reprompt(&key, &text, cx));
-                                }
-                                ContextMenu::ForkFromHere(msg_key) => {
-                                    let key = menu_owner_key.clone();
-                                    let msg_key = *msg_key;
-                                    store_handle.update(cx, move |s, cx| {
-                                        s.fork_from_message(&key, msg_key, cx)
-                                    });
-                                }
-                                ContextMenu::CopyImage { png } => {
-                                    let image = gpui::Image {
-                                        format: ImageFormat::Png,
-                                        bytes: png.as_ref().clone(),
-                                        id: 0,
-                                    };
-                                    cx.write_to_clipboard(gpui::ClipboardItem::new_image(&image));
-                                }
-                            }
+                        move |_, _, cx| {
+                            let image = gpui::Image {
+                                format: ImageFormat::Png,
+                                bytes: png.as_ref().clone(),
+                                id: 0,
+                            };
+                            cx.write_to_clipboard(gpui::ClipboardItem::new_image(&image));
                             tile_entity.update(cx, |tv, cx| {
                                 tv.menu = None;
                                 cx.notify();
@@ -5205,6 +5252,7 @@ struct QuestionField {
 
 impl Render for QuestionField {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let qi = self.qi;
         // the kit Input has no a11y of its own — the wrapper carries the role;
         // an AT click lands at the wrapper's center, the input itself
         // the field box owns the focus/a11y node; this wrapper only names it
@@ -5215,6 +5263,7 @@ impl Render for QuestionField {
                 "qfield".into(),
                 TileView::hash(&format!("{}#{}", self.question_id, self.qi)),
             ))
+            .debug_selector(move || format!("question-field-{qi}"))
             .role(Role::TextInput)
             .aria_label("Custom answer")
             .aria_placeholder("custom answer…")

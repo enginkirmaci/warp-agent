@@ -556,9 +556,29 @@ pub async fn run_request(handle: &DshHandle, ws_key: String, request: ApiRequest
             result: agent_presets(handle).await,
         },
         ApiRequest::ListCommands => {
-            let result = skills(handle).await;
+            let result = commands(handle, None).await;
             UiEvent::CommandsLoaded { ws_key, result }
         }
+        ApiRequest::ListDshCommands { session_id } => {
+            let result = commands(handle, session_id.as_deref()).await;
+            UiEvent::CommandsLoaded { ws_key, result }
+        }
+        ApiRequest::CreateDshCommandSession { tile_key, folder } => {
+            let result = create_session(handle, Some(&folder), "New chat").await;
+            UiEvent::DshCommandSessionCreated {
+                tile_key,
+                ws_key: folder,
+                result,
+            }
+        }
+        ApiRequest::ExecuteDshCommand { session_id, line } => {
+            let result = execute_command(handle, &session_id, &line).await;
+            UiEvent::DshCommandExecuted { session_id, result }
+        }
+        ApiRequest::CompactSession { .. } => UiEvent::Log {
+            ws_key,
+            line: "opencode-only request hit the dsh runner".into(),
+        },
         ApiRequest::GetMessages { session_id } => {
             handle.ensure_follow(&session_id).await.ok();
             let result = handle.messages(&session_id).await;
@@ -856,39 +876,115 @@ async fn agent_presets(handle: &DshHandle) -> Result<Vec<AgentInfo>> {
     Ok(agents)
 }
 
-async fn skills(handle: &DshHandle) -> Result<Vec<CommandInfo>> {
-    // skills are session-scoped (cwd + preset); use any followed session
-    let Some(session) = handle.any_session() else {
+/// The agent's slash-command catalog: `commands/list` (the builtin actions,
+/// `compact` first) merged with `skills/list`. Both are agent-scoped; without
+/// a session there is nothing to ask. A command wins a name collision because
+/// it is the runnable definition.
+pub async fn commands(handle: &DshHandle, session_id: Option<&str>) -> Result<Vec<CommandInfo>> {
+    let Some(session) = session_id
+        .map(str::to_string)
+        .or_else(|| handle.any_session())
+    else {
         return Ok(Vec::new());
     };
-    let value = handle
+    let mut commands = Vec::new();
+    let mut seen = HashSet::new();
+    match handle
+        .rpc("commands/list", json!({ "agentId": session }))
+        .await
+    {
+        Ok(value) => {
+            for command in value.as_array().into_iter().flatten() {
+                let Some(name) = command.get("name").and_then(Value::as_str) else {
+                    continue;
+                };
+                let lower = name.to_lowercase();
+                if !seen.insert(lower.clone()) {
+                    continue;
+                }
+                commands.push(CommandInfo {
+                    name: name.to_string(),
+                    name_lower: lower,
+                    description: command
+                        .get("description")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .into(),
+                    source: "command".into(),
+                });
+            }
+        }
+        Err(err) => tracing::debug!("dsh commands/list failed: {err:#}"),
+    }
+    match handle
         .rpc(
             "skills/list",
             json!({ "request": { "sessionId": session } }),
         )
-        .await?;
-    let mut commands = Vec::new();
-    for skill in value
-        .get("skills")
-        .and_then(Value::as_array)
-        .unwrap_or(&Vec::new())
+        .await
     {
-        let Some(name) = skill.get("name").and_then(Value::as_str) else {
-            continue;
-        };
-        commands.push(CommandInfo {
-            name: name.to_string(),
-            name_lower: name.to_lowercase(),
-            description: skill
-                .get("description")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .into(),
-            source: "skill".into(),
-        });
+        Ok(value) => {
+            for skill in value
+                .get("skills")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+            {
+                let Some(name) = skill.get("name").and_then(Value::as_str) else {
+                    continue;
+                };
+                let lower = name.to_lowercase();
+                if !seen.insert(lower.clone()) {
+                    continue;
+                }
+                commands.push(CommandInfo {
+                    name: name.to_string(),
+                    name_lower: lower,
+                    description: skill
+                        .get("description")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .into(),
+                    source: "skill".into(),
+                });
+            }
+        }
+        // an older dsh may not expose skills/list: keep the commands, and only
+        // fail the whole menu when there is nothing at all to show
+        Err(err) if commands.is_empty() => return Err(err),
+        Err(err) => tracing::debug!("dsh skills/list failed: {err:#}"),
     }
-    commands.sort_by(|a, b| a.name.cmp(&b.name));
+    commands.sort_by(|a, b| a.name_lower.cmp(&b.name_lower));
     Ok(commands)
+}
+
+/// Runs one listed command through dsh's command registry. The RPC's `result`
+/// carries the text the UI should show; `kind: "error"` becomes an `Err` so
+/// the note is styled as a failure.
+pub async fn execute_command(handle: &DshHandle, session_id: &str, line: &str) -> Result<String> {
+    let value = handle
+        .rpc(
+            "commands/execute",
+            json!({
+                "agentId": session_id,
+                "line": line,
+                "submittedAttachments": [],
+            }),
+        )
+        .await?;
+    let result = value.get("result").cloned().unwrap_or(Value::Null);
+    let kind = result
+        .get("kind")
+        .and_then(Value::as_str)
+        .unwrap_or("error");
+    let text = result.get("text").and_then(Value::as_str).unwrap_or("");
+    if kind == "success" {
+        Ok(text.to_string())
+    } else if text.is_empty() {
+        Err(anyhow!("the command did not run"))
+    } else {
+        Err(anyhow!(text.to_string()))
+    }
 }
 
 async fn find_files(handle: &DshHandle, query: &str) -> Result<Vec<String>> {
@@ -2233,5 +2329,141 @@ mod tests {
             .insert("chat-1".into(), DshSessionState::default());
         handle.forget_session("chat-1");
         assert!(!handle.inner.sessions.lock().unwrap().contains_key("chat-1"));
+    }
+
+    /// One HTTP request from a reqwest client: returns (path, body).
+    async fn read_request(socket: &mut tokio::net::TcpStream) -> Option<(String, String)> {
+        use tokio::io::AsyncReadExt;
+
+        let mut buf = Vec::new();
+        let mut header_end = None;
+        loop {
+            let mut chunk = [0u8; 4096];
+            let n = socket.read(&mut chunk).await.ok()?;
+            if n == 0 {
+                return None;
+            }
+            buf.extend_from_slice(&chunk[..n]);
+            if header_end.is_none() {
+                header_end = buf.windows(4).position(|w| w == b"\r\n\r\n").map(|i| i + 4);
+            }
+            let Some(end) = header_end else { continue };
+            let headers = String::from_utf8_lossy(&buf[..end]).to_string();
+            let content_len = headers
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("content-length")
+                        .then(|| value.trim().parse::<usize>().ok())
+                        .flatten()
+                })
+                .unwrap_or(0);
+            if buf.len() < end + content_len {
+                continue;
+            }
+            let body = String::from_utf8_lossy(&buf[end..end + content_len]).to_string();
+            let path = headers.lines().next()?.split(' ').nth(1)?.to_string();
+            return Some((path, body));
+        }
+    }
+
+    /// A fake `dsh web` answering the two catalog RPCs and one command run.
+    async fn fake_dsh(seen: Arc<Mutex<Vec<(String, Value)>>>) -> String {
+        use tokio::io::AsyncWriteExt;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                let seen = Arc::clone(&seen);
+                tokio::spawn(async move {
+                    let Some((path, body)) = read_request(&mut socket).await else {
+                        return;
+                    };
+                    let method = path.trim_start_matches("/api/").to_string();
+                    let value: Value = serde_json::from_str(&body).unwrap_or(Value::Null);
+                    seen.lock().unwrap().push((method.clone(), value));
+                    let payload = match method.as_str() {
+                        "commands/list" => json!({"result":{"ok":true,"value":[
+                            {"name":"plan","description":"Enter plan mode"},
+                            {"name":"compact","description":"Compact older conversation history"},
+                        ]}}),
+                        "skills/list" => json!({"result":{"ok":true,"value":{"skills":[
+                            {"name":"rust","description":"Rust handbook"},
+                            {"name":"plan","description":"a skill shadowed by the command"},
+                        ]}}}),
+                        "commands/execute" => json!({"result":{"ok":true,"value":{
+                            "commandId":"cmd-1",
+                            "result":{"kind":"error","text":"No compactable history yet."}
+                        }}}),
+                        _ => {
+                            json!({"result":{"ok":false,"error":{"message":"unknown","code":"test"}}})
+                        }
+                    };
+                    let body = payload.to_string();
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = socket.write_all(response.as_bytes()).await;
+                });
+            }
+        });
+        base
+    }
+
+    #[tokio::test]
+    async fn command_catalog_uses_flat_agent_and_merges_skills() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let base = fake_dsh(Arc::clone(&seen)).await;
+        let (tx, _rx) = async_channel::bounded(4);
+        let handle = DshHandle::new(&base, "token", tx);
+
+        let catalog = commands(&handle, Some("ses_test")).await.unwrap();
+        let names: Vec<&str> = catalog.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, ["compact", "plan", "rust"]);
+        assert_eq!(catalog[0].source, "command");
+        assert_eq!(catalog[2].source, "skill");
+
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen[0].0, "commands/list");
+        assert_eq!(
+            seen[0]
+                .1
+                .pointer("/payload/args/agentId")
+                .and_then(Value::as_str),
+            Some("ses_test")
+        );
+        assert_eq!(seen[1].0, "skills/list");
+        assert_eq!(
+            seen[1]
+                .1
+                .pointer("/payload/args/request/sessionId")
+                .and_then(Value::as_str),
+            Some("ses_test")
+        );
+    }
+
+    #[tokio::test]
+    async fn command_error_text_reaches_the_caller() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let base = fake_dsh(Arc::clone(&seen)).await;
+        let (tx, _rx) = async_channel::bounded(4);
+        let handle = DshHandle::new(&base, "token", tx);
+
+        let err = execute_command(&handle, "ses_test", "/compact")
+            .await
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("No compactable history yet."));
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen[0].0, "commands/execute");
+        assert_eq!(
+            seen[0]
+                .1
+                .pointer("/payload/args/line")
+                .and_then(Value::as_str),
+            Some("/compact")
+        );
     }
 }

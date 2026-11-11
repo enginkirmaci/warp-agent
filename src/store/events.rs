@@ -49,6 +49,7 @@ impl Store {
                         request: ApiRequest::ListAgents,
                     });
                     // the / suggestion menu serves this workspace's commands
+                    self.commands_loading.insert(ws_key.clone());
                     self.net.send(NetCommand::Request {
                         ws_key: ws_key.clone(),
                         request: ApiRequest::ListCommands,
@@ -95,6 +96,7 @@ impl Store {
                     self.repaint(cx);
                 }
                 Err(err) => {
+                    self.commands_loading.remove(&ws_key);
                     let name = self
                         .workspaces
                         .iter()
@@ -133,6 +135,7 @@ impl Store {
             },
             UiEvent::ServerStopped => {}
             UiEvent::ServerCrashed { ws_key } => {
+                self.commands_loading.remove(&ws_key);
                 // a user stop tore the workspace down meanwhile: stale report
                 if !self.runtimes.contains_key(&ws_key) {
                     return;
@@ -798,10 +801,58 @@ impl Store {
                 self.repaint(cx);
             }
             UiEvent::CommandsLoaded { ws_key, result } => {
+                self.commands_loading.remove(&ws_key);
                 if let Ok(commands) = result {
-                    self.commands.insert(ws_key, commands);
+                    let opencode = ws_key != DSH_SERVER_KEY;
+                    self.commands.insert(ws_key.clone(), commands);
+                    if opencode {
+                        self.ensure_local_opencode_commands(&ws_key);
+                    }
                     self.repaint(cx);
                 }
+            }
+            UiEvent::DshCommandSessionCreated {
+                tile_key,
+                ws_key,
+                result,
+            } => {
+                self.pending_command_tiles.remove(&tile_key);
+                if self.tile_by_key(&tile_key).is_none() {
+                    self.commands_loading.remove(DSH_SERVER_KEY);
+                    return;
+                }
+                match result {
+                    Ok(info) => self.adopt_dsh_command_session(&tile_key, &ws_key, info, cx),
+                    Err(err) => {
+                        self.commands_loading.remove(DSH_SERVER_KEY);
+                        self.tile_note(
+                            &tile_key,
+                            &format!("Could not open a dsh chat: {err:#}"),
+                            true,
+                            cx,
+                        );
+                    }
+                }
+            }
+            UiEvent::DshCommandExecuted { session_id, result } => {
+                let (text, error) = match result {
+                    Ok(text) if text.trim().is_empty() => ("Command finished.".to_string(), false),
+                    Ok(text) => (text, false),
+                    Err(err) => (format!("{err:#}"), true),
+                };
+                self.post_note_for_session(&session_id, &text, error);
+                self.repaint(cx);
+            }
+            UiEvent::SessionCompacted { session_id, result } => {
+                match result {
+                    Ok(()) => self.post_note_for_session(&session_id, "Context compacted.", false),
+                    Err(err) => self.post_note_for_session(
+                        &session_id,
+                        &format!("Compact failed: {err:#}"),
+                        true,
+                    ),
+                }
+                self.repaint(cx);
             }
             UiEvent::McpNamesLoaded { ws_key, result } => match result {
                 Ok(names) => {
@@ -842,5 +893,61 @@ impl Store {
                 self.repaint(cx);
             }
         }
+    }
+
+    /// Adopts the session a dsh draft opened for its slash menu and asks for
+    /// the catalog. Mirrors the session side of `SessionCreated`, without a
+    /// pending prompt.
+    fn adopt_dsh_command_session(
+        &mut self,
+        tile_key: &str,
+        ws_key: &str,
+        info: SessionInfo,
+        cx: &mut Context<Self>,
+    ) {
+        if self.tile_by_key(tile_key).is_none() {
+            return;
+        }
+        self.workspace_by_session
+            .insert(info.id.clone(), ws_key.to_string());
+        self.title_by_session
+            .insert(info.id.clone(), info.title.clone());
+        self.tile_by_session
+            .insert(info.id.clone(), tile_key.to_string());
+        self.ui
+            .harness_by_session
+            .insert(info.id.clone(), HarnessKind::Dsh);
+        if let Some(tile) = self.tile_by_key_mut(tile_key) {
+            tile.session_id = Some(info.id.clone());
+            tile.title = info.title.clone();
+            tile.auto_title_pending = true;
+        }
+        if let Some(ws) = self.workspace_by_path_mut(ws_key) {
+            ws.state.sessions.insert(0, info.id.clone());
+        }
+        if self.selected_workspace.as_deref() == Some(ws_key) {
+            self.sessions.push(SessionItem {
+                id: info.id.clone(),
+                title: info.title.clone(),
+                updated_ms: info.updated_ms,
+                created_ms: info.created_ms,
+                is_pinned: false,
+                is_selected: false,
+                is_running: false,
+                is_editing: false,
+                draft_title: String::new(),
+            });
+            self.sessions.sort_by_key(session_recency);
+        }
+        self.sync_workspace_chats(cx);
+        self.persist_tiles();
+        self.save_state();
+        self.net.send(NetCommand::Request {
+            ws_key: DSH_SERVER_KEY.into(),
+            request: ApiRequest::ListDshCommands {
+                session_id: Some(info.id),
+            },
+        });
+        self.repaint(cx);
     }
 }

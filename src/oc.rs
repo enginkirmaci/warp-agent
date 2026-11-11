@@ -559,6 +559,31 @@ impl ApiClient {
         error_for_status(resp).await.map(|_| ())
     }
 
+    /// On-demand context compaction (POST /session/{id}/summarize): the
+    /// server replaces older history with its summary. The route needs an
+    /// explicit provider/model, unlike the plain message route's object shape.
+    pub async fn compact_session(&self, session_id: &str, model: &str) -> Result<()> {
+        let (provider_id, model_id) = match model.split_once('/') {
+            Some((provider, model)) => (provider, model),
+            None => (model, ""),
+        };
+        let resp = self
+            .rest
+            .post(format!(
+                "{}/session/{}/summarize",
+                self.base_url, session_id
+            ))
+            .json(&json!({
+                "providerID": provider_id,
+                "modelID": model_id,
+                "auto": false,
+            }))
+            .timeout(Duration::from_secs(600))
+            .send()
+            .await?;
+        error_for_status(resp).await.map(|_| ())
+    }
+
     pub async fn respond_permission(
         &self,
         session_id: &str,
@@ -1049,6 +1074,31 @@ pub enum ApiRequest {
     },
     /// The workspace's slash commands and skills (GET /command).
     ListCommands,
+    /// dsh: the agent-scoped command + skill catalog (commands/list +
+    /// skills/list). Commands are the builtin actions (`compact`, `plan`, …);
+    /// skills are the workspace instructions. Both need a session id.
+    ListDshCommands {
+        session_id: Option<String>,
+    },
+    /// dsh: open a session for a draft's slash menu. Unlike
+    /// [`ApiRequest::CreateDshSession`] this carries no prompt: the first real
+    /// send reuses the session.
+    CreateDshCommandSession {
+        tile_key: String,
+        folder: String,
+    },
+    /// dsh: run one listed command through commands/execute. Commands are
+    /// log-only; they never become a model message.
+    ExecuteDshCommand {
+        session_id: String,
+        line: String,
+    },
+    /// opencode: compact one session through POST /session/{id}/summarize.
+    /// `model` is the tile's "provider/model"; the endpoint needs both halves.
+    CompactSession {
+        session_id: String,
+        model: String,
+    },
     /// Filename search for the `@` mention menu (GET /find/file).
     FindFiles {
         query: String,
@@ -1158,6 +1208,24 @@ pub enum UiEvent {
     CommandsLoaded {
         ws_key: String,
         result: Result<Vec<CommandInfo>>,
+    },
+    /// dsh: the lazy session a draft asked for when its slash menu opened.
+    DshCommandSessionCreated {
+        tile_key: String,
+        ws_key: String,
+        result: Result<SessionInfo>,
+    },
+    /// dsh: one `commands/execute` result; `Ok` carries the success text
+    /// (possibly empty), `Err` the command's own error text.
+    DshCommandExecuted {
+        session_id: String,
+        result: Result<String>,
+    },
+    /// opencode: the summarize call settled; the transcript updates from the
+    /// event stream, the note only reports the outcome.
+    SessionCompacted {
+        session_id: String,
+        result: Result<()>,
     },
     /// Answer to a FindFiles request; the query rides along so stale answers
     /// can be told apart from the menu's current token.
@@ -1924,6 +1992,22 @@ async fn run_request(client: &ApiClient, ws_key: String, request: ApiRequest) ->
             ws_key,
             result: client.get_commands().await,
         },
+        ApiRequest::CompactSession { session_id, model } => {
+            let result = client.compact_session(&session_id, &model).await;
+            UiEvent::SessionCompacted { session_id, result }
+        }
+        // dsh-only requests never route to an opencode workspace; answer the
+        // list ones so a misroute cannot leave the menu loading forever
+        ApiRequest::ListDshCommands { .. } => UiEvent::CommandsLoaded {
+            ws_key,
+            result: Ok(Vec::new()),
+        },
+        ApiRequest::CreateDshCommandSession { .. } | ApiRequest::ExecuteDshCommand { .. } => {
+            UiEvent::Log {
+                ws_key,
+                line: "dsh-only request hit the opencode runner".into(),
+            }
+        }
         ApiRequest::FindFiles { query } => UiEvent::FilesFound {
             ws_key,
             query: query.clone(),

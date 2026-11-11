@@ -102,6 +102,7 @@ mod tests {
 
     #[test]
     fn data_lives_under_the_suite_root() {
+        let _lock = crate::store::test_support::lock_home();
         assert_eq!(AppPaths::config_dir(), paths::suite_root().join("agent"));
         assert_eq!(AppPaths::logs_dir(), paths::suite_root().join("logs"));
         assert!(AppPaths::settings_file().ends_with("settings.json"));
@@ -114,6 +115,7 @@ mod tests {
 
     #[test]
     fn the_legacy_folder_keeps_its_old_name() {
+        let _lock = crate::store::test_support::lock_home();
         assert_eq!(legacy_dir(), paths::home().join(".warp-agent"));
     }
 }

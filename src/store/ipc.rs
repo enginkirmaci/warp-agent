@@ -536,6 +536,7 @@ mod tests {
     /// not a folder on disk (which would be worked as a repo path).
     #[test]
     fn the_general_name_is_the_tasks_workspace() {
+        let _lock = crate::store::test_support::lock_home();
         let tasks = AppPaths::general_workspace_path()
             .to_string_lossy()
             .into_owned();

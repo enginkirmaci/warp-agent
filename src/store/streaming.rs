@@ -99,6 +99,14 @@ impl Store {
                     } else if self.session_harness(sid) == HarnessKind::Dsh {
                         self.touch_server_activity(DSH_SERVER_KEY);
                         self.refresh_dsh_lists();
+                        // the first completed turn is when dsh's agent-scoped
+                        // command/skill catalog is certainly ready
+                        self.net.send(NetCommand::Request {
+                            ws_key: DSH_SERVER_KEY.into(),
+                            request: ApiRequest::ListDshCommands {
+                                session_id: Some(sid.to_string()),
+                            },
+                        });
                     } else if let Some(idle_path) = self.workspace_by_session.get(sid).cloned() {
                         self.touch_server_activity(&idle_path);
                         if self.selected_workspace.as_deref() == Some(idle_path.as_str()) {

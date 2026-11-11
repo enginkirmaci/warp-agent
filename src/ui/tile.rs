@@ -4750,7 +4750,7 @@ impl SuggestMenu {
                     self.find_requested = None;
                     if mode == SuggestMode::Commands {
                         let key = self.tile_key.clone();
-                        self.store.update(cx, |s, _| s.refresh_commands(&key));
+                        self.store.update(cx, |s, cx| s.refresh_commands(&key, cx));
                     }
                 }
                 self.dismissed = false;
@@ -4907,13 +4907,14 @@ impl Render for SuggestMenu {
                 let matches = self.command_matches(&input, cx);
                 count = matches.len();
                 if count == 0 {
-                    rows = rows.child(muted_row(
-                        if self.store.read(cx).tile_commands(&self.tile_key).is_empty() {
-                            "no server commands".into()
-                        } else {
-                            "no matching command".into()
-                        },
-                    ));
+                    let store = self.store.read(cx);
+                    rows = rows.child(muted_row(if store.tile_commands_loading(&self.tile_key) {
+                        "loading commands…".into()
+                    } else if store.tile_commands(&self.tile_key).is_empty() {
+                        "no server commands".into()
+                    } else {
+                        "no matching command".into()
+                    }));
                 }
                 for (ix, cmd) in matches.iter().enumerate() {
                     if ix == SLASH_MENU_VISIBLE {

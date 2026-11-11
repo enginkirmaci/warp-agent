@@ -278,6 +278,34 @@ impl Store {
         };
         let existing_session = tile.session_id.clone();
         let is_dsh_draft = existing_session.is_none() && tile.harness == HarnessKind::Dsh;
+        // an untouched opencode draft has nothing to summarize; do not create
+        // a session just to tell the user that. A custom server `compact`
+        // keeps the normal create-then-/command path.
+        let server_compact = self
+            .tile_commands(tile_key)
+            .iter()
+            .any(|command| command.name == "compact" && command.source != "local");
+        if existing_session.is_none()
+            && tile.harness == HarnessKind::OpenCode
+            && !server_compact
+            && text
+                .strip_prefix('/')
+                .and_then(|rest| rest.split_whitespace().next())
+                == Some("compact")
+        {
+            if let Some(tile) = self.tile_by_key_mut(tile_key) {
+                tile.input.clear();
+                tile.history_index = 0;
+            }
+            self.tile_note(
+                tile_key,
+                "Nothing to compact yet — send a message first.",
+                true,
+                cx,
+            );
+            self.repaint(cx);
+            return;
+        }
         // a draft talks to the selected workspace's server — except a
         // background run's draft, which belongs to the workspace its door run
         // named; the run's registration answers that lookup
@@ -430,15 +458,60 @@ impl Store {
         let agent = tile
             .and_then(|t| t.selected_agent.clone())
             .filter(|a| a != DEFAULT_AGENT_ENTRY);
+        // dsh commands are a separate RPC (`commands/execute`), not a model
+        // message: a listed command skips the send path entirely. `compact`
+        // is accepted even before the catalog arrives so the first `/compact`
+        // never falls through to the model.
+        let harness = self.session_harness(session_id);
+        let ws_key = self.net_key_for_session(session_id);
+        let slash_name = text
+            .strip_prefix('/')
+            .and_then(|rest| rest.split_whitespace().next())
+            .unwrap_or("");
+        let slash_args = text
+            .strip_prefix('/')
+            .and_then(|rest| rest.split_once(char::is_whitespace))
+            .map(|(_, args)| args.trim())
+            .unwrap_or("");
+        // opencode's compact is app-owned (the server has no such command);
+        // it goes to summarize, never to /session/{id}/command. A custom
+        // server command or skill with that name keeps the /command route.
+        let server_compact = ws_key
+            .as_ref()
+            .and_then(|key| self.commands.get(key))
+            .is_some_and(|commands| {
+                commands
+                    .iter()
+                    .any(|command| command.name == "compact" && command.source != "local")
+            });
+        if harness == HarnessKind::OpenCode && slash_name == "compact" && !server_compact {
+            self.compact_opencode_session(session_id, slash_args, cx);
+            return;
+        }
+        let matched = ws_key
+            .as_ref()
+            .and_then(|key| self.commands.get(key))
+            .and_then(|commands| parse_slash_command(&text, commands));
+        let is_listed_command = matched.as_ref().is_some_and(|(name, _)| {
+            ws_key
+                .as_ref()
+                .and_then(|key| self.commands.get(key))
+                .is_some_and(|commands| {
+                    commands
+                        .iter()
+                        .any(|c| c.name == *name && c.source == "command")
+                })
+        });
+        if harness == HarnessKind::Dsh && (is_listed_command || slash_name == "compact") {
+            self.execute_dsh_command(session_id, text, cx);
+            return;
+        }
         // a leading `/name args` matching a server command/skill goes to the
         // /command route: the server expands the template and honors the
         // command's own agent/model config (subtask skills included). dsh
         // commands are keyed under the shared server, and its send path
         // ignores the distinction (dsh expands slash text itself).
-        let command = self
-            .net_key_for_session(session_id)
-            .and_then(|ws_key| self.commands.get(&ws_key))
-            .and_then(|commands| parse_slash_command(&text, commands));
+        let command = matched;
         self.dispatch_send(
             session_id,
             PromptPayload {

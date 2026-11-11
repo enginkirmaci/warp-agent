@@ -372,6 +372,12 @@ pub struct Store {
     /// The workspace's server commands + skills, keyed by workspace folder
     /// path; filled on ServerStarted and refreshed when a slash menu opens.
     pub commands: HashMap<String, Vec<CommandInfo>>,
+    /// Net keys whose command list is in flight (the menu says loading until
+    /// the answer lands, instead of the false "no server commands").
+    commands_loading: HashSet<String>,
+    /// dsh drafts whose slash menu asked for the agent-scoped catalog before
+    /// the chat had a session; the session-create reply drains them.
+    pending_command_tiles: HashSet<String>,
     /// The workspace's configured MCP server names, keyed by workspace folder
     /// path; filled on ServerStarted (GET /config "mcp" section). Drives the
     /// composer's MCP toggle.
@@ -516,6 +522,8 @@ impl Store {
             deleted_sessions: ui.deleted_sessions.iter().cloned().collect(),
             ipc_models_waiters: Vec::new(),
             commands: HashMap::new(),
+            commands_loading: HashSet::new(),
+            pending_command_tiles: HashSet::new(),
             file_results: None,
             mcp_names: HashMap::new(),
             mcp_disabled: ui.mcp_disabled_workspaces.iter().cloned().collect(),
@@ -785,14 +793,170 @@ impl Store {
             .unwrap_or(&[])
     }
 
-    /// Fire a /command refresh for the tile's workspace (menu open).
-    pub fn refresh_commands(&mut self, tile_key: &str) {
-        if let Some(ws) = self.tile_net_key_or(tile_key) {
-            self.net.send(NetCommand::Request {
-                ws_key: ws,
-                request: ApiRequest::ListCommands,
+    /// Fire a /command refresh for the tile's workspace (menu open). A dsh
+    /// draft has no session yet, so ask for one first: both `commands/list`
+    /// and `skills/list` are agent-scoped, and the menu would otherwise stay
+    /// empty until the first message creates the session.
+    pub fn refresh_commands(&mut self, tile_key: &str, cx: &mut Context<Self>) {
+        let Some(ws) = self.tile_net_key_or(tile_key) else {
+            return;
+        };
+        self.commands_loading.insert(ws.clone());
+        let tile = self.tile_by_key(tile_key);
+        let harness = tile.map(|t| t.harness).unwrap_or_default();
+        let session_id = tile.and_then(|t| t.session_id.clone());
+        if harness == HarnessKind::OpenCode {
+            self.ensure_local_opencode_commands(&ws);
+        }
+        if harness == HarnessKind::Dsh && session_id.is_none() {
+            if self.pending_command_tiles.contains(tile_key) {
+                // a create is already in flight; a second menu open must not
+                // mint a second empty session
+                self.repaint(cx);
+                return;
+            }
+            self.pending_command_tiles.insert(tile_key.to_string());
+            if self.runtimes.contains_key(DSH_SERVER_KEY) {
+                self.create_dsh_command_session(tile_key, cx);
+            } else {
+                self.ensure_dsh(cx);
+            }
+            self.repaint(cx);
+            return;
+        }
+        let request = if harness == HarnessKind::Dsh {
+            ApiRequest::ListDshCommands { session_id }
+        } else {
+            ApiRequest::ListCommands
+        };
+        self.net.send(NetCommand::Request {
+            ws_key: ws,
+            request,
+        });
+        self.repaint(cx);
+    }
+
+    /// opencode's `/compact` is a TUI command, not part of `GET /command`.
+    /// Keep it in the display list so the menu has it before the server
+    /// answers; a server-provided `compact` (custom config) wins.
+    fn ensure_local_opencode_commands(&mut self, ws: &str) {
+        let entry = self.commands.entry(ws.to_string()).or_default();
+        if !entry.iter().any(|command| command.name == "compact") {
+            entry.push(CommandInfo {
+                name: "compact".into(),
+                name_lower: "compact".into(),
+                description: "Compact older conversation history".into(),
+                source: "local".into(),
             });
         }
+    }
+
+    /// True while the tile's command list is still on the wire; the menu shows
+    /// a loading row instead of claiming the server has none.
+    pub fn tile_commands_loading(&self, tile_key: &str) -> bool {
+        self.tile_net_key_or(tile_key)
+            .is_some_and(|ws| self.commands_loading.contains(&ws))
+    }
+
+    /// Opens the dsh session a draft's slash menu needs. The first real send
+    /// finds `session_id` set and reuses it, so the session is not wasted.
+    fn create_dsh_command_session(&mut self, tile_key: &str, cx: &mut Context<Self>) {
+        if self.tile_by_key(tile_key).is_none() {
+            // the chat closed while waiting for the server
+            self.pending_command_tiles.remove(tile_key);
+            return;
+        }
+        let Some(folder) = self.tile_ws_key(tile_key) else {
+            return;
+        };
+        self.net.send(NetCommand::Request {
+            ws_key: DSH_SERVER_KEY.into(),
+            request: ApiRequest::CreateDshCommandSession {
+                tile_key: tile_key.to_string(),
+                folder,
+            },
+        });
+        let _ = cx;
+    }
+
+    /// Runs a listed dsh command instead of sending it as a model prompt. The
+    /// result comes back as `UiEvent::DshCommandExecuted`.
+    pub(super) fn execute_dsh_command(
+        &mut self,
+        session_id: &str,
+        line: String,
+        cx: &mut Context<Self>,
+    ) {
+        self.net.send(NetCommand::Request {
+            ws_key: DSH_SERVER_KEY.into(),
+            request: ApiRequest::ExecuteDshCommand {
+                session_id: session_id.to_string(),
+                line,
+            },
+        });
+        self.repaint(cx);
+    }
+
+    /// opencode's on-demand compaction. The route needs a real model and a
+    /// session with history; both are checked here so an empty chat never
+    /// spends a model turn on a summary of nothing.
+    pub(super) fn compact_opencode_session(
+        &mut self,
+        session_id: &str,
+        args: &str,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(tile_key) = self.tile_by_session.get(session_id).cloned() else {
+            return;
+        };
+        if !args.is_empty() {
+            self.tile_note(&tile_key, "Usage: /compact (no arguments)", true, cx);
+            return;
+        }
+        let busy = self.running_by_session.contains(session_id);
+        let (history, model) = match self.tile_by_key(&tile_key) {
+            Some(tile) => (
+                tile.items.iter().any(|item| {
+                    matches!(
+                        item.as_ref(),
+                        ChatItem::UserMessage { .. } | ChatItem::AssistantText { .. }
+                    )
+                }),
+                tile.selected_model
+                    .clone()
+                    .filter(|model| model != DEFAULT_MODEL_ENTRY)
+                    .or_else(|| tile.last_used_model.clone()),
+            ),
+            None => return,
+        };
+        if busy {
+            self.tile_note(&tile_key, "Wait for the current turn to finish.", true, cx);
+            return;
+        }
+        if !history {
+            self.tile_note(
+                &tile_key,
+                "Nothing to compact yet — send a message first.",
+                true,
+                cx,
+            );
+            return;
+        }
+        let Some(model) = model else {
+            self.tile_note(&tile_key, "Pick a model before compacting.", true, cx);
+            return;
+        };
+        let Some(ws) = self.net_key_for_session(session_id) else {
+            return;
+        };
+        self.net.send(NetCommand::Request {
+            ws_key: ws,
+            request: ApiRequest::CompactSession {
+                session_id: session_id.to_string(),
+                model,
+            },
+        });
+        self.repaint(cx);
     }
 
     /// Fire a filename search for the tile's workspace (@ menu keystroke).
@@ -1312,7 +1476,18 @@ impl Store {
             ws_key: DSH_SERVER_KEY.into(),
             request: ApiRequest::ListAgents,
         });
+        // a draft opened its slash menu before the shared server existed:
+        // open the session its catalog needs now
+        let pending_commands: Vec<String> = self.pending_command_tiles.iter().cloned().collect();
+        for tile_key in pending_commands {
+            self.create_dsh_command_session(&tile_key, cx);
+        }
         self.refresh_dsh_lists();
+        // a restart must refill the menu of chats that already had a session
+        self.net.send(NetCommand::Request {
+            ws_key: DSH_SERVER_KEY.into(),
+            request: ApiRequest::ListDshCommands { session_id: None },
+        });
         // drafts parked while the server spun up become real creates now
         let parked: Vec<(String, String, Vec<AttachmentItem>, String)> =
             std::mem::take(&mut self.pending_dsh_drafts);
@@ -2184,5 +2359,362 @@ mod variant_lookup_tests {
         );
         assert!(variants_for_entry(&infos, HarnessKind::OpenCode, "no/tiers").is_empty());
         assert!(variants_for_entry(&infos, HarnessKind::OpenCode, "missing").is_empty());
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod test_support {
+    use std::sync::{Mutex, MutexGuard};
+
+    /// Tests that read or rewrite `HOME` take turns: the process environment
+    /// is shared by every test in this binary.
+    static HOME_LOCK: Mutex<()> = Mutex::new(());
+
+    pub(crate) fn lock_home() -> MutexGuard<'static, ()> {
+        HOME_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
+#[cfg(test)]
+mod command_flow_tests {
+    use super::*;
+    use crate::oc::{ApiRequest, NetCommand, UiEvent};
+    use std::ffi::OsString;
+    use std::path::PathBuf;
+
+    struct HomeGuard {
+        home: PathBuf,
+        old_home: Option<OsString>,
+        old_profile: Option<OsString>,
+    }
+
+    impl HomeGuard {
+        fn new() -> Self {
+            let home = std::env::temp_dir()
+                .join(format!("warp-agent-command-flow-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&home);
+            std::fs::create_dir_all(&home).expect("scratch home");
+            let old_home = std::env::var_os("HOME");
+            let old_profile = std::env::var_os("USERPROFILE");
+            // edition 2024 marks the process environment as unsafe to mutate
+            unsafe {
+                std::env::set_var("HOME", &home);
+                std::env::set_var("USERPROFILE", &home);
+            }
+            Self {
+                home,
+                old_home,
+                old_profile,
+            }
+        }
+    }
+
+    impl Drop for HomeGuard {
+        fn drop(&mut self) {
+            unsafe {
+                match &self.old_home {
+                    Some(value) => std::env::set_var("HOME", value),
+                    None => std::env::remove_var("HOME"),
+                }
+                match &self.old_profile {
+                    Some(value) => std::env::set_var("USERPROFILE", value),
+                    None => std::env::remove_var("USERPROFILE"),
+                }
+            }
+            let _ = std::fs::remove_dir_all(&self.home);
+        }
+    }
+
+    /// The dsh draft's first `/` must open the agent-scoped catalog: start the
+    /// shared server, create the session, list commands, and route `/compact`
+    /// through `commands/execute` instead of sending it as a model prompt.
+    #[gpui_kit::gpui::test]
+    fn a_dsh_draft_opens_its_catalog_and_runs_compact(cx: &mut gpui::TestAppContext) {
+        let _lock = super::test_support::lock_home();
+        let home = HomeGuard::new();
+        let (tx, rx) = async_channel::unbounded();
+        let store = cx.update(|cx| Store::new(cx, crate::oc::NetSender(tx)));
+        let folder = home.home.join("workspace");
+        std::fs::create_dir_all(&folder).expect("workspace");
+        let folder = folder.to_string_lossy().to_string();
+
+        let key = store.update(cx, |store, cx| {
+            store.add_workspace(&folder, cx);
+            let key = store.create_tile(cx).key.clone();
+            store.focused_tile = Some(key.clone());
+            if let Some(tile) = store.tile_by_key_mut(&key) {
+                tile.harness = HarnessKind::Dsh;
+            }
+            store.refresh_commands(&key, cx);
+            assert!(store.tile_commands_loading(&key));
+            key
+        });
+
+        // no session yet: the menu starts the shared dsh server
+        let mut started = false;
+        while let Ok(command) = rx.try_recv() {
+            if let NetCommand::StartServer { ws_key, kind, .. } = command {
+                assert_eq!(ws_key, DSH_SERVER_KEY);
+                assert_eq!(kind, HarnessKind::Dsh);
+                started = true;
+                break;
+            }
+        }
+        assert!(started, "the draft's first slash starts the dsh server");
+
+        // the server is up now: its start drains the pending menu request
+        store.update(cx, |store, cx| store.on_dsh_started(cx));
+
+        let mut created = false;
+        while let Ok(command) = rx.try_recv() {
+            if let NetCommand::Request {
+                request:
+                    ApiRequest::CreateDshCommandSession {
+                        tile_key,
+                        folder: requested,
+                    },
+                ..
+            } = command
+            {
+                assert_eq!(tile_key, key);
+                assert_eq!(requested, folder);
+                created = true;
+                break;
+            }
+        }
+        assert!(created, "the menu asks for the session it needs");
+
+        store.update(cx, |store, cx| {
+            store.on_net_event(
+                UiEvent::DshCommandSessionCreated {
+                    tile_key: key.clone(),
+                    ws_key: folder.clone(),
+                    result: Ok(SessionInfo {
+                        id: "ses_probe".into(),
+                        title: "New chat".into(),
+                        updated_ms: 1,
+                        created_ms: 1,
+                        parent_id: None,
+                    }),
+                },
+                cx,
+            );
+        });
+
+        let mut listed = false;
+        while let Ok(command) = rx.try_recv() {
+            if let NetCommand::Request {
+                request: ApiRequest::ListDshCommands { session_id },
+                ..
+            } = command
+                && session_id.as_deref() == Some("ses_probe")
+            {
+                listed = true;
+                break;
+            }
+        }
+        assert!(listed, "the new session's catalog is requested");
+
+        store.update(cx, |store, cx| {
+            store.on_net_event(
+                UiEvent::CommandsLoaded {
+                    ws_key: DSH_SERVER_KEY.into(),
+                    result: Ok(vec![CommandInfo {
+                        name: "compact".into(),
+                        name_lower: "compact".into(),
+                        description: "Compact older conversation history".into(),
+                        source: "command".into(),
+                    }]),
+                },
+                cx,
+            );
+            assert!(!store.tile_commands_loading(&key));
+            assert_eq!(
+                store
+                    .tile_commands(&key)
+                    .iter()
+                    .map(|command| command.name.as_str())
+                    .collect::<Vec<_>>(),
+                ["compact"]
+            );
+            if let Some(tile) = store.tile_by_key_mut(&key) {
+                tile.input = "/compact".into();
+            }
+            store.send_from_tile(&key, cx);
+        });
+
+        let mut executed = false;
+        while let Ok(command) = rx.try_recv() {
+            if let NetCommand::Request {
+                request: ApiRequest::ExecuteDshCommand { session_id, line },
+                ..
+            } = command
+            {
+                assert_eq!(session_id, "ses_probe");
+                assert_eq!(line, "/compact");
+                executed = true;
+                break;
+            }
+        }
+        assert!(executed, "/compact runs through commands/execute");
+        store.read_with(cx, |store, _| {
+            let tile = store.tile_by_key(&key).expect("tile");
+            assert!(
+                !tile
+                    .items
+                    .iter()
+                    .any(|item| matches!(item.as_ref(), ChatItem::UserMessage { text, .. } if text == "/compact")),
+                "a dsh command must not appear as a model message"
+            );
+        });
+    }
+
+    /// opencode's `/compact` is app-owned: it shows up before the server
+    /// answers and goes to `/session/{id}/summarize`, not to the model or the
+    /// `/command` route. An untouched draft must not create a session for it.
+    #[gpui_kit::gpui::test]
+    fn an_opencode_chat_offers_compact_and_runs_it(cx: &mut gpui::TestAppContext) {
+        let _lock = super::test_support::lock_home();
+        let home = HomeGuard::new();
+        let (tx, rx) = async_channel::unbounded();
+        let store = cx.update(|cx| Store::new(cx, crate::oc::NetSender(tx)));
+        let folder = home.home.join("workspace");
+        std::fs::create_dir_all(&folder).expect("workspace");
+        let folder = folder.to_string_lossy().to_string();
+
+        let key = store.update(cx, |store, cx| {
+            store.add_workspace(&folder, cx);
+            let key = store.create_tile(cx).key.clone();
+            if let Some(tile) = store.tile_by_key_mut(&key) {
+                tile.harness = HarnessKind::OpenCode;
+                tile.session_id = Some("ses_oc".into());
+                tile.selected_model = Some("opencode-go/deepseek-v4.1-flash".into());
+                tile.items.push(Arc::new(ChatItem::UserMessage {
+                    key: 900,
+                    text: "hi".into(),
+                    created_ms: 0,
+                }));
+            }
+            store
+                .workspace_by_session
+                .insert("ses_oc".into(), folder.clone());
+            store.tile_by_session.insert("ses_oc".into(), key.clone());
+            store
+                .ui
+                .harness_by_session
+                .insert("ses_oc".into(), HarnessKind::OpenCode);
+            store.runtimes.insert(
+                folder.clone(),
+                WorkspaceRuntime {
+                    stream_status: oc::StreamStatus::Connected,
+                    healthy: Some(true),
+                },
+            );
+            store.refresh_commands(&key, cx);
+            // the app-owned command is in the menu before GET /command lands
+            assert!(
+                store
+                    .tile_commands(&key)
+                    .iter()
+                    .any(|command| command.name == "compact" && command.source == "local")
+            );
+            assert!(store.tile_commands_loading(&key));
+            key
+        });
+
+        // a server answer without compact keeps the app-owned row exactly once
+        store.update(cx, |store, cx| {
+            store.on_net_event(
+                UiEvent::CommandsLoaded {
+                    ws_key: folder.clone(),
+                    result: Ok(vec![CommandInfo {
+                        name: "init".into(),
+                        name_lower: "init".into(),
+                        description: "guided AGENTS.md setup".into(),
+                        source: "command".into(),
+                    }]),
+                },
+                cx,
+            );
+            assert_eq!(
+                store
+                    .tile_commands(&key)
+                    .iter()
+                    .filter(|command| command.name == "compact")
+                    .count(),
+                1
+            );
+            if let Some(tile) = store.tile_by_key_mut(&key) {
+                tile.input = "/compact".into();
+            }
+            store.send_from_tile(&key, cx);
+        });
+
+        let mut compacted = None;
+        while let Ok(command) = rx.try_recv() {
+            if let NetCommand::Request {
+                request: ApiRequest::CompactSession { session_id, model },
+                ..
+            } = command
+            {
+                compacted = Some((session_id, model));
+                break;
+            }
+        }
+        assert_eq!(
+            compacted,
+            Some(("ses_oc".into(), "opencode-go/deepseek-v4.1-flash".into()))
+        );
+        store.update(cx, |store, cx| {
+            store.on_net_event(
+                UiEvent::SessionCompacted {
+                    session_id: "ses_oc".into(),
+                    result: Ok(()),
+                },
+                cx,
+            );
+            let tile = store.tile_by_key(&key).expect("tile");
+            assert!(
+                !tile
+                    .items
+                    .iter()
+                    .any(|item| matches!(item.as_ref(), ChatItem::UserMessage { text, .. } if text == "/compact")),
+                "a compact command must not appear as a model message"
+            );
+            assert!(tile.items.iter().any(|item| {
+                matches!(item.as_ref(), ChatItem::SystemNote { text, .. } if text == "Context compacted.")
+            }));
+        });
+
+        // an untouched draft has nothing to summarize: no session is created
+        let draft = store.update(cx, |store, cx| {
+            let draft = store.create_tile(cx).key.clone();
+            if let Some(tile) = store.tile_by_key_mut(&draft) {
+                tile.harness = HarnessKind::OpenCode;
+                tile.input = "/compact".into();
+            }
+            store.focused_tile = Some(draft.clone());
+            store.send_from_tile(&draft, cx);
+            let tile = store.tile_by_key(&draft).expect("draft");
+            assert!(tile.items.iter().any(|item| {
+                matches!(item.as_ref(), ChatItem::SystemNote { text, .. } if text == "Nothing to compact yet — send a message first.")
+            }));
+            draft
+        });
+        while let Ok(command) = rx.try_recv() {
+            assert!(
+                !matches!(
+                    command,
+                    NetCommand::Request {
+                        request: ApiRequest::CreateSession { .. },
+                        ..
+                    }
+                ),
+                "an empty /compact must not create a session"
+            );
+        }
+        let _ = draft;
     }
 }

@@ -17,12 +17,49 @@
 //!   pointer-stable SharedString per message (TileView.md_text) and the
 //!   editor only sees set_value when the text actually moved.
 //!
-//! The streaming text surfaces the transcript still draws with gpui-base's
-//! `TextView` (user messages, reasoning, tool details, questions, notes) go
-//! through [`text_view`] here: that parser panics on some texts, and the guard
-//! renders such a text as plain prose instead of letting one message take the
-//! window down with it. A tool title, a status and every section label are
-//! labels, not documents: they stay plain text and never take this path.
+//! ## The transcript's text surfaces
+//!
+//! The renderer follows the surface's role. Each decision is recorded here so
+//! a rename or a refactor cannot migrate a surface silently:
+//!
+//! - **Assistant text** uses [`render_markdown`] (read-only `LiveEditor`, one
+//!   editor per item). This is the content rule's target shape.
+//! - **Tool title** is plain `div`/`SharedString` text: a label, no markdown,
+//!   no selection menu.
+//! - **User message** uses [`text_view`]. It is one static document, so the
+//!   viewer would fit, but the bubble's right-click is the item menu (Copy /
+//!   Edit in input / Re-prompt / Fork) and the read-only `LiveEditor` always
+//!   installs its own Copy/Select-all menu and stops propagation. The kit has
+//!   no host-menu hook, so moving it now would lose the item actions. This is
+//!   a content-rule violation until that hook exists.
+//! - **Reasoning** uses [`text_view`]. It streams: every update replaces the
+//!   whole part text, and `LiveEditorState::set_value` resets the selection to
+//!   the document start and the scroll to 0, so a selection made mid-stream
+//!   would die on the next chunk. Do not move it until the kit can feed text
+//!   while mapping the selection through the unchanged prefix.
+//! - **Tool details** uses [`text_view`] for plain payloads; a payload that
+//!   parses as JSON goes to `warpui_kit_diff::render_code` instead, so code
+//!   keeps its gutter and highlighting. A tool owns up to three such payloads
+//!   (input/output/error), they can stream, and one editor per payload is the
+//!   design's "streaming tool payload" wrong-cost exception. The plain branch
+//!   therefore keeps the guard and `text_menu` deliberately.
+//! - **Question** (entry text and resolution) uses [`text_view`]. The card
+//!   owns a custom-answer `InputState` and the option rows; the read-only
+//!   editor's selection and context menu would compete with that input, and it
+//!   would add an editor per question entry to a virtualized row. It waits for
+//!   a focus/menu-ownership decision.
+//! - **System note** (including error notes) uses [`text_view`]. These are
+//!   app-authored status strings (`Context compacted.`, reconnect and failure
+//!   messages), so by role they are labels; the guard path also leaves their
+//!   error text selectable for copying. That is an open design choice (plain
+//!   status, or a copy affordance for errors), not a content migration.
+//!
+//! Every [`text_view`] surface keeps the parser guard: `TextView` parses on
+//! the UI thread while laying out and does not catch the parser, so a text
+//! that trips a `markdown` bug aborts the frame. The guard renders such a text
+//! as plain prose instead of letting one message take the window down (see
+//! [`renders_as_markdown`]). A status chip and every section label stay plain
+//! text and never take this path.
 
 use std::cell::RefCell;
 use std::collections::VecDeque;
@@ -133,9 +170,16 @@ thread_local! {
 /// that carries the offending shape probes a new text every chunk.
 static WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-/// One transcript text: gpui-base's Markdown `TextView` when the parser can
-/// take it, plain prose when it cannot. `max_lines` is the `TextView`'s
-/// single-line clamp (the tool-title row); the plain branch truncates to match.
+/// One transcript text still on the guard path: user message, reasoning, tool
+/// details, question text/resolution and system note. gpui-base's Markdown
+/// `TextView` when the parser can take it, plain prose when it cannot.
+/// `max_lines` is the `TextView`'s single-line clamp and the plain branch
+/// truncates to match; no caller passes one today (the tool-title row is a
+/// label and never takes this path).
+///
+/// Do not add a surface here silently: the allowed set and the constraint each
+/// member is waiting on are listed in the module docs and in
+/// `docs/agents/design-system.md#text-surfaces`.
 ///
 /// The plain branch gives up text selection on that one text. The alternative
 /// is giving up the window: `TextView` parses on the UI thread while laying out
@@ -146,26 +190,34 @@ static WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::ne
 /// line, which is how a wand prompt killed the app before its first frame.
 pub fn text_view(
     id: gpui::ElementId,
+    selector: &'static str,
     text: impl Into<SharedString>,
     max_lines: Option<usize>,
     menu: Option<gpui::FocusHandle>,
 ) -> AnyElement {
     let text = text.into();
-    if renders_as_markdown(&text) {
+    // Stable across frames, so a real-view probe can right-click the surface
+    // whose context menu it is checking.
+    let view = if renders_as_markdown(&text) {
         let view = gpui_kit::base::text::TextView::markdown(id.clone(), text);
         let view = match max_lines {
             Some(lines) => view.max_lines(lines),
             None => view,
         }
         .into_any_element();
-        return match menu {
+        match menu {
             Some(focus) => warpui_kit_core::text_menu::attach(id, view, Some(focus)),
             None => view,
-        };
-    }
+        }
+    } else {
+        div()
+            .when(max_lines.is_some(), |row| row.truncate())
+            .child(text)
+            .into_any_element()
+    };
     div()
-        .when(max_lines.is_some(), |row| row.truncate())
-        .child(text)
+        .debug_selector(move || selector.to_string())
+        .child(view)
         .into_any_element()
 }
 

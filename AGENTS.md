@@ -10,7 +10,8 @@ warp-agent is a library (`warp_agent`) plus a thin binary. `src/lib.rs` owns
 the module list and `run()`; `src/main.rs` only carries the Windows console
 attribute and calls `warp_agent::run()`. The boundary exists so probes can
 open the real `WarpWindow`: `tests/sidebar_keys_probe.rs` drives its sidebar
-with a scratch store. The kit-level probes still cover the shared pieces:
+with a scratch store, and `tests/transcript_keys_probe.rs` focuses the real
+transcript and scrolls it. The kit-level probes still cover the shared pieces:
 `tests/complex_markdown_probe.rs` runs a hostile reply through the read-only
 `LiveEditor`, `tests/transcript_list_probe.rs` drives the transcript's
 `list`/`ListState` wiring, and `tests/selection_probe.rs` drags a selection
@@ -141,8 +142,17 @@ cargo build -p warp-agent
   text are selected alike.
 - `tests/sidebar_keys_probe.rs` opens the real `WarpWindow` over a scratch
   HOME, focuses the sidebar, walks its flattened rows with the arrow keys and
-  proves a focused filter field keeps them. It uses `Store::for_probe`, whose
-  net channel has no receiver.
+  proves a focused filter field keeps them and Enter focuses the chat's tile.
+  It uses `Store::for_probe`, whose net channel has no receiver, plus
+  `Store::seed_probe_tile` to seed a tile and its session mapping.
+- `tests/transcript_keys_probe.rs` clicks the transcript in the real window
+  and proves Down/Up/PageDown/Home/End move its `ListState` offset while the
+  sidebar cursor stays put.
+- `tests/text_surfaces_probe.rs` drag-selects and right-clicks the reasoning
+  and tool-details surfaces through their Copy menu, checks the user message's
+  item menu, and proves a tool title opens no menu.
+- `tests/title_probe.rs` proves the OS title is `<n> running — Warp Agent`
+  while a chat runs and the plain app name otherwise.
 - The capture hook is `WARP_AGENT_PAGE`: `settings`, `settings-chat`,
   `settings-permissions`, `settings-server`.
 

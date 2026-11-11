@@ -460,22 +460,38 @@ impl TileView {
     /// plus a stable per-surface element id, so the kit neither re-parses on
     /// every render nor collides element ids between surfaces. `max_lines` is
     /// the tool row's one-line clamp; the text goes through the Markdown guard,
-    /// which renders a text the parser panics on as plain prose instead.
+    /// which renders a text the parser panics on as plain prose instead. The
+    /// static `selector` is the probe hook for this surface.
     fn transcript_text(
         &mut self,
         cache_key: &str,
         text: &str,
         id_name: &'static str,
+        selector: &'static str,
         max_lines: Option<usize>,
         cx: &gpui::App,
     ) -> gpui::AnyElement {
         let stable = self.md_text(cache_key, text);
         crate::ui::markdown::text_view(
             gpui::ElementId::NamedInteger(id_name.into(), Self::hash(cache_key)),
+            selector,
             stable,
             max_lines,
             text_menu::focus(cx),
         )
+    }
+
+    /// The transcript's focus handle, for the real-view keyboard probe.
+    #[doc(hidden)]
+    pub fn transcript_focus_handle(&self) -> FocusHandle {
+        self.transcript_focus.clone()
+    }
+
+    /// The transcript's vertical scroll offset, for the real-view keyboard
+    /// probe: `ListState` exposes the live offset through its scrollbar value.
+    #[doc(hidden)]
+    pub fn transcript_scroll_offset_for_probe(&self) -> Pixels {
+        self.list_state.scroll_px_offset_for_scrollbar().y
     }
 
     /// Decoded image for a transcript item or composer attachment, cached by a
@@ -1125,6 +1141,7 @@ impl TileView {
                                             "utext".into(),
                                             TileView::hash(item_id),
                                         ),
+                                        "text-user",
                                         text.clone(),
                                         None,
                                         None,
@@ -1290,7 +1307,15 @@ impl TileView {
                     .w_full()
                     .flex()
                     .flex_col()
-                    .child(self.fold_header(item_id, "thinking", None, open, fonts, cx))
+                    .child(self.fold_header(
+                        item_id,
+                        "thinking",
+                        "fold-reasoning",
+                        None,
+                        open,
+                        fonts,
+                        cx,
+                    ))
                     .when(open, |d| {
                         d.child(
                             self.fold_body(item_id)
@@ -1302,6 +1327,7 @@ impl TileView {
                                         "rtext".into(),
                                         TileView::hash(item_id),
                                     ),
+                                    "text-reasoning",
                                     body,
                                     None,
                                     text_menu::focus(cx),
@@ -1413,7 +1439,12 @@ impl TileView {
                                                 .text_size(px(fonts.font_body))
                                                 .text_color(theme::DANGER)
                                                 .child(self.transcript_text(
-                                                    item_id, text, "errnote", None, cx,
+                                                    item_id,
+                                                    text,
+                                                    "errnote",
+                                                    "text-error-note",
+                                                    None,
+                                                    cx,
                                                 )),
                                         ),
                                 ),
@@ -1427,7 +1458,14 @@ impl TileView {
                         .text_color(theme::text_muted())
                         .italic()
                         .py_0p5()
-                        .child(self.transcript_text(item_id, text, "sysnote", None, cx))
+                        .child(self.transcript_text(
+                            item_id,
+                            text,
+                            "sysnote",
+                            "text-note",
+                            None,
+                            cx,
+                        ))
                         .into_any_element()
                 }
             }
@@ -1477,6 +1515,7 @@ impl TileView {
                             .text_size(px(fonts.font_body))
                             .text_color(theme::text_dim())
                             .truncate()
+                            .debug_selector(|| "tool-title".into())
                             // a tool title is a label, not a document: plain
                             // text, no selection menu, no markdown syntax
                             .child(SharedString::from(tool.title.clone())),
@@ -1496,12 +1535,22 @@ impl TileView {
                             // a running tool carries the family's spinner; the
                             // word beside it stays when motion is off
                             .when(tool.status == "running", |d| {
-                                d.child(motion::spinner(
-                                    gpui::ElementId::Name(format!("tool-spin-{item_id}").into()),
-                                    "icons/spinner.svg",
-                                    px(fonts.icon_tiny),
-                                    theme::BEHIND,
-                                ))
+                                d.child(
+                                    div()
+                                        .id(format!("tool-spin-status-{item_id}"))
+                                        .role(Role::Status)
+                                        .aria_label("Running tool")
+                                        .flex()
+                                        .items_center()
+                                        .child(motion::spinner(
+                                            gpui::ElementId::Name(
+                                                format!("tool-spin-{item_id}").into(),
+                                            ),
+                                            "icons/spinner.svg",
+                                            px(fonts.icon_tiny),
+                                            theme::BEHIND,
+                                        )),
+                                )
                             })
                             .child(SharedString::from(tool.status.clone())),
                     ),
@@ -1520,6 +1569,7 @@ impl TileView {
                 d.child(self.fold_header(
                     &diff_key,
                     "Changes",
+                    "fold-tool-diff",
                     Some((
                         tool.numstat.as_ref().map(|n| n.additions).unwrap_or(0),
                         tool.numstat.as_ref().map(|n| n.deletions).unwrap_or(0),
@@ -1543,48 +1593,56 @@ impl TileView {
                 })
             })
             .when(has_details, |d| {
-                d.child(self.fold_header(&details_key, "details", None, open_details, fonts, cx))
-                    .when(open_details, |d| {
-                        let body = self.fold_body(&details_key).flex().flex_col().gap_2p5();
-                        let body = body
-                            .when(!tool.details.input.is_empty(), |d| {
-                                d.child(self.detail_section(
-                                    &format!("{item_id}:input"),
-                                    "input",
-                                    &tool.details.input,
-                                    theme::text_dim(),
-                                    sniff_lang(&tool.details.input),
-                                    fonts,
-                                    window,
-                                    cx,
-                                ))
-                            })
-                            .when(!tool.details.output.is_empty(), |d| {
-                                d.child(self.detail_section(
-                                    &format!("{item_id}:output"),
-                                    "output",
-                                    &tool.details.output,
-                                    theme::text_dim(),
-                                    sniff_lang(&tool.details.output),
-                                    fonts,
-                                    window,
-                                    cx,
-                                ))
-                            })
-                            .when(!tool.details.error.is_empty(), |d| {
-                                d.child(self.detail_section(
-                                    &format!("{item_id}:error"),
-                                    "error",
-                                    &tool.details.error,
-                                    theme::DANGER,
-                                    None,
-                                    fonts,
-                                    window,
-                                    cx,
-                                ))
-                            });
-                        d.child(body)
-                    })
+                let header = self.fold_header(
+                    &details_key,
+                    "details",
+                    "fold-tool-details",
+                    None,
+                    open_details,
+                    fonts,
+                    cx,
+                );
+                d.child(header).when(open_details, |d| {
+                    let body = self.fold_body(&details_key).flex().flex_col().gap_2p5();
+                    let body = body
+                        .when(!tool.details.input.is_empty(), |d| {
+                            d.child(self.detail_section(
+                                &format!("{item_id}:input"),
+                                "input",
+                                &tool.details.input,
+                                theme::text_dim(),
+                                sniff_lang(&tool.details.input),
+                                fonts,
+                                window,
+                                cx,
+                            ))
+                        })
+                        .when(!tool.details.output.is_empty(), |d| {
+                            d.child(self.detail_section(
+                                &format!("{item_id}:output"),
+                                "output",
+                                &tool.details.output,
+                                theme::text_dim(),
+                                sniff_lang(&tool.details.output),
+                                fonts,
+                                window,
+                                cx,
+                            ))
+                        })
+                        .when(!tool.details.error.is_empty(), |d| {
+                            d.child(self.detail_section(
+                                &format!("{item_id}:error"),
+                                "error",
+                                &tool.details.error,
+                                theme::DANGER,
+                                None,
+                                fonts,
+                                window,
+                                cx,
+                            ))
+                        });
+                    d.child(body)
+                })
             })
             .into_any_element()
     }
@@ -1637,7 +1695,14 @@ impl TileView {
                     .text_size(px(fonts.font_meta))
                     .font_family(theme::code_font())
                     .text_color(color)
-                    .child(self.transcript_text(cache_key, text, "tooldetails", None, cx)),
+                    .child(self.transcript_text(
+                        cache_key,
+                        text,
+                        "tooldetails",
+                        "text-tool-details",
+                        None,
+                        cx,
+                    )),
             })
             .into_any_element()
     }
@@ -1696,7 +1761,15 @@ impl TileView {
             .flex()
             .flex_col()
             .gap_1()
-            .child(self.fold_header(group_key, &label, numstat, open, fonts, cx));
+            .child(self.fold_header(
+                group_key,
+                &label,
+                "fold-tool-group",
+                numstat,
+                open,
+                fonts,
+                cx,
+            ));
         if open {
             let mut body = self.fold_body(group_key).flex().flex_col().gap_1();
             for (member_id, member) in run {
@@ -1715,10 +1788,15 @@ impl TileView {
     }
 
     /// A disclosure row: chevron + label, full row is the click target.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "GPUI render helper: self + cx are structural, the rest are one fold row's inputs"
+    )]
     fn fold_header(
         &self,
         key: &str,
         label: &str,
+        selector: &'static str,
         numstat: Option<(i64, i64)>,
         open: bool,
         fonts: theme::FontTokens,
@@ -1731,6 +1809,7 @@ impl TileView {
                 "fold".into(),
                 Self::hash(key.as_str()),
             ))
+            .debug_selector(move || selector.into())
             .role(Role::Button)
             .aria_label(SharedString::from(label.clone()))
             .aria_expanded(open)
@@ -1857,6 +1936,7 @@ impl TileView {
                                 d.child(self.fold_header(
                                     &diff_key,
                                     "View diff",
+                                    "fold-permission-diff",
                                     None,
                                     open_diff,
                                     fonts,
@@ -2102,6 +2182,7 @@ impl TileView {
                         &format!("{item_id}:res"),
                         resolution,
                         "qres",
+                        "text-question-resolution",
                         None,
                         cx,
                     )),
@@ -2215,6 +2296,7 @@ impl TileView {
                         &format!("{item_id}#{qi}"),
                         &entry.question,
                         "qtext",
+                        "text-question",
                         None,
                         cx,
                     )),
@@ -2629,15 +2711,26 @@ impl TileView {
                         ));
                 } else {
                     // Running: the same spinner the tree uses, in `behind`
-                    stat = stat.child(motion::spinner(
-                        gpui::ElementId::Name(SharedString::from(format!(
-                            "tile-state-spin-{}",
-                            snap.title
-                        ))),
-                        "icons/spinner.svg",
-                        px(fonts.icon_tiny),
-                        theme::BEHIND,
-                    ));
+                    stat = stat.child(
+                        div()
+                            .id(SharedString::from(format!(
+                                "tile-state-status-{}",
+                                snap.title
+                            )))
+                            .role(Role::Status)
+                            .aria_label("Running chat")
+                            .flex()
+                            .items_center()
+                            .child(motion::spinner(
+                                gpui::ElementId::Name(SharedString::from(format!(
+                                    "tile-state-spin-{}",
+                                    snap.title
+                                ))),
+                                "icons/spinner.svg",
+                                px(fonts.icon_tiny),
+                                theme::BEHIND,
+                            )),
+                    );
                 }
                 d.child(stat.child(word))
             })
@@ -3310,7 +3403,7 @@ impl TileView {
                     )
                     .child({
                         let mut list = div().flex().flex_col();
-                        for task in &snap.tasks {
+                        for (task_ix, task) in snap.tasks.iter().enumerate() {
                             // all-gray rows; status reads from brightness:
                             // active row brightest, finished dimmest
                             let (icon, text) = if task.completed() {
@@ -3325,12 +3418,19 @@ impl TileView {
                                 )
                             } else if task.in_progress() {
                                 (
-                                    motion::spinner(
-                                        "task-spinner",
-                                        "icons/spinner.svg",
-                                        px(fonts.icon_small),
-                                        theme::BEHIND,
-                                    ),
+                                    div()
+                                        .id(SharedString::from(format!("task-status-{task_ix}")))
+                                        .role(Role::Status)
+                                        .aria_label("Running task")
+                                        .flex()
+                                        .items_center()
+                                        .child(motion::spinner(
+                                            "task-spinner",
+                                            "icons/spinner.svg",
+                                            px(fonts.icon_small),
+                                            theme::BEHIND,
+                                        ))
+                                        .into_any_element(),
                                     theme::text(),
                                 )
                             } else if task.cancelled() {
@@ -3762,66 +3862,76 @@ impl TileView {
                 let menu_owner_key = menu_owner_key.clone();
                 let composer_handle = composer_handle.clone();
                 let item = item.clone();
-                rows = rows.child(menu_row(
-                    gpui::ElementId::NamedInteger("menu-row".into(), ix as u64),
-                    label,
-                    false,
-                    fonts.font_body,
-                    move |_, window, cx| {
-                        match &item {
-                            ContextMenu::Copy(text) => {
-                                cx.write_to_clipboard(gpui::ClipboardItem::new_string(
-                                    text.to_string(),
-                                ));
-                            }
-                            ContextMenu::EditInput(text) => {
-                                let text = text.clone();
-                                // the tile that showed the menu, not wherever focus happens to be
-                                let key = menu_owner_key.clone();
-                                let composer = composer_handle.clone();
-                                store_handle.update(cx, {
+                let row_selector = match ix {
+                    0 => "tile-menu-row-0",
+                    1 => "tile-menu-row-1",
+                    2 => "tile-menu-row-2",
+                    3 => "tile-menu-row-3",
+                    _ => "tile-menu-row-more",
+                };
+                rows = rows.child(div().debug_selector(move || row_selector.into()).child(
+                    menu_row(
+                        gpui::ElementId::NamedInteger("menu-row".into(), ix as u64),
+                        label,
+                        false,
+                        fonts.font_body,
+                        move |_, window, cx| {
+                            match &item {
+                                ContextMenu::Copy(text) => {
+                                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(
+                                        text.to_string(),
+                                    ));
+                                }
+                                ContextMenu::EditInput(text) => {
                                     let text = text.clone();
-                                    move |s, _| {
-                                        if let Some(tile) = s.tile_by_key_mut(&key) {
-                                            tile.input = text.to_string();
-                                            tile.reset_history();
+                                    // the tile that showed the menu, not wherever focus happens to be
+                                    let key = menu_owner_key.clone();
+                                    let composer = composer_handle.clone();
+                                    store_handle.update(cx, {
+                                        let text = text.clone();
+                                        move |s, _| {
+                                            if let Some(tile) = s.tile_by_key_mut(&key) {
+                                                tile.input = text.to_string();
+                                                tile.reset_history();
+                                            }
                                         }
-                                    }
-                                });
-                                // set_value emits no Change, so the store copy above stands
-                                composer.update(cx, |field, cx| {
-                                    field.set_value(text.as_ref(), window, cx)
-                                });
-                                // keep the tile's field-text mirror in step
-                                tile_entity
-                                    .update(cx, |tv, _| tv.last_field_text = text.to_string());
+                                    });
+                                    // set_value emits no Change, so the store copy above stands
+                                    composer.update(cx, |field, cx| {
+                                        field.set_value(text.as_ref(), window, cx)
+                                    });
+                                    // keep the tile's field-text mirror in step
+                                    tile_entity
+                                        .update(cx, |tv, _| tv.last_field_text = text.to_string());
+                                }
+                                ContextMenu::Reprompt(text) => {
+                                    let key = menu_owner_key.clone();
+                                    let text = text.to_string();
+                                    store_handle
+                                        .update(cx, move |s, cx| s.reprompt(&key, &text, cx));
+                                }
+                                ContextMenu::ForkFromHere(msg_key) => {
+                                    let key = menu_owner_key.clone();
+                                    let msg_key = *msg_key;
+                                    store_handle.update(cx, move |s, cx| {
+                                        s.fork_from_message(&key, msg_key, cx)
+                                    });
+                                }
+                                ContextMenu::CopyImage { png } => {
+                                    let image = gpui::Image {
+                                        format: ImageFormat::Png,
+                                        bytes: png.as_ref().clone(),
+                                        id: 0,
+                                    };
+                                    cx.write_to_clipboard(gpui::ClipboardItem::new_image(&image));
+                                }
                             }
-                            ContextMenu::Reprompt(text) => {
-                                let key = menu_owner_key.clone();
-                                let text = text.to_string();
-                                store_handle.update(cx, move |s, cx| s.reprompt(&key, &text, cx));
-                            }
-                            ContextMenu::ForkFromHere(msg_key) => {
-                                let key = menu_owner_key.clone();
-                                let msg_key = *msg_key;
-                                store_handle.update(cx, move |s, cx| {
-                                    s.fork_from_message(&key, msg_key, cx)
-                                });
-                            }
-                            ContextMenu::CopyImage { png } => {
-                                let image = gpui::Image {
-                                    format: ImageFormat::Png,
-                                    bytes: png.as_ref().clone(),
-                                    id: 0,
-                                };
-                                cx.write_to_clipboard(gpui::ClipboardItem::new_image(&image));
-                            }
-                        }
-                        tile_entity.update(cx, |tv, cx| {
-                            tv.menu = None;
-                            cx.notify();
-                        });
-                    },
+                            tile_entity.update(cx, |tv, cx| {
+                                tv.menu = None;
+                                cx.notify();
+                            });
+                        },
+                    ),
                 ));
             }
             menu_el = div()
@@ -3842,6 +3952,7 @@ impl TileView {
                         .absolute()
                         .left(px(menu.x))
                         .top(px(menu.y))
+                        .debug_selector(|| "tile-menu".into())
                         .child(popover_card().min_w(px(180.)).child(rows)),
                 )
                 .into_any_element();
@@ -4411,6 +4522,7 @@ impl Render for TileView {
         let tile = cx.entity().downgrade();
         let transcript = div()
             .id("transcript")
+            .debug_selector(|| "transcript".into())
             .role(Role::Log)
             .aria_label("Transcript")
             // the transcript owns the keys after a click: arrows scroll it,

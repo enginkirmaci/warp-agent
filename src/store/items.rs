@@ -96,6 +96,26 @@ impl ToolItem {
         }
     }
 
+    /// A completed tool card for real-view probes: `state_sig` is private to
+    /// the store module, so an integration test cannot build the struct field
+    /// by field.
+    #[doc(hidden)]
+    pub fn probe_completed(part_id: &str, tool: &str, title: &str, details: ToolDetails) -> Self {
+        Self {
+            part_id: part_id.into(),
+            tool: tool.into(),
+            status: "completed".into(),
+            title: title.into(),
+            file_path: String::new(),
+            diff: None,
+            numstat: None,
+            is_error: false,
+            error_preview: String::new(),
+            details,
+            state_sig: None,
+        }
+    }
+
     pub fn is_running(&self) -> bool {
         self.status == "running"
     }

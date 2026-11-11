@@ -1148,6 +1148,12 @@ impl WarpWindow {
         })
     }
 
+    /// The live tile view for a chat key, for real-view probes.
+    #[doc(hidden)]
+    pub fn tile_view_for_probe(&self, key: &str) -> Option<Entity<TileView>> {
+        self.tile_views.get(key).cloned()
+    }
+
     /// The sidebar's row keys, dispatched by the focused list only. The
     /// cursor is separate from the open chat: `Enter` activates the row, an
     /// arrow only moves the keyboard's place.

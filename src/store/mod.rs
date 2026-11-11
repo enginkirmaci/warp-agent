@@ -1111,6 +1111,37 @@ impl Store {
         cx.notify();
     }
 
+    /// Seeds one open chat tile and its session mapping for a real-view probe.
+    /// It does not focus the tile and sends nothing on the net channel.
+    #[doc(hidden)]
+    pub fn seed_probe_tile(
+        &mut self,
+        workspace: &str,
+        session_id: &str,
+        title: &str,
+        items: Vec<ChatItem>,
+        running: bool,
+        cx: &mut Context<Self>,
+    ) -> String {
+        let key = format!("chat:{session_id}");
+        let mut tile = ChatTile::new(key.clone(), None, None, None);
+        tile.session_id = Some(session_id.to_string());
+        tile.title = title.to_string();
+        tile.items = items.into_iter().map(Arc::new).collect();
+        tile.rev = Some(cx.new(|_| ()));
+        self.workspace_by_session
+            .insert(session_id.to_string(), workspace.to_string());
+        self.tile_by_session
+            .insert(session_id.to_string(), key.clone());
+        self.open_tiles.retain(|tile| tile.key != key);
+        self.open_tiles.push(tile);
+        if running {
+            self.running_by_session.insert(session_id.to_string());
+        }
+        self.repaint(cx);
+        key
+    }
+
     pub fn focused_tile(&self) -> Option<&ChatTile> {
         self.focused_tile
             .as_deref()

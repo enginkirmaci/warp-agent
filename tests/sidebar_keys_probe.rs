@@ -152,3 +152,84 @@ fn sidebar_keys_walk_the_real_window(cx: &mut TestAppContext) {
         "the filter owns the arrows while it is focused"
     );
 }
+
+#[gpui::test]
+fn sidebar_enter_activates_the_chat_row(cx: &mut TestAppContext) {
+    let _lock = HOME_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _home = HomeGuard::new("sidebar-enter");
+    cx.update(|cx| {
+        gpui_kit::init(cx);
+        let fonts = warp_agent::theme::active_tokens();
+        warp_agent::theme::apply_kit_theme(warp_agent::theme::accent_colors(), &fonts, cx);
+    });
+
+    let workspace = _home.home.join("workspace");
+    std::fs::create_dir_all(&workspace).expect("workspace folder");
+    let store = cx.update(Store::for_probe);
+    let folder = workspace.to_string_lossy().to_string();
+    store.update(cx, |store, cx| {
+        store.add_workspace(&folder, cx);
+        if let Some(workspace) = store
+            .workspaces
+            .iter_mut()
+            .find(|workspace| workspace.folder_path() == folder)
+        {
+            workspace.chats.push(SessionItem {
+                id: "probe-chat".into(),
+                title: "Probe chat".into(),
+                updated_ms: 0,
+                created_ms: 0,
+                is_pinned: false,
+                is_selected: false,
+                is_running: false,
+                is_editing: false,
+                draft_title: String::new(),
+            });
+        }
+        // the row activates through the session map, which needs a tile to
+        // focus; the tile itself is not focused until Enter runs
+        store.seed_probe_tile(&folder, "probe-chat", "Probe chat", Vec::new(), false, cx);
+    });
+
+    let (window, cx) = cx.add_window_view(|_, cx| WarpWindow::new(store.clone(), cx));
+    draw(cx);
+
+    let focus = window.read_with(cx, |window, _| window.sidebar_focus_handle());
+    cx.update(|window, cx| window.focus(&focus, cx));
+    draw(cx);
+
+    // Tasks (the General workspace) leads the tree, then this folder, then its
+    // chat: three steps land on the chat.
+    for _ in 0..3 {
+        cx.simulate_keystrokes("down");
+        cx.run_until_parked();
+    }
+    assert_eq!(
+        cursor(cx, &window).as_deref(),
+        Some("chat:probe-chat"),
+        "the focused sidebar walks to the chat row"
+    );
+    assert!(
+        store.read_with(cx, |store, _| store.focused_tile().is_none()),
+        "the cursor walk does not open the chat"
+    );
+
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    draw(cx);
+
+    assert_eq!(
+        store.read_with(cx, |store, _| store
+            .focused_tile()
+            .map(|tile| tile.key.clone())),
+        Some("chat:probe-chat".to_string()),
+        "Enter focuses the chat's tile"
+    );
+    assert_eq!(
+        cursor(cx, &window).as_deref(),
+        Some("chat:probe-chat"),
+        "activation leaves the cursor on the chat row"
+    );
+}

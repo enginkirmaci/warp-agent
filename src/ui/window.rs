@@ -9,13 +9,15 @@ use crate::ui::tooltip::{self, tip};
 use crate::ui::{BtnKind, menu_row, popover_card};
 use gpui::prelude::*;
 use gpui::{
-    App, Context, Entity, Focusable, MouseButton, Render, Role, SharedString, StyleRefinement,
-    Window, WindowControlArea, canvas, div, px, uniform_list,
+    App, Context, Entity, FocusHandle, Focusable, MouseButton, Render, Role, ScrollStrategy,
+    SharedString, StyleRefinement, UniformListScrollHandle, Window, WindowControlArea, canvas, div,
+    px, uniform_list,
 };
 use gpui_kit::component::input::{InputEvent, InputState};
 use std::collections::HashMap;
 use std::rc::Rc;
 use warpui_kit_core::A11y as _;
+use warpui_kit_core::list_nav;
 use warpui_kit_core::settings as kit;
 use warpui_kit_core::shell;
 use warpui_kit_core::text_menu::{self, TextMenuAnchor};
@@ -41,6 +43,14 @@ enum SidebarRow {
     /// The quiet header over the folder workspaces; Tasks sits above it
     /// outside the section.
     SectionLabel(&'static str),
+}
+
+/// The row the sidebar's keyboard is on. A folder path or a chat id, so a
+/// filter or a scope change can drop the cursor without confusing two rows.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum SidebarCursor {
+    Workspace(String),
+    Chat(String),
 }
 
 /// The sidebar's scope chips: which rows the list keeps once a chip is active.
@@ -421,6 +431,14 @@ pub struct WarpWindow {
     /// id. First click arms (the icon turns red), the second deletes — the
     /// same arm-then-run dance the ⋯ menu's Delete row plays.
     delete_armed: Option<String>,
+    /// The sidebar's keyboard cursor and focus, and the offset that keeps a
+    /// stepped row in view.
+    sidebar_cursor: Option<SidebarCursor>,
+    sidebar_focus: FocusHandle,
+    sidebar_scroll: UniformListScrollHandle,
+    /// The OS title the last frame set: the same activity line as the
+    /// titlebar chip, written only when it changes.
+    window_title: String,
 }
 
 impl WarpWindow {
@@ -474,6 +492,10 @@ impl WarpWindow {
             sidebar_labels_minute: -1,
             splitter_drag: std::rc::Rc::new(std::cell::Cell::new(None)),
             delete_armed: None,
+            sidebar_cursor: None,
+            sidebar_focus: cx.focus_handle(),
+            sidebar_scroll: UniformListScrollHandle::default(),
+            window_title: String::new(),
         }
     }
 }
@@ -511,6 +533,20 @@ fn execute_menu_action(store: &Entity<Store>, action: &SideMenuAction, cx: &mut 
 
 impl Render for WarpWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl gpui::IntoElement {
+        let running = {
+            let store = self.store.read(cx);
+            store
+                .open_tiles
+                .iter()
+                .filter(|tile| !tile.background && tile.is_busy(store))
+                .count()
+        };
+        let activity = (running > 0).then(|| format!("{running} running"));
+        let title = warpui_kit_core::activity::activity_title("Warp Agent", activity.as_deref());
+        if self.window_title != title {
+            window.set_window_title(&title);
+            self.window_title = title;
+        }
         if let Some(section) = self.open_settings_on_first_render.take() {
             self.open_settings(window, cx);
             self.settings_section = section;
@@ -944,7 +980,7 @@ impl WarpWindow {
                     }),
             )
             .when(running > 0, |d| {
-                d.child(
+                d.child(tip(
                     div()
                         .id("activity-chip")
                         .debug_selector(|| "activity-chip".into())
@@ -968,7 +1004,8 @@ impl WarpWindow {
                             theme::BEHIND,
                         ))
                         .child(format!("{running} running")),
-                )
+                    format!("{running} running"),
+                ))
             })
             .child(
                 tip(
@@ -1083,6 +1120,99 @@ impl WarpWindow {
                 )),
             )
             .into_any_element()
+    }
+
+    /// The sidebar's row keys, dispatched by the focused list only. The
+    /// cursor is separate from the open chat: `Enter` activates the row, an
+    /// arrow only moves the keyboard's place.
+    fn handle_sidebar_key(
+        &mut self,
+        event: &gpui::KeyDownEvent,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if event.keystroke.modifiers.modified() {
+            return false;
+        }
+        let Some(key) = list_nav::list_key(event) else {
+            return false;
+        };
+        let rows = self.sidebar_rows(&self.sidebar_filter, self.sidebar_scope, cx);
+        let entries: Vec<(SidebarCursor, usize)> = rows
+            .iter()
+            .enumerate()
+            .filter_map(|(index, row)| match row {
+                SidebarRow::Workspace(workspace) => Some((
+                    SidebarCursor::Workspace(workspace.folder_path().to_string()),
+                    index,
+                )),
+                SidebarRow::Chat(chat) => Some((SidebarCursor::Chat(chat.id.clone()), index)),
+                SidebarRow::Placeholder(_) | SidebarRow::SectionLabel(_) => None,
+            })
+            .collect();
+        match key {
+            list_nav::ListKey::Up
+            | list_nav::ListKey::Down
+            | list_nav::ListKey::Home
+            | list_nav::ListKey::End
+            | list_nav::ListKey::PageUp
+            | list_nav::ListKey::PageDown => {
+                let current = self
+                    .sidebar_cursor
+                    .as_ref()
+                    .and_then(|cursor| entries.iter().position(|(entry, _)| entry == cursor));
+                let Some(next) =
+                    list_nav::step(current, entries.len(), key, list_nav::DEFAULT_PAGE)
+                else {
+                    return true;
+                };
+                let (cursor, row) = entries[next].clone();
+                self.sidebar_cursor = Some(cursor);
+                self.sidebar_scroll
+                    .scroll_to_item(row, ScrollStrategy::Nearest);
+                cx.notify();
+                true
+            }
+            list_nav::ListKey::Enter => {
+                let Some(cursor) = self.sidebar_cursor.clone() else {
+                    return false;
+                };
+                self.activate_sidebar_cursor(cursor, cx);
+                true
+            }
+            list_nav::ListKey::Left | list_nav::ListKey::Right | list_nav::ListKey::Menu => false,
+        }
+    }
+
+    /// Runs the cursor row's click: a chat opens, a folder selects and folds
+    /// the way its row does.
+    fn activate_sidebar_cursor(&mut self, cursor: SidebarCursor, cx: &mut Context<Self>) {
+        match cursor {
+            SidebarCursor::Chat(id) => {
+                self.store
+                    .update(cx, |store, cx| store.select_session(&id, cx));
+            }
+            SidebarCursor::Workspace(path) => {
+                self.store.update(cx, |store, cx| {
+                    store.select_workspace(&path, cx);
+                    let expanding = store
+                        .workspaces
+                        .iter_mut()
+                        .find(|workspace| workspace.folder_path() == path)
+                        .map(|workspace| {
+                            let expanding = !workspace.is_expanded();
+                            workspace.set_expanded(expanding);
+                            expanding
+                        })
+                        .unwrap_or(false);
+                    if expanding {
+                        store.connect_expanded_workspace(&path, cx);
+                    }
+                    store.save_state();
+                    cx.notify();
+                });
+            }
+        }
     }
 
     // ---- sidebar ---------------------------------------------------------------
@@ -1201,7 +1331,7 @@ impl WarpWindow {
             .child({
                 // the row list is never empty: Tasks always leads, and an
                 // empty Workspaces section shows the hint under its label
-                uniform_list(
+                let list = uniform_list(
                     SharedString::from("sidebar-rows"),
                     rows.len(),
                     cx.processor(move |this, range: std::ops::Range<usize>, window, cx| {
@@ -1210,13 +1340,35 @@ impl WarpWindow {
                             .collect()
                     }),
                 )
+                .track_scroll(&self.sidebar_scroll)
                 .id("sidebar-list")
                 .flex_1()
                 .min_h_0()
                 .pt_1()
                 .pb_3()
                 .w_full()
-                .into_any_element()
+                .into_any_element();
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .flex()
+                    .flex_col()
+                    .track_focus(&self.sidebar_focus)
+                    .on_key_down(cx.listener(|this, event, window, cx| {
+                        if this.handle_sidebar_key(event, window, cx) {
+                            cx.stop_propagation();
+                        }
+                    }))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _, window, cx| {
+                            if !this.sidebar_focus.is_focused(window) {
+                                window.focus(&this.sidebar_focus, cx);
+                            }
+                        }),
+                    )
+                    .child(list)
+                    .into_any_element()
             })
             .into_any_element()
     }
@@ -1468,6 +1620,7 @@ impl WarpWindow {
     ) -> gpui::AnyElement {
         let fonts = self.store.read(cx).fonts;
         let path = ws.folder_path().to_string();
+        let cursor = self.sidebar_cursor.as_ref() == Some(&SidebarCursor::Workspace(path.clone()));
         // Tasks is the tree's group label, not a folder: no star, no glyph,
         // no actions menu — its new chat button is the one affordance, and
         // it never hides
@@ -1516,6 +1669,7 @@ impl WarpWindow {
             .pl_4()
             .pr_3()
             .hover(|s| s.bg(theme::raised()))
+            .when(cursor, |row| row.bg(theme::panel()))
             .cursor_pointer()
             .on_click(move |_, _, cx| {
                 let expand_path = path_click.clone();
@@ -1758,6 +1912,7 @@ impl WarpWindow {
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let time_label = self.cached_time_label(chat);
+        let cursor = self.sidebar_cursor.as_ref() == Some(&SidebarCursor::Chat(chat.id.clone()));
         let (fonts, accent, harness_label, waiting, row_width) = {
             let store = self.store.read(cx);
             (
@@ -1877,6 +2032,7 @@ impl WarpWindow {
             .h(px(SIDEBAR_ROW_HEIGHT))
             .pl(px(24.))
             .pr_3()
+            .when(cursor && !chat.is_selected, |d| d.bg(theme::panel()))
             .when(chat.is_selected, |d| {
                 d.bg(theme::raised()).child(
                     div()

@@ -17,11 +17,12 @@
 //!   pointer-stable SharedString per message (TileView.md_text) and the
 //!   editor only sees set_value when the text actually moved.
 //!
-//! The surfaces the transcript still draws with gpui-base's `TextView` (user
-//! messages, reasoning, tool titles and details, questions, notes) go through
-//! [`text_view`] here: that parser panics on some texts, and the guard renders
-//! such a text as plain prose instead of letting one message take the window
-//! down with it.
+//! The streaming text surfaces the transcript still draws with gpui-base's
+//! `TextView` (user messages, reasoning, tool details, questions, notes) go
+//! through [`text_view`] here: that parser panics on some texts, and the guard
+//! renders such a text as plain prose instead of letting one message take the
+//! window down with it. A tool title, a status and every section label are
+//! labels, not documents: they stay plain text and never take this path.
 
 use std::cell::RefCell;
 use std::collections::VecDeque;

@@ -68,6 +68,14 @@ the tail follow still opens a longer chat at its newest message.
   `metadata.filediff.patch` and dsh ships `meta.diffs` (before/after text per
   hunk). `patch_from_hunks` turns dsh's pairs into the same patch text, so one
   kit diff draws both harnesses. Do not add a second diff renderer for dsh.
+- The sidebar's flattened rows own a cursor separate from the open chat:
+  arrows move it, `Enter` runs the row's click. The transcript takes focus on
+  click and its arrows scroll it. A tool title is a label and stays plain
+  text; its details, a reasoning block, a question and a note stay markdown
+  with the Copy menu.
+- The OS title mirrors the titlebar chip through
+  `warpui_kit_core::activity::activity_title`: `2 running — Warp Agent`, or
+  the plain app name when idle.
 
 ## Startup order
 

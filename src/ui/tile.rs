@@ -58,9 +58,10 @@ use crate::ui::markdown::render_markdown;
 use crate::ui::tooltip::tip;
 use gpui::prelude::*;
 use gpui::{
-    AccessibleAction, Animation, AnimationExt as _, App, Bounds, Context, Entity, Focusable,
-    FollowMode, ImageFormat, ListAlignment, ListState, MouseButton, Pixels, Render, Role,
-    ScrollHandle, SharedString, Toggled, Window, actions, canvas, div, img, list, px, relative,
+    AccessibleAction, Animation, AnimationExt as _, App, Bounds, Context, Entity, FocusHandle,
+    Focusable, FollowMode, ImageFormat, ListAlignment, ListOffset, ListState, MouseButton, Pixels,
+    Render, Role, ScrollHandle, SharedString, Toggled, Window, actions, canvas, div, img, list, px,
+    relative,
 };
 use gpui_kit::base::ElementExt as _;
 use gpui_kit::component::input::{
@@ -70,7 +71,7 @@ use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::Arc;
-use warpui_kit_core::{motion, shell, text_menu};
+use warpui_kit_core::{list_nav, motion, shell, text_menu};
 use warpui_kit_diff::{render_code, render_diff, sniff_lang};
 use warpui_kit_markdown::LiveEditorState;
 
@@ -224,6 +225,8 @@ pub struct TileView {
     /// and laid out, so a chat with a thousand messages costs a screenful per
     /// frame instead of the whole transcript.
     list_state: ListState,
+    /// The transcript's keyboard focus: arrows scroll it.
+    transcript_focus: FocusHandle,
     /// The rows the list's item count mirrors, built on the last render. A
     /// changed tail is spliced into the list rather than reset, which keeps
     /// the measured heights of everything above it.
@@ -782,6 +785,7 @@ impl TileView {
             key,
             store,
             list_state,
+            transcript_focus: cx.focus_handle(),
             rows: Rc::new(Vec::new()),
             rows_fold_rev: u64::MAX,
             following: true,
@@ -1473,22 +1477,31 @@ impl TileView {
                             .text_size(px(fonts.font_body))
                             .text_color(theme::text_dim())
                             .truncate()
-                            .child(self.transcript_text(
-                                &format!("{item_id}:title"),
-                                &tool.title,
-                                "tooltitle",
-                                Some(1),
-                                cx,
-                            )),
+                            // a tool title is a label, not a document: plain
+                            // text, no selection menu, no markdown syntax
+                            .child(SharedString::from(tool.title.clone())),
                     )
                     .child(
                         div()
                             .flex_shrink_0()
+                            .flex()
+                            .items_center()
+                            .gap_1()
                             .text_size(px(fonts.font_meta))
                             .text_color(if tool.is_error {
                                 theme::DANGER
                             } else {
                                 theme::text_muted()
+                            })
+                            // a running tool carries the family's spinner; the
+                            // word beside it stays when motion is off
+                            .when(tool.status == "running", |d| {
+                                d.child(motion::spinner(
+                                    gpui::ElementId::Name(format!("tool-spin-{item_id}").into()),
+                                    "icons/spinner.svg",
+                                    px(fonts.icon_tiny),
+                                    theme::BEHIND,
+                                ))
                             })
                             .child(SharedString::from(tool.status.clone())),
                     ),
@@ -2399,6 +2412,44 @@ struct TileSnap {
 }
 
 impl TileView {
+    /// The transcript's arrow keys scroll the list. A message is not a
+    /// selectable row, so there is no cursor here: selection belongs to the
+    /// text inside a message.
+    fn handle_transcript_key(
+        &mut self,
+        event: &gpui::KeyDownEvent,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if event.keystroke.modifiers.modified() {
+            return false;
+        }
+        let Some(key) = list_nav::list_key(event) else {
+            return false;
+        };
+        let line = px((self.last_font_body.max(14.) * 1.6).max(20.));
+        match key {
+            list_nav::ListKey::Up => self.list_state.scroll_by(-line),
+            list_nav::ListKey::Down => self.list_state.scroll_by(line),
+            list_nav::ListKey::PageUp => self.list_state.scroll_by(-(line * 10.)),
+            list_nav::ListKey::PageDown => self.list_state.scroll_by(line * 10.),
+            list_nav::ListKey::Home => self.list_state.scroll_to(ListOffset {
+                item_ix: 0,
+                offset_in_item: px(0.),
+            }),
+            list_nav::ListKey::End => {
+                self.list_state.set_follow_mode(FollowMode::Tail);
+                self.list_state.scroll_to_end();
+            }
+            list_nav::ListKey::Left
+            | list_nav::ListKey::Right
+            | list_nav::ListKey::Enter
+            | list_nav::ListKey::Menu => return false,
+        }
+        cx.notify();
+        true
+    }
+
     /// Header row: close, busy pulse, title, then the right cluster —
     /// reconnecting pill, context ring readout, tasks/agents toggle.
     fn render_header(&mut self, snap: &TileSnap, cx: &mut Context<Self>) -> gpui::AnyElement {
@@ -4362,6 +4413,22 @@ impl Render for TileView {
             .id("transcript")
             .role(Role::Log)
             .aria_label("Transcript")
+            // the transcript owns the keys after a click: arrows scroll it,
+            // and the composer or a folded body keeps its own
+            .track_focus(&self.transcript_focus)
+            .on_key_down(cx.listener(|this, event, window, cx| {
+                if this.handle_transcript_key(event, window, cx) {
+                    cx.stop_propagation();
+                }
+            }))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, window, cx| {
+                    if !this.transcript_focus.is_focused(window) {
+                        window.focus(&this.transcript_focus, cx);
+                    }
+                }),
+            )
             .relative()
             .flex_1()
             .min_h_0()

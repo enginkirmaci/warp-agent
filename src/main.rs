@@ -11,5 +11,20 @@
 )]
 
 fn main() {
+    // The support contract, before any window or logging: `--version` answers
+    // with the same line the About screen copies.
+    if std::env::args()
+        .skip(1)
+        .any(|arg| arg == "--version" || arg == "-V")
+    {
+        let build = warpui_kit_core::build_info!();
+        println!(
+            "{}",
+            build.version_line(warpui_kit_core::about::app(
+                warpui_kit_core::about::AppId::Agent
+            ))
+        );
+        return;
+    }
     warp_agent::run();
 }

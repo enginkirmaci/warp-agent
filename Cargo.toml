@@ -56,9 +56,9 @@ unicode-segmentation = { workspace = true }
 # gpui-kit dep only under `cargo test`
 gpui-kit = { workspace = true, features = ["test-support"] }
 
+[build-dependencies]
+warpui-kit-build = { workspace = true }
+
 [target.'cfg(unix)'.dependencies]
 # PR_SET_PDEATHSIG for the spawned serve/dsh children
 libc = { workspace = true }
-
-[target.'cfg(windows)'.build-dependencies]
-winresource = { workspace = true }

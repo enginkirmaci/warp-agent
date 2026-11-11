@@ -4,10 +4,9 @@
 //! responsive while a reply streams — before the list, every repaint rebuilt
 //! every message's markdown editor.
 //!
-//! The tile view itself is binary-only (no `lib.rs` boundary), so this probe
-//! drives the same container chain, `list` element and re-entrant
-//! `WeakEntity::update` the tile wires up, with rows tall enough to make the
-//! difference obvious.
+//! This probe stays at the list level on purpose: it drives the same container
+//! chain, `list` element and re-entrant `WeakEntity::update` the tile wires
+//! up, with rows tall enough to make the difference obvious.
 
 use std::cell::Cell;
 use std::rc::Rc;

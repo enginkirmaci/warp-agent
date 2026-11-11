@@ -623,6 +623,15 @@ impl Store {
         entity
     }
 
+    /// A store over a dead net channel: headless probes drive the real views
+    /// without a backend. The receiver is dropped with this call, so any
+    /// network command the probe causes is a no-op.
+    #[doc(hidden)]
+    pub fn for_probe(cx: &mut App) -> Entity<Self> {
+        let (tx, _rx) = async_channel::unbounded();
+        Self::new(cx, crate::oc::NetSender(tx))
+    }
+
     // ---- seeds / persistence ----
 
     pub fn seed_model(&self) -> Option<String> {

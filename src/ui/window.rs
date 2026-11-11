@@ -1122,6 +1122,32 @@ impl WarpWindow {
             .into_any_element()
     }
 
+    /// The sidebar's focus handle, for the real-view probe.
+    #[doc(hidden)]
+    pub fn sidebar_focus_handle(&self) -> FocusHandle {
+        self.sidebar_focus.clone()
+    }
+
+    /// `workspace:<path>` or `chat:<id>`: the private cursor enum stays
+    /// private while a probe can still assert where the keyboard is.
+    #[doc(hidden)]
+    pub fn sidebar_cursor_for_probe(&self) -> Option<String> {
+        self.sidebar_cursor.as_ref().map(|cursor| match cursor {
+            SidebarCursor::Workspace(path) => format!("workspace:{path}"),
+            SidebarCursor::Chat(id) => format!("chat:{id}"),
+        })
+    }
+
+    /// The sidebar filter's focus handle, so the probe can prove the list
+    /// cursor stays put while a field owns the keys.
+    #[doc(hidden)]
+    pub fn sidebar_filter_focus_for_probe(&self, cx: &App) -> Option<FocusHandle> {
+        self.sidebar_filter_leaf.as_ref().map(|leaf| {
+            let leaf = leaf.read(cx);
+            leaf.state.read(cx).focus_handle(cx)
+        })
+    }
+
     /// The sidebar's row keys, dispatched by the focused list only. The
     /// cursor is separate from the open chat: `Enter` activates the row, an
     /// arrow only moves the keyboard's place.

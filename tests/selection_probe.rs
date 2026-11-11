@@ -3,11 +3,10 @@
 //! and the styled runs (bold, inline code) must be selectable like the plain
 //! text around them.
 //!
-//! The tile view is binary-only (no `lib.rs` boundary), so the probe mirrors
-//! the wiring that matters: a **cached** host view (the tile in the grid)
-//! whose transcript is a `list` whose rows embed `LiveEditor`s built during
-//! prepaint, with the same observer the tile installs to repaint on a
-//! selection move.
+//! The probe mirrors the wiring that matters rather than opening the whole
+//! window: a **cached** host view (the tile in the grid) whose transcript is a
+//! `list` whose rows embed `LiveEditor`s built during prepaint, with the same
+//! observer the tile installs to repaint on a selection move.
 
 use std::cell::Cell;
 use std::rc::Rc;

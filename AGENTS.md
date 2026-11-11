@@ -6,19 +6,21 @@ app-specific facts. The user-facing description is in
 
 ## Shape
 
-warp-agent is a single binary crate (`warp-agent`) with **no
-`lib.rs` boundary**. That is deliberate today, and it has one consequence: a
-probe cannot build the app's views. The integration probes therefore drive the
-pieces the app shares with the kits: `tests/complex_markdown_probe.rs` runs a
-hostile reply through the same read-only `LiveEditor` the tile uses,
-`tests/transcript_list_probe.rs` drives the transcript's `list`/`ListState`
-wiring with hundreds of rows, and `tests/selection_probe.rs` drags a selection
-through a bold run in a cached, list-hosted editor. Prefer adding a library
-boundary before adding a view-level probe to this app.
+warp-agent is a library (`warp_agent`) plus a thin binary. `src/lib.rs` owns
+the module list and `run()`; `src/main.rs` only carries the Windows console
+attribute and calls `warp_agent::run()`. The boundary exists so probes can
+open the real `WarpWindow`: `tests/sidebar_keys_probe.rs` drives its sidebar
+with a scratch store. The kit-level probes still cover the shared pieces:
+`tests/complex_markdown_probe.rs` runs a hostile reply through the read-only
+`LiveEditor`, `tests/transcript_list_probe.rs` drives the transcript's
+`list`/`ListState` wiring, and `tests/selection_probe.rs` drags a selection
+through a bold run.
 
 ## Where things live
 
-- `src/main.rs` — startup order and the composer key bindings.
+- `src/lib.rs` — startup order (`run()`), module list and the composer key
+  bindings.
+- `src/main.rs` — the Windows console attribute and the `run()` call.
 - `src/store/` — the app state: workspaces, the shared tile grid, transcripts,
   queues, permissions, runs, sessions, sidebar, streaming and parsing.
 - `src/oc.rs` — `opencode serve` lifecycle plus its REST/SSE client on the net
@@ -137,9 +139,10 @@ cargo build -p warp-agent
 - `tests/selection_probe.rs` proves a drag over a styled run selects before
   the button comes up and repaints the cached host, and that bold and plain
   text are selected alike.
-- There are no view probes because there is no lib target. Add a lib boundary
-  first if a change needs one; see
-  [`../../docs/agents/gpui-app-recipe.md`](../../docs/agents/gpui-app-recipe.md).
+- `tests/sidebar_keys_probe.rs` opens the real `WarpWindow` over a scratch
+  HOME, focuses the sidebar, walks its flattened rows with the arrow keys and
+  proves a focused filter field keeps them. It uses `Store::for_probe`, whose
+  net channel has no receiver.
 - The capture hook is `WARP_AGENT_PAGE`: `settings`, `settings-chat`,
   `settings-permissions`, `settings-server`.
 

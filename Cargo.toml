@@ -6,8 +6,9 @@ description = "WarpAgent — a tile-grid chat client for opencode serve, rebuilt
 license.workspace = true
 publish = false
 
-# Binary-only by design: there is no lib.rs boundary and the one integration
-# probe targets the markdown kit (see AGENTS.md).
+# Library plus a thin binary: the lib boundary lets headless probes open the
+# real window; src/main.rs only carries the console attribute and calls run()
+# (see AGENTS.md).
 
 [dependencies]
 # suite crates — the paths live in [workspace.dependencies]

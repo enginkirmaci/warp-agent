@@ -5,7 +5,7 @@ use crate::oc::CommandInfo;
 use crate::settings::HarnessKind;
 use crate::store::{ChatItem, DEFAULT_MODEL_ENTRY, QuestionEntry, Store, ToolItem, at_token_start};
 use crate::theme;
-use crate::ui::{BtnKind, fold_body, menu_row, popover_card};
+use crate::ui::{BtnKind, menu_row, popover_card};
 use warpui_kit_picker::{
     DismissFn, FilteredPicker, OverlayAnchor, PanelChrome, PickerBody, PickerData, PickerIcons,
     PickerItem, PickerRow, PickerSpec, PickerTarget, Selection, TriggerScale, model_name,
@@ -60,7 +60,7 @@ use gpui::prelude::*;
 use gpui::{
     AccessibleAction, Animation, AnimationExt as _, App, Bounds, Context, Entity, Focusable,
     FollowMode, ImageFormat, ListAlignment, ListState, MouseButton, Pixels, Render, Role,
-    SharedString, Toggled, Window, actions, canvas, div, img, list, px, relative,
+    ScrollHandle, SharedString, Toggled, Window, actions, canvas, div, img, list, px, relative,
 };
 use gpui_kit::base::ElementExt as _;
 use gpui_kit::component::input::{
@@ -241,6 +241,12 @@ pub struct TileView {
     /// and the list only invalidates its cached heights on a width change.
     last_font_body: f32,
     expanded: HashSet<String>, // fold state by item id
+    /// One scroll offset per fold body, keyed like `expanded`. A fold is a
+    /// scroller nested inside the transcript list, so it keeps its own offset
+    /// and consumes its wheel step until it is at its edge (see
+    /// [`warpui_kit_core::scroll`]); sharing one handle would tie two folds
+    /// together.
+    fold_scrolls: HashMap<String, ScrollHandle>,
     /// Bumped on every fold toggle: `expanded` is unordered, so the cache-key
     /// fingerprint hashes this counter instead of the set.
     fold_rev: u64,
@@ -288,6 +294,9 @@ pub struct TileView {
     /// (see SuggestMenu below)
     suggest: Entity<SuggestMenu>,
     flyout_open: bool,
+    /// The flyout's own offset: it hangs over the transcript, so its wheel
+    /// must not also move the list under it.
+    flyout_scroll: ScrollHandle,
     density: TileDensity,
     last_spring_seen: bool,
     /// item id whose copy button is flashing its "copied" state right now
@@ -343,6 +352,21 @@ impl TileView {
             self.copied_flash = None;
             cx.notify();
         }
+    }
+
+    /// The body of the fold identified by `key` (the same string `expanded`
+    /// and `fold_header` use): one scroll handle per fold, so the nested
+    /// scroller takes its own wheel step and only chains out at its edge.
+    fn fold_body(&mut self, key: &str) -> gpui::Stateful<gpui::Div> {
+        let scroll = self
+            .fold_scrolls
+            .entry(key.to_string())
+            .or_default()
+            .clone();
+        warpui_kit_core::fold_body(
+            gpui::ElementId::NamedInteger("fold".into(), Self::hash(key)),
+            &scroll,
+        )
     }
 
     /// Message text as a pointer-stable SharedString for the kit's text view,
@@ -764,6 +788,7 @@ impl TileView {
             follow_check: None,
             last_font_body: 0.,
             expanded: HashSet::new(),
+            fold_scrolls: HashMap::new(),
             fold_rev: 0,
             live_keys: HashSet::new(),
             live_fingerprint: None,
@@ -782,6 +807,7 @@ impl TileView {
             last_composer_text: String::new(),
             suggest,
             flyout_open: false,
+            flyout_scroll: ScrollHandle::default(),
             density: TileDensity::default(),
             last_spring_seen: false,
             copied_flash: None,
@@ -1263,22 +1289,19 @@ impl TileView {
                     .child(self.fold_header(item_id, "thinking", None, open, fonts, cx))
                     .when(open, |d| {
                         d.child(
-                            fold_body(gpui::ElementId::NamedInteger(
-                                "fold-thinking".into(),
-                                TileView::hash(item_id),
-                            ))
-                            .max_w(px(MESSAGE_WIDTH))
-                            .text_size(px(fonts.font_meta))
-                            .text_color(theme::text_dim())
-                            .child(crate::ui::markdown::text_view(
-                                gpui::ElementId::NamedInteger(
-                                    "rtext".into(),
-                                    TileView::hash(item_id),
-                                ),
-                                body,
-                                None,
-                                text_menu::focus(cx),
-                            )),
+                            self.fold_body(item_id)
+                                .max_w(px(MESSAGE_WIDTH))
+                                .text_size(px(fonts.font_meta))
+                                .text_color(theme::text_dim())
+                                .child(crate::ui::markdown::text_view(
+                                    gpui::ElementId::NamedInteger(
+                                        "rtext".into(),
+                                        TileView::hash(item_id),
+                                    ),
+                                    body,
+                                    None,
+                                    text_menu::focus(cx),
+                                )),
                         )
                     })
                     .into_any_element()
@@ -1415,8 +1438,10 @@ impl TileView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
-        let open_diff = self.expanded.contains(&format!("{item_id}:diff"));
-        let open_details = self.expanded.contains(&format!("{item_id}:details"));
+        let diff_key = format!("{item_id}:diff");
+        let details_key = format!("{item_id}:details");
+        let open_diff = self.expanded.contains(&diff_key);
+        let open_details = self.expanded.contains(&details_key);
         let has_diff = tool.has_diff();
         let has_details = tool.has_details();
         div()
@@ -1480,7 +1505,7 @@ impl TileView {
             })
             .when(has_diff, |d| {
                 d.child(self.fold_header(
-                    &format!("{item_id}:diff"),
+                    &diff_key,
                     "Changes",
                     Some((
                         tool.numstat.as_ref().map(|n| n.additions).unwrap_or(0),
@@ -1491,81 +1516,62 @@ impl TileView {
                     cx,
                 ))
                 .when(open_diff, |d| {
-                    d.child(
-                        fold_body(gpui::ElementId::NamedInteger(
-                            "fold-diff".into(),
-                            Self::hash(item_id),
-                        ))
-                        .child(text_menu::attach(
-                            gpui::ElementId::Name(format!("tool-diff-menu-{item_id}").into()),
-                            render_diff(
-                                tool.diff.as_deref().unwrap_or(""),
-                                Some(&tool.file_path),
-                                fonts.font_meta,
-                                window,
-                                cx,
-                            ),
-                            text_menu::focus(cx),
-                        )),
-                    )
+                    d.child(self.fold_body(&diff_key).child(text_menu::attach(
+                        gpui::ElementId::Name(format!("tool-diff-menu-{item_id}").into()),
+                        render_diff(
+                            tool.diff.as_deref().unwrap_or(""),
+                            Some(&tool.file_path),
+                            fonts.font_meta,
+                            window,
+                            cx,
+                        ),
+                        text_menu::focus(cx),
+                    )))
                 })
             })
             .when(has_details, |d| {
-                d.child(self.fold_header(
-                    &format!("{item_id}:details"),
-                    "details",
-                    None,
-                    open_details,
-                    fonts,
-                    cx,
-                ))
-                .when(open_details, |d| {
-                    let body = fold_body(gpui::ElementId::NamedInteger(
-                        "fold-details".into(),
-                        Self::hash(item_id),
-                    ))
-                    .flex()
-                    .flex_col()
-                    .gap_2p5();
-                    let body = body
-                        .when(!tool.details.input.is_empty(), |d| {
-                            d.child(self.detail_section(
-                                &format!("{item_id}:input"),
-                                "input",
-                                &tool.details.input,
-                                theme::text_dim(),
-                                sniff_lang(&tool.details.input),
-                                fonts,
-                                window,
-                                cx,
-                            ))
-                        })
-                        .when(!tool.details.output.is_empty(), |d| {
-                            d.child(self.detail_section(
-                                &format!("{item_id}:output"),
-                                "output",
-                                &tool.details.output,
-                                theme::text_dim(),
-                                sniff_lang(&tool.details.output),
-                                fonts,
-                                window,
-                                cx,
-                            ))
-                        })
-                        .when(!tool.details.error.is_empty(), |d| {
-                            d.child(self.detail_section(
-                                &format!("{item_id}:error"),
-                                "error",
-                                &tool.details.error,
-                                theme::DANGER,
-                                None,
-                                fonts,
-                                window,
-                                cx,
-                            ))
-                        });
-                    d.child(body)
-                })
+                d.child(self.fold_header(&details_key, "details", None, open_details, fonts, cx))
+                    .when(open_details, |d| {
+                        let body = self.fold_body(&details_key).flex().flex_col().gap_2p5();
+                        let body = body
+                            .when(!tool.details.input.is_empty(), |d| {
+                                d.child(self.detail_section(
+                                    &format!("{item_id}:input"),
+                                    "input",
+                                    &tool.details.input,
+                                    theme::text_dim(),
+                                    sniff_lang(&tool.details.input),
+                                    fonts,
+                                    window,
+                                    cx,
+                                ))
+                            })
+                            .when(!tool.details.output.is_empty(), |d| {
+                                d.child(self.detail_section(
+                                    &format!("{item_id}:output"),
+                                    "output",
+                                    &tool.details.output,
+                                    theme::text_dim(),
+                                    sniff_lang(&tool.details.output),
+                                    fonts,
+                                    window,
+                                    cx,
+                                ))
+                            })
+                            .when(!tool.details.error.is_empty(), |d| {
+                                d.child(self.detail_section(
+                                    &format!("{item_id}:error"),
+                                    "error",
+                                    &tool.details.error,
+                                    theme::DANGER,
+                                    None,
+                                    fonts,
+                                    window,
+                                    cx,
+                                ))
+                            });
+                        d.child(body)
+                    })
             })
             .into_any_element()
     }
@@ -1679,13 +1685,7 @@ impl TileView {
             .gap_1()
             .child(self.fold_header(group_key, &label, numstat, open, fonts, cx));
         if open {
-            let mut body = fold_body(gpui::ElementId::NamedInteger(
-                "fold-tools".into(),
-                Self::hash(group_key),
-            ))
-            .flex()
-            .flex_col()
-            .gap_1();
+            let mut body = self.fold_body(group_key).flex().flex_col().gap_1();
             for (member_id, member) in run {
                 body = body.child(self.render_item(
                     member_id,
@@ -1732,6 +1732,9 @@ impl TileView {
             .on_click(cx.listener(move |this, _, _, cx| {
                 if this.expanded.contains(&key) {
                     this.expanded.remove(&key);
+                    // a closed fold's body is gone; its offset would only
+                    // reopen at a stale position, so the handle goes with it
+                    this.fold_scrolls.remove(&key);
                 } else {
                     this.expanded.insert(key.clone());
                     // the body grows below the header — stop pinning to the
@@ -1786,7 +1789,8 @@ impl TileView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
-        let open_diff = self.expanded.contains(&format!("{item_id}:diff"));
+        let diff_key = format!("{item_id}:diff");
+        let open_diff = self.expanded.contains(&diff_key);
         let on_accent = self.store.read(cx).accent.on;
         div()
             .w_full()
@@ -1838,7 +1842,7 @@ impl TileView {
                             )
                             .when(perm.has_diff(), |d| {
                                 d.child(self.fold_header(
-                                    &format!("{item_id}:diff"),
+                                    &diff_key,
                                     "View diff",
                                     None,
                                     open_diff,
@@ -1846,27 +1850,19 @@ impl TileView {
                                     cx,
                                 ))
                                 .when(open_diff, |d| {
-                                    d.child(
-                                        fold_body(gpui::ElementId::NamedInteger(
-                                            "perm-diff".into(),
-                                            Self::hash(item_id),
-                                        ))
-                                        .child(
-                                            text_menu::attach(
-                                                gpui::ElementId::Name(
-                                                    format!("perm-diff-menu-{}", perm.id).into(),
-                                                ),
-                                                render_diff(
-                                                    perm.diff.as_deref().unwrap_or(""),
-                                                    None,
-                                                    fonts.font_meta,
-                                                    window,
-                                                    cx,
-                                                ),
-                                                text_menu::focus(cx),
-                                            ),
+                                    d.child(self.fold_body(&diff_key).child(text_menu::attach(
+                                        gpui::ElementId::Name(
+                                            format!("perm-diff-menu-{}", perm.id).into(),
                                         ),
-                                    )
+                                        render_diff(
+                                            perm.diff.as_deref().unwrap_or(""),
+                                            None,
+                                            fonts.font_meta,
+                                            window,
+                                            cx,
+                                        ),
+                                        text_menu::focus(cx),
+                                    )))
                                 })
                             })
                             .when(perm.is_pending(), |d| {
@@ -3462,6 +3458,7 @@ impl TileView {
                         list
                     });
             }
+            let flyout_scroll = self.flyout_scroll.clone();
             flyout = div().absolute().top(px(40.)).right_2().child(
                 div()
                     .debug_selector(|| "tile-flyout".into())
@@ -3474,6 +3471,12 @@ impl TileView {
                     .id("flyout-body")
                     .max_h(px(460.))
                     .overflow_y_scroll()
+                    .track_scroll(&flyout_scroll)
+                    // the flyout hangs over the transcript: its own wheel must
+                    // not also move the list under it
+                    .on_scroll(move |event, window, cx| {
+                        warpui_kit_core::scroll::consume_wheel(&flyout_scroll, event, window, cx)
+                    })
                     .child(content),
             );
         }

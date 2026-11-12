@@ -215,9 +215,23 @@ impl Store {
             }
         }
         items.sort_by_key(session_recency);
+        // the list carries the server's latest title; a tile that missed a
+        // live `session/title` (or predates this list) catches up even when
+        // the sidebar row itself did not move
+        let mut tiles_moved = false;
+        for s in &mine {
+            self.title_by_session.insert(s.id.clone(), s.title.clone());
+            if let Some(tile) = self.tile_for_session_mut(&s.id)
+                && tile.title != s.title
+            {
+                tile.title = s.title.clone();
+                tiles_moved = true;
+            }
+        }
         // an idle fires at the end of every turn; when nothing visible changed,
         // skip the full rebuild + disk save (the common case while chatting)
-        let unchanged = self.sessions.len() == items.len()
+        let unchanged = !tiles_moved
+            && self.sessions.len() == items.len()
             && self.sessions.iter().zip(items.iter()).all(|(cur, s)| {
                 cur.id == s.id
                     && cur.title == s.title
@@ -227,12 +241,6 @@ impl Store {
             });
         if unchanged {
             return;
-        }
-        for s in &mine {
-            self.title_by_session.insert(s.id.clone(), s.title.clone());
-            if let Some(tile) = self.tile_for_session_mut(&s.id) {
-                tile.title = s.title.clone();
-            }
         }
         self.sessions = items;
         let titles: Vec<(String, String)> = self
@@ -254,6 +262,80 @@ impl Store {
 
     pub fn sort_sessions(&mut self) {
         self.sessions.sort_by_key(session_recency);
+    }
+
+    /// Adopts a title the server published for a chat: a dsh `session/title`
+    /// folded into `session.updated`, opencode's session info, or a rename
+    /// reply. The title map, the open tile, the sidebar mirror and the
+    /// workspace's own section move together, so the header, the row and a
+    /// later reopen agree.
+    pub(super) fn adopt_session_title(
+        &mut self,
+        session_id: &str,
+        title: &str,
+        cx: &mut Context<Self>,
+    ) {
+        if title.is_empty() {
+            return;
+        }
+        let mut changed = self
+            .title_by_session
+            .get(session_id)
+            .is_none_or(|current| current != title);
+        if changed {
+            self.title_by_session
+                .insert(session_id.to_string(), title.to_string());
+        }
+        if let Some(tile) = self.tile_for_session_mut(session_id)
+            && tile.title != title
+        {
+            tile.title = title.to_string();
+            changed = true;
+        }
+        for item in self
+            .sessions
+            .iter_mut()
+            .filter(|item| item.id == session_id)
+        {
+            if item.title != title {
+                item.title = title.to_string();
+                changed = true;
+            }
+        }
+        for running in self
+            .running_agents
+            .iter_mut()
+            .filter(|running| running.session_id == session_id)
+        {
+            if running.title != title {
+                running.title = title.to_string();
+                changed = true;
+            }
+        }
+        let path = self.workspace_by_session.get(session_id).cloned();
+        if let Some(path) = path.as_deref()
+            && let Some(ws) = self.workspace_by_path_mut(path)
+        {
+            for chat in ws.chats.iter_mut().filter(|chat| chat.id == session_id) {
+                if chat.title != title {
+                    chat.title = title.to_string();
+                    changed = true;
+                }
+            }
+        }
+        if !changed {
+            return;
+        }
+        let selected = path
+            .as_deref()
+            .is_some_and(|path| self.selected_workspace.as_deref() == Some(path));
+        if selected {
+            // the section and the sidebar mirror share one source; this
+            // also repaints the chrome and every tile
+            self.sync_workspace_chats(cx);
+        } else {
+            self.repaint(cx);
+        }
     }
 
     pub(super) fn sync_workspace_chats(&mut self, cx: &mut Context<Self>) {

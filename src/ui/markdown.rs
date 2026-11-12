@@ -144,6 +144,11 @@ pub fn render_markdown(
     let mut live = LiveEditor::new(editor)
         .read_only(true)
         .fit_content(true)
+        // the transcript supplies the measure (a message bubble or a card),
+        // so the editor's own side margins would read as empty bands inside
+        // it; the host's padding is the only inset
+        .unbounded_column()
+        .margin_x_em(0.0)
         .text_size(px(font_px))
         .code_block_overlay(overlay);
     if let Some(top) = top_margin_em {

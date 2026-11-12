@@ -740,7 +740,7 @@ pub async fn run_request(handle: &DshHandle, ws_key: String, request: ApiRequest
 async fn create_session(
     handle: &DshHandle,
     folder: Option<&str>,
-    _title: &str,
+    title: &str,
 ) -> Result<SessionInfo> {
     let mut args = json!({});
     if let Some(folder) = folder.filter(|f| !f.is_empty()) {
@@ -755,9 +755,37 @@ async fn create_session(
         .ok_or_else(|| anyhow!("dsh session/create returned no sessionId"))?
         .to_string();
     handle.ensure_follow(&id).await.ok();
+    // dsh's create request has no title field: a fork or a door-named chat
+    // carries one, so set it once the session exists. A plain "New chat"
+    // needs no rename — the server titles it from the first prompt.
+    let mut accepted_title = "New chat".to_string();
+    let wanted = title.trim();
+    if !wanted.is_empty() && wanted != "New chat" {
+        match handle
+            .rpc(
+                "session/rename",
+                json!({ "request": { "sessionId": &id, "title": wanted } }),
+            )
+            .await
+        {
+            Ok(value) => {
+                accepted_title = value
+                    .get("title")
+                    .and_then(Value::as_str)
+                    .unwrap_or(wanted)
+                    .to_string();
+            }
+            Err(err) => {
+                // the local title still names the chat; the server will
+                // normalize it after the first prompt
+                tracing::warn!("[dsh] session title not set: {err:#}");
+                accepted_title = wanted.to_string();
+            }
+        }
+    }
     Ok(SessionInfo {
         id,
-        title: "New chat".into(),
+        title: accepted_title,
         updated_ms: now_ms(),
         created_ms: now_ms(),
         parent_id: None,
@@ -785,9 +813,7 @@ async fn list_sessions_filtered(handle: &DshHandle, folder: &str) -> Result<Vec<
         }
         sessions.push(SessionInfo {
             id: id.to_string(),
-            title: item
-                .pointer("/projections/values/title/title")
-                .and_then(Value::as_str)
+            title: projection_title(item)
                 .filter(|t| !t.is_empty())
                 .unwrap_or("New chat")
                 .to_string(),
@@ -800,6 +826,17 @@ async fn list_sessions_filtered(handle: &DshHandle, folder: &str) -> Result<Vec<
         });
     }
     Ok(sessions)
+}
+
+/// The normalized title in a dsh projection. `session/list` flattens the
+/// title projection to a plain string, while a follow snapshot carries the
+/// projection object (`{ title, messageSeqs, source, … }`); both shapes name
+/// the same value.
+fn projection_title(value: &Value) -> Option<&str> {
+    let title = value.pointer("/projections/values/title")?;
+    title
+        .as_str()
+        .or_else(|| title.get("title").and_then(Value::as_str))
 }
 
 async fn model_catalog(handle: &DshHandle) -> Result<Vec<ModelInfo>> {
@@ -1155,9 +1192,15 @@ pub fn fold_event(state: &mut DshSessionState, session_id: &str, event: &Value) 
         }
         "session/title" => {
             state.title = data.get("title").and_then(Value::as_str).map(String::from);
+            // carry the title itself: the store adopts it for the tile and the
+            // sidebar right away, without waiting for a list refresh or the
+            // rename reply that may have produced it
             outcome.extra.push(json!({
                 "type": "session.updated",
-                "properties": { "info": { "id": session_id } },
+                "properties": { "info": {
+                    "id": session_id,
+                    "title": state.title,
+                } },
             }));
         }
         _ => {}
@@ -2031,10 +2074,7 @@ fn dispatch_frame(
                     let _ = fold_event(state, session_id, &event);
                 }
             }
-            if let Some(title) = value
-                .pointer("/projections/values/title/title")
-                .and_then(Value::as_str)
-            {
+            if let Some(title) = projection_title(value) {
                 state.title = Some(title.to_string());
             }
             drop(sessions);
@@ -2268,6 +2308,50 @@ mod tests {
         assert_eq!(
             outcome.extra[1].pointer("/properties/error/message"),
             Some(&json!("Insufficient Balance"))
+        );
+    }
+
+    #[test]
+    fn a_session_title_reaches_the_tile_as_session_info() {
+        let mut state = DshSessionState::default();
+        let outcome = fold_event(
+            &mut state,
+            "session-1",
+            &wire_event(
+                "session/title",
+                3,
+                json!({ "title": "Fix the chat bubble" }),
+            ),
+        );
+        assert_eq!(state.title.as_deref(), Some("Fix the chat bubble"));
+        assert_eq!(outcome.extra.len(), 1);
+        assert_eq!(
+            outcome.extra[0].get("type"),
+            Some(&json!("session.updated"))
+        );
+        assert_eq!(
+            outcome.extra[0].pointer("/properties/info/id"),
+            Some(&json!("session-1"))
+        );
+        assert_eq!(
+            outcome.extra[0].pointer("/properties/info/title"),
+            Some(&json!("Fix the chat bubble"))
+        );
+    }
+
+    #[test]
+    fn titles_read_from_a_list_row_and_a_snapshot() {
+        // session/list flattens the projection to a plain string
+        let listed = json!({ "projections": { "values": { "title": "A listed chat" } } });
+        assert_eq!(projection_title(&listed), Some("A listed chat"));
+        // a follow snapshot carries the projection object instead
+        let snapshot = json!({ "projections": { "values": {
+            "title": { "title": "A snapshot chat", "messageSeqs": [], "source": { "kind": "user" } }
+        } } });
+        assert_eq!(projection_title(&snapshot), Some("A snapshot chat"));
+        assert_eq!(
+            projection_title(&json!({ "projections": { "values": { "title": null } } })),
+            None
         );
     }
 

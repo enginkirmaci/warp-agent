@@ -359,14 +359,21 @@ impl Store {
                     }
                     self.workspace_by_session
                         .insert(info.id.clone(), ws_key.clone());
-                    self.title_by_session
-                        .insert(info.id.clone(), info.title.clone());
+                    // a dsh `session/title` can beat the create reply; the
+                    // server's title outranks the placeholder this reply
+                    // carries
+                    let title = self
+                        .title_by_session
+                        .get(&info.id)
+                        .cloned()
+                        .filter(|title| !title.is_empty())
+                        .unwrap_or_else(|| info.title.clone());
+                    self.title_by_session.insert(info.id.clone(), title.clone());
                     self.tile_by_session
                         .insert(info.id.clone(), draft_key.clone());
-                    let title = info.title.clone();
                     if let Some(tile) = self.tile_by_key_mut(&draft_key) {
                         tile.session_id = Some(info.id.clone());
-                        tile.title = title;
+                        tile.title = title.clone();
                         tile.auto_title_pending = true;
                     }
                     // a background run's chat stays out of the sidebar and the
@@ -387,7 +394,7 @@ impl Store {
                     if !background && self.selected_workspace.as_deref() == Some(ws_key.as_str()) {
                         self.sessions.push(SessionItem {
                             id: info.id.clone(),
-                            title: info.title.clone(),
+                            title,
                             updated_ms: info.updated_ms,
                             created_ms: info.created_ms,
                             is_pinned: false,
@@ -537,18 +544,8 @@ impl Store {
                 session_id, result, ..
             } => match result {
                 Ok(info) => {
-                    let final_title = if info.title.is_empty() {
-                        String::new()
-                    } else {
-                        info.title.clone()
-                    };
-                    self.title_by_session
-                        .insert(session_id.clone(), final_title.clone());
-                    if let Some(tile) = self.tile_for_session_mut(&session_id) {
-                        tile.title = final_title.clone();
-                    }
+                    self.adopt_session_title(&session_id, &info.title, cx);
                     if let Some(item) = self.sessions.iter_mut().find(|s| s.id == session_id) {
-                        item.title = final_title;
                         item.updated_ms = info.updated_ms;
                         item.created_ms = info.created_ms;
                     }

@@ -1206,6 +1206,8 @@ impl TileView {
                     .child(
                         div()
                             .group("umsg")
+                            .debug_selector(|| "bubble-user".into())
+                            .w_full()
                             .min_w_0()
                             .max_w(px(MESSAGE_WIDTH))
                             .rounded(px(8.))
@@ -1312,7 +1314,7 @@ impl TileView {
                     cx.entity().downgrade(),
                     accent,
                     None,
-                    None,
+                    Some(0.0),
                     cx,
                 );
                 div()
@@ -1322,6 +1324,7 @@ impl TileView {
                     .child(
                         div()
                             .w_full()
+                            .debug_selector(|| "bubble-assistant".into())
                             .min_w_0()
                             .max_w(px(MESSAGE_WIDTH))
                             .group("amsg")
@@ -1333,7 +1336,11 @@ impl TileView {
                             .flex_col()
                             .gap_1()
                             .text_size(px(fonts.font_body))
-                            .child(markdown)
+                            .child(
+                                div()
+                                    .debug_selector(|| "text-assistant".into())
+                                    .child(markdown),
+                            )
                             .child(
                                 // copy button shares the meta line: pinned left,
                                 // token flow + time pushed to the right

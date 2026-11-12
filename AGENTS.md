@@ -63,6 +63,11 @@ the tail follow still opens a longer chat at its newest message.
   drag's highlight only appeared when some store event happened to repaint the
   tile — a streaming chat looked live at random, an idle one did not. Do not
   narrow that observer back to the height alone.
+- Both message bubbles take the full `MESSAGE_WIDTH` measure (the prompt is
+  `w_full`, not shrink-wrapped), and `render_markdown` asks the `LiveEditor`
+  for `unbounded_column()` with `margin_x_em(0.0)`: the bubble's own padding
+  is the inset, not the editor's 2em side margin plus centered readable
+  column.
 - Follow state: send and the jump-to-latest button re-arm
   `FollowMode::Tail`; opening a fold pauses it (`pause_following_tail`).
   `TileView::following` mirrors the list for the button, refreshed from the
@@ -124,6 +129,12 @@ server and Warp Station is the client. Endpoint files are
   streams ride one WebSocket at `/api/remote.mux`. The launch token is
   exchanged at `/connect` for a `dsh-auth-*` cookie; the cookie dies with its
   WebSocket, so every reconnect re-exchanges it.
+- dsh's title projection has two shapes: `session/list` flattens
+  `projections.values.title` to a plain string, while a follow snapshot
+  carries the object (`{title, messageSeqs, source}`). `session/title` folds
+  into `session.updated` with `info.title`, and `Store::adopt_session_title`
+  moves the tile header, sidebar row and workspace section together. Reading
+  only the object shape from a list made every dsh chat show "New chat".
 - All network work is on a dedicated OS thread with its own tokio runtime.
   Never do file IO, HTTP or process work on the GPUI main thread. The UI talks
   to the net thread through async channels; state arrives already parsed.
@@ -138,6 +149,9 @@ cargo build -p warp-agent
 - `tests/complex_markdown_probe.rs` renders a hostile mixed-markdown reply
   through the same read-only `LiveEditor` the tile uses, so a parser or layout
   panic fails `cargo test`.
+- `tests/bubble_layout_probe.rs` opens the real window over a seeded user and
+  assistant message and proves both bubbles share one measure and their text
+  fills the bubble's padded box (no editor side margin or centered column).
 - `tests/transcript_list_probe.rs` proves the transcript list builds only a
   viewport of rows (not the whole chat), opens at the newest message and stays
   bounded when scrolled to the top.

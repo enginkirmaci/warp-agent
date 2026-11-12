@@ -32,6 +32,15 @@ impl Store {
                     let tracked_id = info.get("id").and_then(serde_json::Value::as_str);
                     let parent_id = info.get("parentID").and_then(serde_json::Value::as_str);
                     let agent = info.get("agent").and_then(serde_json::Value::as_str);
+                    // the server owns the title: dsh publishes it as
+                    // `session/title` and opencode revises it as the chat
+                    // earns a better one. Adopt it live so the tile header
+                    // and the sidebar row do not wait for a list refresh.
+                    if let Some(id) = tracked_id
+                        && let Some(title) = info.get("title").and_then(serde_json::Value::as_str)
+                    {
+                        self.adopt_session_title(id, title, cx);
+                    }
                     if self.track_session_info(tracked_id, parent_id, agent) {
                         // subagent tracking feeds the sidebar spinners too; rare
                         self.refresh_tile_agents();

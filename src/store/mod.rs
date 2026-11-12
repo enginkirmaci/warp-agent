@@ -2412,6 +2412,7 @@ pub(crate) mod test_support {
 mod command_flow_tests {
     use super::*;
     use crate::oc::{ApiRequest, NetCommand, UiEvent};
+    use serde_json::json;
     use std::ffi::OsString;
     use std::path::PathBuf;
 
@@ -2456,6 +2457,83 @@ mod command_flow_tests {
             }
             let _ = std::fs::remove_dir_all(&self.home);
         }
+    }
+
+    /// A dsh `session/title` arrives as `session.updated`; the tile header and
+    /// the sidebar row must both take the server's title, without waiting for
+    /// a list refresh.
+    #[gpui_kit::gpui::test]
+    fn a_streamed_session_title_reaches_the_tile_and_the_sidebar(cx: &mut gpui::TestAppContext) {
+        let _lock = super::test_support::lock_home();
+        let home = HomeGuard::new();
+        let folder = home.home.join("workspace");
+        std::fs::create_dir_all(&folder).expect("workspace");
+        let folder = folder.to_string_lossy().to_string();
+        let store = cx.update(Store::for_probe);
+        let key = cx.update(|cx| {
+            store.update(cx, |store, cx| {
+                store.add_workspace(&folder, cx);
+                let key = store.seed_probe_tile(
+                    &folder,
+                    "probe-session",
+                    DRAFT_TITLE,
+                    Vec::new(),
+                    false,
+                    cx,
+                );
+                store.sessions.push(SessionItem {
+                    id: "probe-session".into(),
+                    title: DRAFT_TITLE.into(),
+                    updated_ms: 1,
+                    created_ms: 1,
+                    is_pinned: false,
+                    is_selected: false,
+                    is_running: false,
+                    is_editing: false,
+                    draft_title: String::new(),
+                });
+                if let Some(ws) = store.workspace_by_path_mut(&folder) {
+                    ws.state.sessions.push("probe-session".into());
+                }
+                store.sync_workspace_chats(cx);
+                key
+            })
+        });
+
+        store.update(cx, |store, cx| {
+            store.on_net_event(
+                UiEvent::Event {
+                    ws_key: DSH_SERVER_KEY.into(),
+                    event: json!({
+                        "type": "session.updated",
+                        "properties": { "info": {
+                            "id": "probe-session",
+                            "title": "Chat bubble polish",
+                        } },
+                    }),
+                },
+                cx,
+            );
+        });
+
+        store.read_with(cx, |store, _| {
+            assert_eq!(
+                store.tile_by_key(&key).expect("the tile is open").title,
+                "Chat bubble polish"
+            );
+            assert_eq!(store.sessions[0].title, "Chat bubble polish");
+            let ws = store
+                .workspaces
+                .iter()
+                .find(|ws| ws.folder_path() == folder)
+                .expect("the workspace exists");
+            let chat = ws
+                .chats
+                .iter()
+                .find(|chat| chat.id == "probe-session")
+                .expect("the sidebar row exists");
+            assert_eq!(chat.title, "Chat bubble polish");
+        });
     }
 
     /// The dsh draft's first `/` must open the agent-scoped catalog: start the

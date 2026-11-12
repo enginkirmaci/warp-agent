@@ -1,0 +1,10 @@
+# Build and packaging facts read by the app's own build and release tooling.
+[app]
+package = "warp-agent"
+icon_prefix = "warpagent"
+scalable_svg = "packaging/linux/icons/warpagent.svg"
+notes = """
+Chat client over opencode serve and dsh web. Owns the loopback door protocol
+(~/.warp/agent/ipc.port + ipc.token) Warp Station consumes: changing door
+commands, the file names or the location is a cross-app contract change.
+"""

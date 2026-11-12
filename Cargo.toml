@@ -1,64 +1,63 @@
 [package]
 name = "warp-agent"
-version.workspace = true
-edition.workspace = true
+version = "0.1.1"
+edition = "2024"
 description = "WarpAgent — a tile-grid chat client for opencode serve, rebuilt on GPUI"
-license.workspace = true
+license = "GPL-3.0"
+repository = "https://github.com/enginkirmaci/warp-agent"
 publish = false
 
 # Library plus a thin binary: the lib boundary lets headless probes open the
-# real window; src/main.rs only carries the console attribute and calls run()
-# (see AGENTS.md).
+# real window; src/main.rs only carries the console attribute and calls run().
 
 [dependencies]
-# suite crates — the paths live in [workspace.dependencies]
-warpui-kit-core = { workspace = true }
+# kit line: pinned by tag, patched to kits/ by warp-suite's local build
+warpui-kit-core = { git = "https://github.com/enginkirmaci/warp-suite", tag = "kits-v0.1.11", package = "warpui-kit-core" }
 # all-languages also feeds the chat code-block grammars; a removed diff dep
 # would take every tree-sitter grammar with it
-warpui-kit-diff = { workspace = true, features = ["all-languages"] }
-warpui-kit-markdown = { workspace = true, features = ["mermaid", "all-languages"] }
-warpui-kit-picker = { workspace = true }
-warpui-kit-platform = { workspace = true }
+warpui-kit-diff = { git = "https://github.com/enginkirmaci/warp-suite", tag = "kits-v0.1.11", package = "warpui-kit-diff", features = ["all-languages"] }
+warpui-kit-markdown = { git = "https://github.com/enginkirmaci/warp-suite", tag = "kits-v0.1.11", package = "warpui-kit-markdown", features = ["mermaid", "all-languages"] }
+warpui-kit-picker = { git = "https://github.com/enginkirmaci/warp-suite", tag = "kits-v0.1.11", package = "warpui-kit-picker" }
+warpui-kit-platform = { git = "https://github.com/enginkirmaci/warp-suite", tag = "kits-v0.1.11", package = "warpui-kit-platform" }
 
-# the gpui stack, pinned at the workspace root
-gpui = { workspace = true }
-gpui_platform = { workspace = true }
-gpui-kit = { workspace = true }
+# the gpui stack, pinned here because the app builds standalone
+gpui = { package = "gpui-pre", version = "=0.3.11" }
+gpui_platform = { package = "gpui-pre-platform", version = "=0.3.11", features = ["wayland", "x11"] }
+gpui-kit = "0.9"
 
 # third-party
-anyhow = { workspace = true }
-async-channel = { workspace = true }
-chrono = { workspace = true }
-futures-util = { workspace = true }
-image = { workspace = true }
+anyhow = "1"
+async-channel = "2"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+futures-util = "0.3"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp"] }
 # the same parser gpui-base's TextView runs: the Markdown guard probes a text
-# with it before that text reaches a TextView (a parser panic there would abort
-# the render); keep the major in step with gpui-base's `markdown` requirement
+# with it before that text reaches a TextView; keep the major in step with
+# gpui-base's `markdown` requirement
 markdown = "1"
-reqwest = { workspace = true, features = ["query"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "stream", "query"] }
 # debug-embed: embed assets at compile time in debug builds too — without it
-# rust-embed resolves "assets" against the process CWD at runtime, so the app
-# only finds its icons when launched from the repo root
-rust-embed = { workspace = true, features = ["debug-embed"] }
-serde = { workspace = true, features = ["derive"] }
-serde_json = { workspace = true }
-smallvec = { workspace = true }
-tokio = { workspace = true }
+# rust-embed resolves "assets" against the process CWD at runtime
+rust-embed = { version = "8", features = ["debug-embed"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+smallvec = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "time", "net", "io-util", "sync"] }
 # dsh web client: plain ws:// on loopback, no TLS features needed
 tokio-tungstenite = { version = "0.30", default-features = false, features = ["connect"] }
-tracing = { workspace = true }
-tracing-appender = { workspace = true }
-tracing-subscriber = { workspace = true }
-unicode-segmentation = { workspace = true }
+tracing = "0.1"
+tracing-appender = "0.2"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+unicode-segmentation = "1"
 
 [dev-dependencies]
 # headless chat probes (tests/*_probe.rs); feature-unifies with the normal
 # gpui-kit dep only under `cargo test`
-gpui-kit = { workspace = true, features = ["test-support"] }
+gpui-kit = { version = "0.9", features = ["test-support"] }
 
 [build-dependencies]
-warpui-kit-build = { workspace = true }
+warpui-kit-build = { git = "https://github.com/enginkirmaci/warp-suite", tag = "kits-v0.1.11", package = "warpui-kit-build" }
 
 [target.'cfg(unix)'.dependencies]
 # PR_SET_PDEATHSIG for the spawned serve/dsh children
-libc = { workspace = true }
+libc = "0.2"

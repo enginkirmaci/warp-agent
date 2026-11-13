@@ -11,6 +11,7 @@ mod oc;
 mod paths;
 mod services;
 mod settings;
+pub mod shortcuts;
 pub mod store;
 pub mod theme;
 pub mod ui;

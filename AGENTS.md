@@ -175,8 +175,18 @@ cargo build -p warp-agent
 - `tests/question_text_probe.rs` proves a selection in a question's text
   survives typing in the custom-answer field, the field keeps focus and the
   selection's Copy menu still works.
-- The capture hook is `WARP_AGENT_PAGE`: `settings`, `settings-chat`,
-  `settings-permissions`, `settings-server`.
+- `tests/shortcuts_probe.rs` opens the real window's keyboard sheet through
+  `WARP_AGENT_SHORTCUTS=1`, `?`, Ctrl+/, the titlebar icon and the scrim, and
+  proves the card takes focus, Escape closes it first, every close path
+  returns the keys to the window root, and a focused field keeps `?` as text.
+  The sheet's rows are pinned by unit tests in `src/shortcuts.rs`.
+- `tests/pane_moves_probe.rs` drives the sidebar and three seeded transcripts
+  through `warpui_kit_core::pane_nav` and proves the grid order, the row ends
+  (no wrapping), a hidden sidebar not being a stop, transcript scrolling
+  surviving the shared keys, and the focused composer keeping its own keys.
+- The capture hooks are `WARP_AGENT_PAGE`: `settings`, `settings-chat`,
+  `settings-permissions`, `settings-server`; and `WARP_AGENT_SHORTCUTS=1`
+  opens the keyboard sheet on launch.
 
 ## Platform notes
 

@@ -18,6 +18,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use warpui_kit_core::A11y as _;
 use warpui_kit_core::list_nav;
+use warpui_kit_core::pane_nav::{self, PaneNav};
 use warpui_kit_core::settings as kit;
 use warpui_kit_core::shell;
 use warpui_kit_core::text_menu::{self, TextMenuAnchor};
@@ -439,6 +440,25 @@ pub struct WarpWindow {
     /// The OS title the last frame set: the same activity line as the
     /// titlebar chip, written only when it changes.
     window_title: String,
+    /// The window root's focus. The body is not made of text fields, so
+    /// without a root handle Escape, `?` and Ctrl+\ only fire after an input
+    /// has been clicked.
+    root_focus: FocusHandle,
+    /// The keyboard sheet is up over everything.
+    shortcuts_open: bool,
+    /// The sheet's focus, tracked by the card so the list underneath stops
+    /// taking keys while it is open.
+    shortcuts_focus: FocusHandle,
+    /// E2E hook: WARP_AGENT_SHORTCUTS=1 opens the sheet on launch (a hidden
+    /// window takes no pointer, so a capture needs the card to open itself).
+    open_shortcuts_on_first_render: bool,
+    /// The window has no `Window` at construction, so the root takes the
+    /// keyboard on the first frame instead.
+    root_focus_pending: bool,
+    /// The focusable panes drawn this frame, left to right: the sidebar and
+    /// then each mounted tile's transcript. Cleared at the top of the frame
+    /// and shared with the views that draw them.
+    pane_nav: Rc<PaneNav>,
 }
 
 impl WarpWindow {
@@ -451,6 +471,9 @@ impl WarpWindow {
         let font_meta = store.read(cx).fonts.font_meta;
         let tooltip_overlay = tooltip::install(cx, font_meta);
         let text_menu = text_menu::install(cx);
+        // E2E hook: WARP_AGENT_SHORTCUTS=1 opens the sheet on launch (a hidden
+        // window takes no pointer, so a capture needs the card to open itself).
+        let open_shortcuts = matches!(std::env::var("WARP_AGENT_SHORTCUTS").as_deref(), Ok("1"));
         Self {
             store,
             tile_views: HashMap::new(),
@@ -496,6 +519,12 @@ impl WarpWindow {
             sidebar_focus: cx.focus_handle(),
             sidebar_scroll: UniformListScrollHandle::default(),
             window_title: String::new(),
+            root_focus: cx.focus_handle(),
+            shortcuts_open: false,
+            shortcuts_focus: cx.focus_handle(),
+            open_shortcuts_on_first_render: open_shortcuts,
+            root_focus_pending: true,
+            pane_nav: Rc::new(PaneNav::new()),
         }
     }
 }
@@ -547,6 +576,25 @@ impl Render for WarpWindow {
             window.set_window_title(&title);
             self.window_title = title;
         }
+        // The pane order is rebuilt every frame: a list that is not drawn this
+        // time stops being a `←`/`→` stop.
+        self.pane_nav.begin_frame();
+        // The window has no focus until the first frame; without this root the
+        // window-level chords only fire after an input has been clicked.
+        if self.root_focus_pending {
+            self.root_focus_pending = false;
+            window.focus(&self.root_focus, cx);
+        }
+        if self.open_shortcuts_on_first_render {
+            self.open_shortcuts_on_first_render = false;
+            self.open_shortcuts(window, cx);
+        }
+        // The card owns the keyboard while it is up: if a node that took focus
+        // left the tree, keep the sheet's focus instead of handing the keys
+        // back to the lists behind it.
+        if self.shortcuts_open && !self.shortcuts_focus.is_focused(window) {
+            window.focus(&self.shortcuts_focus, cx);
+        }
         if let Some(section) = self.open_settings_on_first_render.take() {
             self.open_settings(window, cx);
             self.settings_section = section;
@@ -596,16 +644,46 @@ impl Render for WarpWindow {
         content = content.child(self.render_main(list_shown, window, cx));
 
         let mut root = div()
+            .id("app-root")
+            .role(Role::Application)
+            .aria_label("Warp Agent")
             .size_full()
             .flex()
             .flex_col()
             .bg(theme::window_chrome())
             .text_color(theme::text())
             .font_family(theme::ui_font())
-            // the shell's Ctrl+\ hides the list; the title bar button does the same
-            .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
+            // the window root answers the two chords no list owns: `?`/Ctrl+/
+            // for the shortcut sheet and Ctrl+\ for the list. The sheet is
+            // modal: while it is up only Escape and the help chord answer.
+            .track_focus(&self.root_focus)
+            .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, window, cx| {
                 let modifiers = event.keystroke.modifiers;
-                if modifiers.control && !modifiers.shift && event.keystroke.key == "\\" {
+                let key = event.keystroke.key.as_str();
+                // `?` and Ctrl+/ are the keyboard sheet; neither fires while a
+                // field owns the keys, so typing a question mark stays typing.
+                let in_field = window
+                    .context_stack()
+                    .iter()
+                    .any(|context| context.contains("Input"));
+                let help_key = !modifiers.alt
+                    && !modifiers.platform
+                    && (event.keystroke.key_char.as_deref() == Some("?")
+                        || key == "?"
+                        || (key == "/" && (modifiers.shift || modifiers.control)));
+                if this.shortcuts_open {
+                    if key == "escape" || help_key {
+                        this.close_shortcuts(window, cx);
+                    }
+                    cx.stop_propagation();
+                    return;
+                }
+                if help_key && !in_field {
+                    this.open_shortcuts(window, cx);
+                    cx.stop_propagation();
+                    return;
+                }
+                if modifiers.control && !modifiers.shift && key == "\\" {
                     let visible = this.store.read(cx).sidebar_visible;
                     this.store
                         .update(cx, |s, cx| s.set_sidebar_visible(!visible, cx));
@@ -725,6 +803,20 @@ impl Render for WarpWindow {
             ));
         }
 
+        if self.shortcuts_open {
+            let groups = crate::shortcuts::groups();
+            let owner = cx.entity();
+            root = root.child(warpui_kit_core::shortcuts::dialog(
+                "shortcut-sheet",
+                "Keyboard shortcuts",
+                &groups,
+                &self.shortcuts_focus,
+                move |_, window, cx| {
+                    owner.update(cx, |this, cx| this.close_shortcuts(window, cx));
+                },
+            ));
+        }
+
         // tooltips paint above everything, menus included
         root.child(self.tooltip_overlay.clone())
     }
@@ -821,6 +913,29 @@ impl WarpWindow {
         self.settings_leafs = settings.leafs;
         self.settings_model_picker = settings.model_picker;
         self.settings_variant_picker = settings.variant_picker;
+        cx.notify();
+    }
+
+    /// Opens the keyboard sheet and gives it the keys, so no list moves under
+    /// the card.
+    fn open_shortcuts(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.shortcuts_open {
+            return;
+        }
+        self.shortcuts_open = true;
+        window.focus(&self.shortcuts_focus, cx);
+        cx.notify();
+    }
+
+    /// Closes the sheet and hands the keyboard back to the window root; a
+    /// focused element that leaves the tree would otherwise leave the window's
+    /// keys dead until the next click.
+    fn close_shortcuts(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.shortcuts_open {
+            return;
+        }
+        self.shortcuts_open = false;
+        window.focus(&self.root_focus, cx);
         cx.notify();
     }
 
@@ -964,6 +1079,31 @@ impl WarpWindow {
                         }
                     }),
                     "Open Warp Station",
+                )),
+            )
+            .child(
+                tip(
+                    div()
+                        .id("shortcuts-toggle")
+                        .debug_selector(|| "shortcuts-toggle".into())
+                        .role(Role::Button)
+                        .aria_label("Keyboard shortcuts")
+                        .cursor_pointer()
+                        .w(px(36.))
+                        .h(px(shell::scaled(shell::TITLE_BAR_HEIGHT)))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .hover(|s| s.bg(theme::raised()))
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.open_shortcuts(window, cx);
+                        })),
+                    "Keyboard shortcuts",
+                )
+                .child(crate::ui::icon(
+                    "icons/keyboard.svg",
+                    px(fonts.icon_medium),
+                    theme::text_muted(),
                 )),
             )
             .child(
@@ -1128,6 +1268,26 @@ impl WarpWindow {
         self.sidebar_focus.clone()
     }
 
+    /// Whether the keyboard sheet is up, for the real-view probe.
+    #[doc(hidden)]
+    pub fn shortcuts_open_for_probe(&self) -> bool {
+        self.shortcuts_open
+    }
+
+    /// The sheet card's focus handle: the probe proves the card holds the
+    /// keys while the lists underneath do not.
+    #[doc(hidden)]
+    pub fn shortcuts_focus_handle(&self) -> FocusHandle {
+        self.shortcuts_focus.clone()
+    }
+
+    /// The window root's focus handle: every close path returns the keys to
+    /// it.
+    #[doc(hidden)]
+    pub fn root_focus_handle(&self) -> FocusHandle {
+        self.root_focus.clone()
+    }
+
     /// `workspace:<path>` or `chat:<id>`: the private cursor enum stays
     /// private while a probe can still assert where the keyboard is.
     #[doc(hidden)]
@@ -1160,9 +1320,18 @@ impl WarpWindow {
     fn handle_sidebar_key(
         &mut self,
         event: &gpui::KeyDownEvent,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
+        // The sidebar is the row's start: `←`/Shift+Tab go nowhere, while
+        // `→`/Tab hand the keys to the first drawn tile's transcript.
+        if let Some(dir) = pane_nav::direction(event)
+            && self
+                .pane_nav
+                .move_from(&self.sidebar_focus, dir, window, cx)
+        {
+            return true;
+        }
         if event.keystroke.modifiers.modified() {
             return false;
         }
@@ -1250,6 +1419,9 @@ impl WarpWindow {
     // ---- sidebar ---------------------------------------------------------------
 
     fn render_sidebar(&mut self, window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
+        // The sidebar is the frame's first pane when it is drawn; a hidden
+        // list registers nothing and stops being a stop on the next frame.
+        self.pane_nav.register(&self.sidebar_focus);
         let (fonts, width) = {
             let store = self.store.read(cx);
             (store.fonts, store.sidebar_shown_width)
@@ -2548,7 +2720,9 @@ impl WarpWindow {
             if !self.tile_views.contains_key(key) {
                 let store_handle = self.store.clone();
                 let key_clone = key.clone();
-                let view = cx.new(|cx| TileView::new(store_handle, key_clone, window, cx));
+                let pane_nav = self.pane_nav.clone();
+                let view =
+                    cx.new(|cx| TileView::new(store_handle, key_clone, pane_nav, window, cx));
                 self.tile_views.insert(key.clone(), view);
             }
         }
@@ -2596,6 +2770,11 @@ impl WarpWindow {
             .p(px(GRID_GAP));
         for key in &keys {
             if let Some(view) = self.tile_views.get(key) {
+                // The grid lays the tiles out row-major in `open_tiles`
+                // order, so this is the left-to-right pane order too. A tile
+                // that is not mounted is not in `keys` and is not a stop.
+                let transcript = view.read(cx).transcript_focus_handle();
+                self.pane_nav.register(&transcript);
                 // cached: the tile's render only runs when its own revision
                 // entity fired (store.touch_tile) — one streaming tile no
                 // longer rebuilds every open transcript per coalesced frame.

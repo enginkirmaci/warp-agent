@@ -72,6 +72,7 @@ use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::Arc;
+use warpui_kit_core::pane_nav::{self, PaneNav};
 use warpui_kit_core::{list_nav, motion, shell, text_menu};
 use warpui_kit_diff::{render_code, render_diff, sniff_lang};
 use warpui_kit_markdown::LiveEditorState;
@@ -220,6 +221,10 @@ pub struct TileView {
     list_state: ListState,
     /// The transcript's keyboard focus: arrows scroll it.
     transcript_focus: FocusHandle,
+    /// The window's pane order: `←`/`→` and `Tab`/`Shift+Tab` hand the keys to
+    /// the pane beside this transcript; the window registers this tile's
+    /// handle only while the tile is mounted.
+    pane_nav: Rc<PaneNav>,
     /// The rows the list's item count mirrors, built on the last render. A
     /// changed tail is spliced into the list rather than reset, which keeps
     /// the measured heights of everything above it.
@@ -527,6 +532,13 @@ impl TileView {
         &self.last_field_text
     }
 
+    /// The composer's focus handle, so the pane probe proves a text field
+    /// keeps its own keys.
+    #[doc(hidden)]
+    pub fn composer_focus_for_probe(&self, cx: &gpui::App) -> FocusHandle {
+        self.composer.read(cx).focus_handle(cx)
+    }
+
     /// Decoded image for a transcript item or composer attachment, cached by a
     /// stable key (item id / "att{key}") — both name immutable bytes, so an
     /// entry never goes stale, only unreachable (pruned after each render).
@@ -687,6 +699,7 @@ impl TileView {
     pub fn new(
         store: Entity<Store>,
         key: String,
+        pane_nav: Rc<PaneNav>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -846,6 +859,7 @@ impl TileView {
             store,
             list_state,
             transcript_focus: cx.focus_handle(),
+            pane_nav,
             rows: Rc::new(Vec::new()),
             rows_fold_rev: u64::MAX,
             following: true,
@@ -4583,7 +4597,21 @@ impl Render for TileView {
             // and the composer or a folded body keeps its own
             .track_focus(&self.transcript_focus)
             .on_key_down(cx.listener(|this, event, window, cx| {
+                // The scroll keys keep the transcript: only a key this handler
+                // leaves alone is a pane move, so `↑`/`↓`/`Home`/`End` never
+                // hand the keyboard away mid-scroll.
                 if this.handle_transcript_key(event, window, cx) {
+                    cx.stop_propagation();
+                    return;
+                }
+                // The window registered the sidebar (when drawn) and every
+                // mounted tile in grid order, so no wrapping and a hidden
+                // neighbour simply has no stop.
+                if let Some(dir) = pane_nav::direction(event)
+                    && this
+                        .pane_nav
+                        .move_from(&this.transcript_focus, dir, window, cx)
+                {
                     cx.stop_propagation();
                 }
             }))

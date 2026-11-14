@@ -1176,13 +1176,13 @@ impl WarpWindow {
                 )
                 .child(if visible {
                     crate::ui::icon(
-                        "icons/panel-left-close.svg",
+                        "icons/panel-left-on.svg",
                         px(fonts.icon_medium),
                         theme::text_muted(),
                     )
                 } else {
                     crate::ui::icon(
-                        "icons/panel-left-open.svg",
+                        "icons/panel-left-off.svg",
                         px(fonts.icon_medium),
                         theme::text_muted(),
                     )

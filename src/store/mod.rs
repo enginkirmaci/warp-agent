@@ -399,14 +399,20 @@ pub struct FileSuggest {
 
 impl Store {
     pub fn new(cx: &mut App, net: crate::oc::NetSender) -> Entity<Self> {
-        let settings = AppSettings::load();
+        let mut settings = AppSettings::load();
         let mut ui = UiState::load();
-        // one-time migration: the pre-settings auto-allow choice moves into settings.json
-        if settings.auto_allow_always.is_none() && ui.auto_allow_always.is_some() {
-            // keep reading from ui state like the C# fallback until settings has it
+        // one-time migration: the pre-settings auto-allow choice moves into
+        // settings.json, which owns the switch from then on. The ui key is
+        // read here and never again.
+        let legacy_auto_allow = ui.auto_allow_always.take();
+        if settings.auto_allow_always.is_none()
+            && let Some(legacy) = legacy_auto_allow
+        {
+            settings.auto_allow_always = Some(legacy);
+            settings.save();
         }
         let fonts = theme::active_tokens();
-        let auto_allow = ui.auto_allow_always.unwrap_or(true);
+        let auto_allow = settings.auto_allow_always.unwrap_or(true);
 
         if ui.workspaces.is_empty()
             && let Some(folder) = ui.folder.clone().filter(|f| !f.trim().is_empty())
@@ -679,7 +685,6 @@ impl Store {
 
     pub fn save_state(&mut self) {
         self.ui.active_workspace = self.selected_workspace.clone();
-        self.ui.auto_allow_always = Some(self.auto_allow);
         self.ui.mcp_disabled_workspaces = {
             let mut paths: Vec<String> = self.mcp_disabled.iter().cloned().collect();
             paths.sort();
@@ -1186,6 +1191,16 @@ impl Store {
 
     pub fn is_busy(&self, session_id: &str) -> bool {
         self.running_by_session.contains(session_id)
+    }
+
+    /// Running chats the sidebar shows. A background run's chat stays hidden
+    /// until its run retires it, so it does not count: the door client owns
+    /// that result and no row spins for it.
+    pub fn running_chats(&self) -> usize {
+        self.running_by_session
+            .iter()
+            .filter(|id| !self.hidden_sessions.contains(*id))
+            .count()
     }
 
     pub fn tile_columns(&self) -> usize {
@@ -1998,12 +2013,22 @@ impl Store {
         cx.notify();
     }
 
+    /// The composer shield's switch. It writes the one owner, the Settings
+    /// key, and persists it, so both switches and every later settings save
+    /// read the same value.
+    pub fn set_auto_allow(&mut self, allowed: bool, cx: &mut Context<Self>) {
+        self.auto_allow = allowed;
+        self.settings.auto_allow_always = Some(allowed);
+        self.settings.save();
+        self.repaint(cx);
+    }
+
     /// Settings page applied: pushes persisted values back into live state.
     pub fn apply_saved_settings(&mut self, cx: &mut Context<Self>) {
-        if let Some(allowed) = self.settings.auto_allow_always {
-            self.auto_allow = allowed;
-        }
-        self.ui.auto_allow_always = Some(self.auto_allow);
+        // settings.auto_allow_always owns the switch; the live flag only ever
+        // mirrors it, so a settings save cannot re-enable what the composer
+        // turned off
+        self.auto_allow = self.settings.auto_allow_always.unwrap_or(true);
         self.accent = theme::accent_colors();
         // re-map the kit theme so input selection/ring/primary follow the preset
         // (Theme::update refreshes every window)

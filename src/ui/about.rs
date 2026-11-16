@@ -19,10 +19,6 @@ impl WarpWindow {
         let width = self.store.read(cx).sidebar_shown_width;
         let selected = self.about_selected;
         let current = AppId::Agent;
-        if self.about_members.is_empty() {
-            let build = warpui_kit_core::build_info!();
-            self.about_members = about::detect_installed(current, &build);
-        }
 
         let entity = cx.entity();
         let pick = entity.clone();
@@ -68,11 +64,36 @@ impl WarpWindow {
         if self.store.read(cx).is_about_open {
             return;
         }
-        self.about_members.clear();
         // the settings page flushes its pending field commit on the way out
         self.close_settings(cx);
         self.store.update(cx, |store, _| store.is_about_open = true);
+        self.start_about_scan(cx);
         cx.notify();
+    }
+
+    /// The family scan spawns a `<sibling> --version` per installed member, so
+    /// it runs once on the background executor instead of inside a frame. The
+    /// seeded running app keeps the screen drawn until the list lands; opening
+    /// About again reuses that list instead of probing again.
+    fn start_about_scan(&mut self, cx: &mut Context<Self>) {
+        use warpui_kit_core::about::{self, AppId};
+
+        if self.about_scan_started {
+            return;
+        }
+        self.about_scan_started = true;
+        let build = warpui_kit_core::build_info!();
+        cx.spawn(async move |this, cx| {
+            let members = cx
+                .background_executor()
+                .spawn(async move { about::detect_installed(AppId::Agent, &build) })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.about_members = members;
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     pub(crate) fn close_about(&mut self, cx: &mut Context<Self>) {

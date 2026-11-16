@@ -47,7 +47,10 @@ pub async fn connect_with_token(base_url: &str, token: &str) -> Result<String> {
         .query(&[("token", token), ("interactions", "answer")])
         .send()
         .await
-        .context("dsh /connect failed")?;
+        // `reqwest`'s Display embeds the request URL, and this one carries the
+        // `/connect?token=…` credential: a failed connect would otherwise put
+        // the door's token in the log. `without_url` keeps the reason only.
+        .map_err(|err| anyhow::anyhow!("dsh /connect failed: {}", err.without_url()))?;
     for (name, value) in resp.headers().iter() {
         if name.as_str() == "set-cookie"
             && let Ok(full) = value.to_str()

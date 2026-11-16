@@ -1646,7 +1646,7 @@ impl TileView {
                             // a running tool carries the family's spinner; the
                             // word beside it stays when motion is off
                             .when(tool.status == "running", |d| {
-                                d.child(
+                                d.child(tip(
                                     div()
                                         .id(format!("tool-spin-status-{item_id}"))
                                         .role(Role::Status)
@@ -1661,7 +1661,8 @@ impl TileView {
                                             px(fonts.icon_tiny),
                                             theme::BEHIND,
                                         )),
-                                )
+                                    "Running tool",
+                                ))
                             })
                             .child(SharedString::from(tool.status.clone())),
                     ),
@@ -2833,7 +2834,7 @@ impl TileView {
                         ));
                 } else {
                     // Running: the same spinner the tree uses, in `behind`
-                    stat = stat.child(
+                    stat = stat.child(tip(
                         div()
                             .id(SharedString::from(format!(
                                 "tile-state-status-{}",
@@ -2852,7 +2853,8 @@ impl TileView {
                                 px(fonts.icon_tiny),
                                 theme::BEHIND,
                             )),
-                    );
+                        "Running chat",
+                    ));
                 }
                 d.child(stat.child(word))
             })
@@ -3540,19 +3542,24 @@ impl TileView {
                                 )
                             } else if task.in_progress() {
                                 (
-                                    div()
-                                        .id(SharedString::from(format!("task-status-{task_ix}")))
-                                        .role(Role::Status)
-                                        .aria_label("Running task")
-                                        .flex()
-                                        .items_center()
-                                        .child(motion::spinner(
-                                            "task-spinner",
-                                            "icons/spinner.svg",
-                                            px(fonts.icon_small),
-                                            theme::BEHIND,
-                                        ))
-                                        .into_any_element(),
+                                    tip(
+                                        div()
+                                            .id(SharedString::from(format!(
+                                                "task-status-{task_ix}"
+                                            )))
+                                            .role(Role::Status)
+                                            .aria_label("Running task")
+                                            .flex()
+                                            .items_center()
+                                            .child(motion::spinner(
+                                                "task-spinner",
+                                                "icons/spinner.svg",
+                                                px(fonts.icon_small),
+                                                theme::BEHIND,
+                                            )),
+                                        "Running task",
+                                    )
+                                    .into_any_element(),
                                     theme::text(),
                                 )
                             } else if task.cancelled() {
@@ -4096,10 +4103,7 @@ impl TileView {
                                     let store = self.store.clone();
                                     move |_, _, cx| {
                                         store.update(cx, |s, cx| {
-                                            s.auto_allow = !s.auto_allow;
-                                            s.ui.auto_allow_always = Some(s.auto_allow);
-                                            s.save_state();
-                                            cx.notify();
+                                            s.set_auto_allow(!s.auto_allow, cx);
                                         });
                                     }
                                 }),

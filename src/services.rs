@@ -41,9 +41,11 @@ pub fn open_folder(path: &str) -> Result<(), String> {
 }
 
 /// Launches a sibling Warp app by the binary name the suite installs. The
-/// window is the other app's; this process only hands it over.
+/// window is the other app's; this process only hands it over. The kit's
+/// `sibling::open` prefers the binary next to `current_exe()` (the bundle's
+/// `bin/`) over a stale copy on `PATH`, and hides the console on Windows.
 pub fn launch_sibling(binary: &str) -> Result<(), String> {
-    spawn_detached(std::process::Command::new(binary)).map_err(|err| err.to_string())
+    warpui_kit_platform::sibling::open(binary)
 }
 
 /// Hooks the store up to scale changes; each one re-reads the ladder and

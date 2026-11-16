@@ -373,9 +373,12 @@ pub struct WarpWindow {
     /// About: which suite member the detail shows; the app you are in until
     /// another is picked.
     pub(crate) about_selected: warpui_kit_core::about::AppId,
-    /// The installed members the About list renders; probed on first open and
-    /// refreshed each time About is picked from the rail.
+    /// The installed members the About list renders: the running app from its
+    /// own build facts, then the siblings the one background scan finds.
     pub(crate) about_members: Vec<warpui_kit_core::about::Member>,
+    /// The family scan has been started; reopening About keeps the list it
+    /// landed instead of probing again.
+    pub(crate) about_scan_started: bool,
     /// The license card is up over the About screen.
     pub(crate) about_license_open: bool,
     /// The license document, built the first time the card opens: read-only
@@ -490,7 +493,13 @@ impl WarpWindow {
             settings_buffers,
             settings_section: SettingsSection::Appearance,
             about_selected: warpui_kit_core::about::AppId::Agent,
-            about_members: Vec::new(),
+            // the screen never renders empty: the running app needs no probe,
+            // the siblings land from the one background scan
+            about_members: vec![warpui_kit_core::about::current_member(
+                warpui_kit_core::about::AppId::Agent,
+                &warpui_kit_core::build_info!(),
+            )],
+            about_scan_started: false,
             about_license_open: false,
             about_license: None,
             settings_harness,
@@ -566,14 +575,10 @@ fn execute_menu_action(store: &Entity<Store>, action: &SideMenuAction, cx: &mut 
 
 impl Render for WarpWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl gpui::IntoElement {
-        let running = {
-            let store = self.store.read(cx);
-            store
-                .open_tiles
-                .iter()
-                .filter(|tile| !tile.background && tile.is_busy(store))
-                .count()
-        };
+        // the chip and the OS title count the chats the sidebar shows as
+        // running — a closed tile keeps its chat running, so the open tiles
+        // alone would say nothing runs while work does
+        let running = self.store.read(cx).running_chats();
         let activity = (running > 0).then(|| format!("{running} running"));
         let title = warpui_kit_core::activity::activity_title("Warp Agent", activity.as_deref());
         if self.window_title != title {
@@ -1033,14 +1038,9 @@ impl WarpWindow {
             }
         };
         let store_handle = self.store.clone();
-        let running = {
-            let store = self.store.read(cx);
-            store
-                .open_tiles
-                .iter()
-                .filter(|t| !t.background && t.is_busy(store))
-                .count()
-        };
+        // the chip counts the chats the sidebar shows as running, so it keeps
+        // naming work whose tile was closed
+        let running = self.store.read(cx).running_chats();
         shell::title_bar()
             .pl_3()
             .child(
@@ -1464,11 +1464,7 @@ impl WarpWindow {
             let store = self.store.read(cx);
             (
                 store.tiles_waiting(),
-                store
-                    .open_tiles
-                    .iter()
-                    .filter(|t| !t.background && t.is_busy(store))
-                    .count(),
+                store.running_chats(),
                 store.open_tiles.iter().filter(|t| !t.background).count(),
             )
         };
@@ -2186,12 +2182,24 @@ impl WarpWindow {
             crate::ui::icon("icons/shield.svg", px(fonts.icon_tiny), theme::CHANGES)
                 .into_any_element()
         } else if chat.is_running {
-            warpui_kit_core::motion::spinner(
-                SharedString::from(format!("chat-spinner-{id}")),
-                "icons/spinner.svg",
-                px(fonts.icon_tiny),
-                theme::BEHIND,
+            // the gutter is 16 px: no room for the word, so the row's running
+            // state carries its accessible name and tooltip instead
+            tip(
+                div()
+                    .id(SharedString::from(format!("chat-spin-{id}")))
+                    .role(Role::Status)
+                    .aria_label("Running chat")
+                    .flex()
+                    .items_center()
+                    .child(warpui_kit_core::motion::spinner(
+                        SharedString::from(format!("chat-spinner-{id}")),
+                        "icons/spinner.svg",
+                        px(fonts.icon_tiny),
+                        theme::BEHIND,
+                    )),
+                "Running",
             )
+            .into_any_element()
         } else {
             tip(
                 div()

@@ -176,6 +176,20 @@ pub fn run() {
             )
             .unwrap();
 
+            // a quit that does not go through the window must still stop the
+            // long-lived children: on non-Linux builds nothing kills them with
+            // this process, and another quit path would leave `opencode serve`
+            // / `dsh web` running. Store::shutdown is idempotent, so the
+            // window path below may call it again.
+            let quit_store = store.downgrade();
+            cx.on_app_quit(move |cx| {
+                if let Some(store) = quit_store.upgrade() {
+                    store.update(cx, |s, _| s.shutdown());
+                }
+                async {}
+            })
+            .detach();
+
             // closing the window stops every spawned server, then quits
             let shutdown_store = store.downgrade();
             cx.on_window_closed(move |cx, _window_id| {

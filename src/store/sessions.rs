@@ -164,7 +164,10 @@ impl Store {
             .collect();
         if !gone.is_empty() {
             if let Some(ws) = self.workspace_by_path_mut(ws_key) {
-                ws.state.sessions.retain(|id| alive.contains(id));
+                // remove only this list's own missing ids: the workspace keeps
+                // both harnesses' chats, and the other harness's list is the
+                // only one that can report its ids gone
+                ws.state.sessions.retain(|id| !gone.contains(id));
             }
             for id in &gone {
                 self.workspace_by_session.remove(id);

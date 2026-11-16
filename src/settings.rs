@@ -74,6 +74,9 @@ pub struct AppSettings {
     pub default_variant: Option<String>,
     pub default_variant_highest: bool,
     pub default_agent: Option<String>,
+    /// The one owner of the auto-allow switch: the composer shield and the
+    /// Settings switch both write this key. `None` until the first save or the
+    /// one-time migration from `ui.json`.
     pub auto_allow_always: Option<bool>,
     pub auto_allow_instant: bool,
     #[serde(default = "d1")]
@@ -184,8 +187,23 @@ impl AppSettings {
                 let _ = store.save(&settings);
                 settings
             }
+            Err(err @ Error::Newer { .. }) => {
+                tracing::warn!(
+                    "{} was written by a newer build ({err}); leaving it alone",
+                    path.display()
+                );
+                Self::default()
+            }
             Err(err) => {
-                tracing::warn!("could not read {}: {err}", path.display());
+                // move the corrupt file aside: falling back to defaults and
+                // then overwriting it would destroy the user's settings with
+                // no trace
+                tracing::warn!(
+                    "{} unreadable ({}); moving it aside, using defaults",
+                    path.display(),
+                    err
+                );
+                let _ = fs::rename(&path, path.with_extension("json.bad"));
                 Self::default()
             }
         }
@@ -232,6 +250,8 @@ pub struct UiState {
     pub variant: Option<String>,
     pub agent: Option<String>,
     pub folder: Option<String>,
+    /// The pre-settings auto-allow switch: read once by the startup migration
+    /// into `settings.json`, never written or read after that.
     pub auto_allow_always: Option<bool>,
     pub sidebar_width: Option<f64>,
     pub sidebar_visible: Option<bool>,

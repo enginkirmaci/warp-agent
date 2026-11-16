@@ -237,12 +237,19 @@ impl ServerProcess {
                 let reader = BufReader::new(stdout);
                 let mut lines = reader.lines();
                 while let Ok(Some(line)) = lines.next_line().await {
-                    if let Some(token) = crate::dsh::token_from_line(&line)
+                    let token = crate::dsh::token_from_line(&line);
+                    if let Some(token) = token
                         && token_slot.lock().expect("dsh token").is_none()
                     {
                         *token_slot.lock().expect("dsh token") = Some(token.to_string());
                     }
-                    log(line);
+                    // the URL line carries the /connect credential: keep the
+                    // URL and port in the log, never the token value
+                    let logged = match token {
+                        Some(token) => line.replace(token, "…"),
+                        None => line,
+                    };
+                    log(logged);
                 }
             });
         }

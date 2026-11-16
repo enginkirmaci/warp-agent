@@ -373,6 +373,9 @@ pub struct WarpWindow {
     /// About: which suite member the detail shows; the app you are in until
     /// another is picked.
     pub(crate) about_selected: warpui_kit_core::about::AppId,
+    /// The installed members the About list renders; probed on first open and
+    /// refreshed each time About is picked from the rail.
+    pub(crate) about_members: Vec<warpui_kit_core::about::Member>,
     /// The license card is up over the About screen.
     pub(crate) about_license_open: bool,
     /// The license document, built the first time the card opens: read-only
@@ -487,6 +490,7 @@ impl WarpWindow {
             settings_buffers,
             settings_section: SettingsSection::Appearance,
             about_selected: warpui_kit_core::about::AppId::Agent,
+            about_members: Vec::new(),
             about_license_open: false,
             about_license: None,
             settings_harness,

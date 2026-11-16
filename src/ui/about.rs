@@ -1,6 +1,6 @@
-//! The About section: the family in the list, the selected member in the
-//! detail. `warpui_kit_core::about` draws the screen; this holds the window's
-//! one piece of state and the effects behind its verbs.
+//! The About section: the installed family in the list, the selected member in
+//! the detail. `warpui_kit_core::about` draws the screen; this holds the
+//! window's one piece of state and the effects behind its verbs.
 
 use crate::ui::window::WarpWindow;
 use gpui::prelude::*;
@@ -16,10 +16,13 @@ impl WarpWindow {
     pub(crate) fn render_about(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
         use warpui_kit_core::about::{self, AppId};
 
-        let build = warpui_kit_core::build_info!();
         let width = self.store.read(cx).sidebar_shown_width;
         let selected = self.about_selected;
         let current = AppId::Agent;
+        if self.about_members.is_empty() {
+            let build = warpui_kit_core::build_info!();
+            self.about_members = about::detect_installed(current, &build);
+        }
 
         let entity = cx.entity();
         let pick = entity.clone();
@@ -43,11 +46,17 @@ impl WarpWindow {
         shell::panes()
             .min_w_0()
             .debug_selector(|| "about-page".into())
-            .child(about::list(width, selected, current, &build, on_pick))
+            .child(about::list(
+                width,
+                selected,
+                current,
+                &self.about_members,
+                on_pick,
+            ))
             .child(about::detail(
                 selected,
                 current,
-                &build,
+                &self.about_members,
                 "Open Station",
                 on_action,
                 on_link,
@@ -59,6 +68,7 @@ impl WarpWindow {
         if self.store.read(cx).is_about_open {
             return;
         }
+        self.about_members.clear();
         // the settings page flushes its pending field commit on the way out
         self.close_settings(cx);
         self.store.update(cx, |store, _| store.is_about_open = true);
@@ -92,9 +102,14 @@ impl WarpWindow {
             about::Action::OpenApp(id) => self.launch_sibling(about::app(id).binary),
             about::Action::SnapIt => self.launch_sibling("warp-station"),
             about::Action::CopyVersion => {
-                let build = warpui_kit_core::build_info!();
-                let line = build.version_line(about::app(self.about_selected));
-                cx.write_to_clipboard(ClipboardItem::new_string(line));
+                let Some(member) = about::selected_member(
+                    &self.about_members,
+                    self.about_selected,
+                    about::AppId::Agent,
+                ) else {
+                    return;
+                };
+                cx.write_to_clipboard(ClipboardItem::new_string(member.version_line()));
             }
         }
     }

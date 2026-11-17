@@ -1012,6 +1012,23 @@ pub enum NetCommand {
     IpcBroadcast { line: String },
     /// A chat was deleted: drop any folded dsh follow state for it.
     ForgetDshSession { session_id: String },
+    /// Ask whether a folder is a git repository: the worktree toggle's
+    /// visibility, answered once per folder.
+    ProbeRepository { folder: String },
+    /// Create a draft's worktree. Process work, so it runs on a blocking lane.
+    CreateWorktree {
+        tile_key: String,
+        repo: String,
+        branch: String,
+    },
+    /// Re-attach an existing branch at the same path: the repair for a chat
+    /// whose checkout folder disappeared.
+    AttachWorktree {
+        tile_key: String,
+        repo: String,
+        folder: String,
+        branch: String,
+    },
 }
 
 pub enum ApiRequest {
@@ -1134,6 +1151,32 @@ pub enum StreamStatus {
 
 /// Everything the UI learns from the network thread arrives as one of these.
 pub enum UiEvent {
+    /// A folder was probed for its repository: `repository` is the main
+    /// checkout when there is one, and `worktrees` its linked worktrees as
+    /// (folder, branch-or-label), main excluded.
+    RepositoryProbed {
+        folder: String,
+        repository: Option<String>,
+        worktrees: Vec<(String, String)>,
+    },
+    /// A draft's worktree now exists; `folder` is its working directory.
+    WorktreeCreated {
+        tile_key: String,
+        folder: String,
+        branch: String,
+    },
+    /// A draft's worktree could not be created; the composer keeps the field.
+    WorktreeFailed {
+        tile_key: String,
+        error: String,
+    },
+    /// A chat's worktree was restored, or the reason it could not be.
+    WorktreeAttached {
+        tile_key: String,
+        folder: String,
+        branch: String,
+        error: Option<String>,
+    },
     ServerStarted {
         ws_key: String,
         result: Result<()>,
@@ -1427,6 +1470,81 @@ async fn net_main(
                     }
                 }
                 let _ = event_tx.send(UiEvent::ServerStopped).await;
+            }
+            NetCommand::ProbeRepository { folder } => {
+                let event_tx = event_tx.clone();
+                // a process call, not an async request: keep it off this lane
+                tokio::task::spawn_blocking(move || {
+                    let path = std::path::Path::new(&folder);
+                    let mut repository = None;
+                    let mut worktrees = Vec::new();
+                    if warpui_kit_worktree::is_repository(path)
+                        && let Ok(entries) = warpui_kit_worktree::list(path)
+                    {
+                        // git lists the main checkout first, whichever folder
+                        // the call ran from
+                        if let Some(main) = entries.iter().find(|entry| entry.main) {
+                            repository = Some(main.path.to_string_lossy().into_owned());
+                        }
+                        worktrees = entries
+                            .into_iter()
+                            .filter(|entry| !entry.main)
+                            .map(|entry| (entry.path.to_string_lossy().into_owned(), entry.label()))
+                            .collect();
+                    }
+                    let _ = event_tx.send_blocking(UiEvent::RepositoryProbed {
+                        folder,
+                        repository,
+                        worktrees,
+                    });
+                });
+            }
+            NetCommand::CreateWorktree {
+                tile_key,
+                repo,
+                branch,
+            } => {
+                let event_tx = event_tx.clone();
+                // `git worktree add` checks a whole branch out: a blocking lane,
+                // never the UI thread and never this command loop
+                tokio::task::spawn_blocking(move || {
+                    let event =
+                        match warpui_kit_worktree::create(std::path::Path::new(&repo), &branch) {
+                            Ok(created) => UiEvent::WorktreeCreated {
+                                tile_key,
+                                folder: created.path.to_string_lossy().into_owned(),
+                                branch: created.branch.unwrap_or(branch),
+                            },
+                            Err(err) => UiEvent::WorktreeFailed {
+                                tile_key,
+                                error: format!("{err:#}"),
+                            },
+                        };
+                    let _ = event_tx.send_blocking(event);
+                });
+            }
+            NetCommand::AttachWorktree {
+                tile_key,
+                repo,
+                folder,
+                branch,
+            } => {
+                let event_tx = event_tx.clone();
+                tokio::task::spawn_blocking(move || {
+                    let error = warpui_kit_worktree::attach(
+                        std::path::Path::new(&repo),
+                        &branch,
+                        std::path::Path::new(&folder),
+                    )
+                    .err()
+                    .map(|err| format!("{err:#}"));
+                    let _ = event_tx.send_blocking(UiEvent::WorktreeAttached {
+                        tile_key,
+                        folder,
+                        branch,
+                        error,
+                    });
+                });
             }
             NetCommand::Request { ws_key, request } => {
                 // clone the runner out of the map before any await: the lock

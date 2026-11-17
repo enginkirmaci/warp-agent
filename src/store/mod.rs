@@ -4,8 +4,10 @@
 
 use crate::oc::{
     self, ApiRequest, CommandInfo, DSH_SERVER_KEY, ModelInfo, NetCommand, SessionInfo,
-    StoredMessage, UiEvent,
+    StoredMessage,
 };
+// the store's event intake is public, so its event type is reachable from here
+pub use crate::oc::UiEvent;
 use crate::settings::{AppSettings, DEFAULT_EXECUTABLE, HarnessKind, UiState, WorkspaceState};
 pub mod ipc;
 // the impl Store continuation modules, one per section
@@ -41,6 +43,46 @@ pub const DEFAULT_MODEL_ENTRY: &str = "(server default)";
 pub const DEFAULT_VARIANT_ENTRY: &str = "(default)";
 pub const DEFAULT_AGENT_ENTRY: &str = "(default build)";
 pub const DRAFT_TITLE: &str = "New chat";
+
+/// What the composer's worktree controls show for a tile.
+#[derive(Clone, Debug, Default)]
+pub struct WorktreeView {
+    pub visible: bool,
+    pub enabled: bool,
+    pub branch: String,
+    pub locked: bool,
+    pub creating: bool,
+    /// The checkout's folder is gone: the chat offers a restore instead of
+    /// sending.
+    pub missing: bool,
+}
+
+/// One linked worktree of a repository, as the sidebar nests it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WorktreeEntry {
+    pub folder: String,
+    pub branch: String,
+}
+
+/// The title a draft's branch name derives from: the chat's own title when it
+/// has one, else the first line the user typed.
+fn draft_title(tile: &ChatTile) -> String {
+    let title = tile.title.trim();
+    if !title.is_empty() && title != DRAFT_TITLE {
+        return title.to_string();
+    }
+    tile.input.lines().next().unwrap_or("").trim().to_string()
+}
+
+/// The repository a checkout sits in: the nearest ancestor that still exists
+/// and carries a `.git`. The checkout itself is gone whenever this runs.
+fn repository_of(folder: &str) -> Option<std::path::PathBuf> {
+    std::path::Path::new(folder)
+        .ancestors()
+        .skip(1)
+        .find(|ancestor| ancestor.join(".git").exists())
+        .map(|ancestor| ancestor.to_path_buf())
+}
 
 /// Minimum spacing between stream-driven repaints; 10 fps is plenty for
 /// streaming text and keeps a busy turn off the compositor's frame rate.
@@ -334,6 +376,16 @@ pub struct Store {
     /// sends parked because the chat's server had idled out; they flow when
     /// ServerStarted lands for their net key
     pending_session_sends: Vec<(String, String, String, Vec<AttachmentItem>)>,
+    /// Whether a workspace folder is a git repository, for the worktree
+    /// toggle's visibility: filled by the net thread, cached per folder.
+    repository_probes: HashMap<String, bool>,
+    /// Folders with a repository probe in flight.
+    repository_probing: HashSet<String>,
+    /// Linked worktrees by their repository's main checkout, branch-sorted.
+    worktrees_by_parent: HashMap<String, Vec<WorktreeEntry>>,
+    /// Every linked-worktree folder: its own row is hidden, and it never
+    /// offers a worktree of its own.
+    worktree_folders: HashSet<String>,
     /// last user/turn activity per net key; the idle sweep stops opencode
     /// servers that stay quiet past the configured minutes
     server_activity: HashMap<String, Instant>,
@@ -516,6 +568,10 @@ impl Store {
             pending_restores: Vec::new(),
             pending_opens: Vec::new(),
             pending_session_sends: Vec::new(),
+            repository_probes: HashMap::new(),
+            repository_probing: HashSet::new(),
+            worktrees_by_parent: HashMap::new(),
+            worktree_folders: HashSet::new(),
             server_activity: HashMap::new(),
             last_idle_sweep: None,
             todos_spring: None,
@@ -632,6 +688,16 @@ impl Store {
         entity.update(cx, |store, cx| {
             if let Some(path) = selected {
                 store.select_workspace(&path, cx);
+            }
+            // the sidebar nests worktree chats under their repository: ask for
+            // every open workspace's worktree list once, off the UI thread
+            let folders: Vec<String> = store
+                .workspaces
+                .iter()
+                .map(|workspace| workspace.folder_path().to_string())
+                .collect();
+            for folder in folders {
+                store.probe_repository(&folder);
             }
         });
         entity
@@ -1003,11 +1069,215 @@ impl Store {
     /// that run's own workspace, so a hidden send never rides the user's
     /// selection.
     fn draft_workspace(&self, tile_key: &str) -> Option<String> {
+        self.tile_by_key(tile_key)
+            .and_then(|tile| tile.worktree.as_ref())
+            .and_then(|worktree| worktree.folder.clone())
+            .or_else(|| self.draft_parent_workspace(tile_key))
+    }
+
+    /// The workspace a draft is filed under, before any worktree exists: the
+    /// selected one, unless the draft belongs to a background door run.
+    fn draft_parent_workspace(&self, tile_key: &str) -> Option<String> {
         self.ipc_runs
             .values()
             .find(|run| run.tile_key == tile_key)
             .map(|run| run.workspace.clone())
             .or_else(|| self.selected_workspace.clone())
+    }
+
+    /// What the composer's worktree controls show for a tile.
+    pub fn worktree_view(&self, tile_key: &str) -> WorktreeView {
+        let Some(tile) = self.tile_by_key(tile_key) else {
+            return WorktreeView::default();
+        };
+        let parent_is_repository = self.draft_parent_workspace(tile_key).is_some_and(|folder| {
+            self.repository_probes
+                .get(&folder)
+                .copied()
+                .unwrap_or(false)
+                // a linked worktree is not a place for another worktree
+                && !self.worktree_folders.contains(&folder)
+        });
+        let worktree = tile.worktree.clone().unwrap_or_default();
+        // offered on a draft in a repository, and kept afterwards so the chat
+        // still shows where it runs
+        let visible = worktree.enabled
+            || worktree.folder.is_some()
+            || (tile.session_id.is_none() && parent_is_repository);
+        WorktreeView {
+            visible,
+            enabled: worktree.enabled || worktree.folder.is_some(),
+            branch: worktree.branch,
+            // once the worktree exists the choice is spent: the chat runs there
+            locked: tile.session_id.is_some() || worktree.creating || worktree.folder.is_some(),
+            creating: worktree.creating,
+            missing: worktree.missing,
+        }
+    }
+
+    /// The composer's worktree toggle: only a draft whose workspace is a git
+    /// repository can turn it on.
+    pub fn toggle_worktree(&mut self, tile_key: &str, cx: &mut Context<Self>) {
+        let Some(parent) = self.draft_parent_workspace(tile_key) else {
+            return;
+        };
+        if !self
+            .repository_probes
+            .get(&parent)
+            .copied()
+            .unwrap_or(false)
+        {
+            return;
+        }
+        if self.worktree_folders.contains(&parent) {
+            return;
+        }
+        let Some(tile) = self.tile_by_key(tile_key) else {
+            return;
+        };
+        if tile.session_id.is_some()
+            || tile
+                .worktree
+                .as_ref()
+                .is_some_and(|worktree| worktree.creating || worktree.folder.is_some())
+        {
+            return;
+        }
+        let title = draft_title(tile);
+        let Some(tile) = self.tile_by_key_mut(tile_key) else {
+            return;
+        };
+        let mut worktree = tile.worktree.clone().unwrap_or_default();
+        worktree.enabled = !worktree.enabled;
+        if worktree.enabled && worktree.branch.trim().is_empty() {
+            worktree.branch = warpui_kit_worktree::branch_name(&title);
+        }
+        tile.worktree = Some(worktree);
+        self.repaint(cx);
+    }
+
+    /// The branch field's edits. The value only reaches git at the first send,
+    /// so this deliberately does not repaint the tile.
+    pub fn set_worktree_branch(&mut self, tile_key: &str, text: String) {
+        let Some(tile) = self.tile_by_key_mut(tile_key) else {
+            return;
+        };
+        if tile.session_id.is_some()
+            || tile
+                .worktree
+                .as_ref()
+                .is_some_and(|worktree| worktree.folder.is_some())
+        {
+            return;
+        }
+        if let Some(worktree) = tile.worktree.as_mut() {
+            worktree.branch = text;
+        }
+    }
+
+    /// Probes a folder once: the worktree toggle is hidden until the answer
+    /// says the folder is a repository.
+    fn probe_repository(&mut self, folder: &str) {
+        if folder.trim().is_empty()
+            || self.repository_probes.contains_key(folder)
+            || !self.repository_probing.insert(folder.to_string())
+        {
+            return;
+        }
+        self.net.send(NetCommand::ProbeRepository {
+            folder: folder.to_string(),
+        });
+    }
+
+    fn probe_selected_repository(&mut self) {
+        if let Some(folder) = self.selected_workspace.clone() {
+            self.probe_repository(&folder);
+        }
+    }
+
+    /// The linked worktrees of a repository, branch-sorted: the sidebar nests
+    /// their chats under the repository's row.
+    pub fn worktrees_of(&self, parent: &str) -> Vec<WorktreeEntry> {
+        self.worktrees_by_parent
+            .get(parent)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// Whether a folder is a linked worktree: its own row stays hidden.
+    pub fn is_worktree_workspace(&self, folder: &str) -> bool {
+        self.worktree_folders.contains(folder)
+    }
+
+    /// Starts a chat in a worktree the sidebar shows: the folder becomes a
+    /// workspace first when nobody opened it yet.
+    pub fn new_chat_in_folder(&mut self, folder: &str, cx: &mut Context<Self>) {
+        if !self
+            .workspaces
+            .iter()
+            .any(|workspace| workspace.folder_path() == folder)
+        {
+            self.install_workspace(folder, cx);
+        }
+        self.new_chat_for_workspace(folder, cx);
+    }
+
+    /// Restores a chat's missing checkout: the same branch at the same path,
+    /// which is the one place an existing branch is attached.
+    pub fn recreate_worktree(&mut self, tile_key: &str, cx: &mut Context<Self>) {
+        let Some(tile) = self.tile_by_key(tile_key) else {
+            return;
+        };
+        let Some(worktree) = tile.worktree.clone() else {
+            return;
+        };
+        let Some(folder) = worktree.folder.clone() else {
+            return;
+        };
+        let Some(repo) = repository_of(&folder) else {
+            self.tile_note(
+                tile_key,
+                "Could not find the repository this worktree belongs to.",
+                true,
+                cx,
+            );
+            return;
+        };
+        self.net.send(NetCommand::AttachWorktree {
+            tile_key: tile_key.to_string(),
+            repo: repo.to_string_lossy().into_owned(),
+            folder,
+            branch: worktree.branch.clone(),
+        });
+        self.tile_note(
+            tile_key,
+            &format!("Restoring the worktree {}…", worktree.branch),
+            false,
+            cx,
+        );
+        self.repaint(cx);
+    }
+
+    /// A worktree chat needs its repository's row to sit under: install the
+    /// main checkout when a linked worktree is already an open workspace.
+    fn install_missing_repository(&mut self, root: &str, cx: &mut Context<Self>) {
+        if self
+            .workspaces
+            .iter()
+            .any(|workspace| workspace.folder_path() == root)
+        {
+            return;
+        }
+        let wants_parent = self.worktrees_by_parent.get(root).is_some_and(|children| {
+            children.iter().any(|child| {
+                self.workspaces
+                    .iter()
+                    .any(|workspace| workspace.folder_path() == child.folder)
+            })
+        });
+        if wants_parent {
+            self.install_workspace(root, cx);
+        }
     }
 
     /// The MCP toggle's state for a tile: `(has servers, enabled)` — `has` is
@@ -1791,6 +2061,7 @@ impl Store {
             return;
         }
         self.selected_workspace = Some(path.to_string());
+        self.probe_selected_repository();
         self.sessions.clear();
         self.update_sidebar_selection();
         let running = self

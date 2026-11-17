@@ -39,6 +39,12 @@ const SIDEBAR_ROW_HEIGHT: f32 = 40.;
 enum SidebarRow {
     Workspace(crate::store::WorkspaceItem),
     Chat(crate::store::SessionItem),
+    /// A linked worktree under its repository: a branch header over that
+    /// checkout's chats.
+    WorktreeHeader {
+        folder: String,
+        branch: String,
+    },
     /// The italic hint under a running workspace with no chats.
     Placeholder(&'static str),
     /// The quiet header over the folder workspaces; Tasks sits above it
@@ -1324,6 +1330,23 @@ impl WarpWindow {
         })
     }
 
+    /// The sidebar rows in render order — `workspace:<path>`,
+    /// `worktree:<path>`, `chat:<id>` — so a probe can assert the nesting
+    /// without reaching into the private row enum.
+    #[doc(hidden)]
+    pub fn sidebar_rows_for_probe(&self, cx: &App) -> Vec<String> {
+        self.sidebar_rows(&self.sidebar_filter, self.sidebar_scope, cx)
+            .iter()
+            .map(|row| match row {
+                SidebarRow::Workspace(ws) => format!("workspace:{}", ws.folder_path()),
+                SidebarRow::WorktreeHeader { folder, .. } => format!("worktree:{folder}"),
+                SidebarRow::Chat(chat) => format!("chat:{}", chat.id),
+                SidebarRow::Placeholder(text) => format!("hint:{text}"),
+                SidebarRow::SectionLabel(text) => format!("section:{text}"),
+            })
+            .collect()
+    }
+
     /// The sidebar filter's focus handle, so the probe can prove the list
     /// cursor stays put while a field owns the keys.
     #[doc(hidden)]
@@ -1374,7 +1397,9 @@ impl WarpWindow {
                     index,
                 )),
                 SidebarRow::Chat(chat) => Some((SidebarCursor::Chat(chat.id.clone()), index)),
-                SidebarRow::Placeholder(_) | SidebarRow::SectionLabel(_) => None,
+                SidebarRow::WorktreeHeader { .. }
+                | SidebarRow::Placeholder(_)
+                | SidebarRow::SectionLabel(_) => None,
             })
             .collect();
         match key {
@@ -1683,14 +1708,19 @@ impl WarpWindow {
         let mut rows = Vec::new();
         let mut section = Vec::new();
         for ws in &store.workspaces {
+            // a worktree's chats render under its repository, never as a row
+            // of their own
+            if store.is_worktree_workspace(ws.folder_path()) {
+                continue;
+            }
             if !filter.is_empty() && !ws.name.to_lowercase().contains(filter) {
                 continue;
             }
             if scope == SidebarScope::All {
                 if ws.is_general() {
-                    Self::push_workspace_rows(&mut rows, ws);
+                    Self::push_workspace_rows(&mut rows, ws, store);
                 } else {
-                    section.push((ws, Vec::new()));
+                    section.push((ws, Vec::new(), Vec::new()));
                 }
                 continue;
             }
@@ -1700,13 +1730,17 @@ impl WarpWindow {
                 .filter(|chat| chat_in_scope(chat, scope, store.session_waiting(&chat.id)))
                 .cloned()
                 .collect();
-            if !workspace_in_scope(ws, scope, matched.len()) {
+            let groups = Self::worktree_groups(ws, store, scope);
+            // a worktree's matches keep the repository's row in view
+            let in_scope =
+                matched.len() + groups.iter().map(|(_, chats)| chats.len()).sum::<usize>();
+            if !workspace_in_scope(ws, scope, in_scope) {
                 continue;
             }
             if ws.is_general() {
-                Self::push_scoped_workspace(&mut rows, ws, &matched);
+                Self::push_scoped_workspace(&mut rows, ws, &matched, &groups);
             } else {
-                section.push((ws, matched));
+                section.push((ws, matched, groups));
             }
         }
         let tasks_shown = !rows.is_empty();
@@ -1727,19 +1761,59 @@ impl WarpWindow {
                 "No matching workspace"
             }));
         } else {
-            for (ws, matched) in &section {
+            for (ws, matched, groups) in &section {
                 if scope == SidebarScope::All {
-                    Self::push_workspace_rows(&mut rows, ws);
+                    Self::push_workspace_rows(&mut rows, ws, store);
                 } else {
-                    Self::push_scoped_workspace(&mut rows, ws, matched);
+                    Self::push_scoped_workspace(&mut rows, ws, matched, groups);
                 }
             }
         }
         rows
     }
 
-    /// A workspace row, the hint under an empty one, then its chats.
-    fn push_workspace_rows(rows: &mut Vec<SidebarRow>, ws: &crate::store::WorkspaceItem) {
+    /// A repository's worktree groups: the branch header over that checkout's
+    /// chats, filtered to the scope's matches.
+    fn worktree_groups(
+        ws: &crate::store::WorkspaceItem,
+        store: &Store,
+        scope: SidebarScope,
+    ) -> Vec<(crate::store::WorktreeEntry, Vec<crate::store::SessionItem>)> {
+        let mut groups = Vec::new();
+        for entry in store.worktrees_of(ws.folder_path()) {
+            let chats: Vec<crate::store::SessionItem> = store
+                .workspaces
+                .iter()
+                .find(|workspace| workspace.folder_path() == entry.folder)
+                .map(|workspace| {
+                    workspace
+                        .chats
+                        .iter()
+                        .filter(|chat| {
+                            scope == SidebarScope::All
+                                || chat_in_scope(chat, scope, store.session_waiting(&chat.id))
+                        })
+                        .cloned()
+                        .collect()
+                })
+                .unwrap_or_default();
+            // a scoped list keeps only the groups that matched; All keeps a
+            // header even for a checkout nobody has a chat in yet
+            if scope != SidebarScope::All && chats.is_empty() {
+                continue;
+            }
+            groups.push((entry, chats));
+        }
+        groups
+    }
+
+    /// A workspace row, the hint under an empty one, then its chats, then its
+    /// worktrees' groups.
+    fn push_workspace_rows(
+        rows: &mut Vec<SidebarRow>,
+        ws: &crate::store::WorkspaceItem,
+        store: &Store,
+    ) {
         rows.push(SidebarRow::Workspace(ws.clone()));
         if !ws.is_expanded() {
             return;
@@ -1749,6 +1823,15 @@ impl WarpWindow {
         }
         for chat in &ws.chats {
             rows.push(SidebarRow::Chat(chat.clone()));
+        }
+        for (entry, chats) in Self::worktree_groups(ws, store, SidebarScope::All) {
+            rows.push(SidebarRow::WorktreeHeader {
+                folder: entry.folder,
+                branch: entry.branch,
+            });
+            for chat in chats {
+                rows.push(SidebarRow::Chat(chat));
+            }
         }
     }
 
@@ -1760,6 +1843,7 @@ impl WarpWindow {
         rows: &mut Vec<SidebarRow>,
         ws: &crate::store::WorkspaceItem,
         matched: &[crate::store::SessionItem],
+        groups: &[(crate::store::WorktreeEntry, Vec<crate::store::SessionItem>)],
     ) {
         let mut row = ws.clone();
         row.state.collapsed = false;
@@ -1767,6 +1851,15 @@ impl WarpWindow {
         rows.push(SidebarRow::Workspace(row));
         for chat in matched {
             rows.push(SidebarRow::Chat(chat.clone()));
+        }
+        for (entry, chats) in groups {
+            rows.push(SidebarRow::WorktreeHeader {
+                folder: entry.folder.clone(),
+                branch: entry.branch.clone(),
+            });
+            for chat in chats {
+                rows.push(SidebarRow::Chat(chat.clone()));
+            }
         }
     }
 
@@ -1780,6 +1873,9 @@ impl WarpWindow {
         match row {
             SidebarRow::Workspace(ws) => self.render_workspace_row(ws, cx),
             SidebarRow::Chat(chat) => self.render_session_row(chat, window, cx),
+            SidebarRow::WorktreeHeader { folder, branch } => {
+                self.render_worktree_header(folder, branch, cx)
+            }
             SidebarRow::Placeholder(text) => {
                 let fonts = self.store.read(cx).fonts;
                 div()
@@ -1837,6 +1933,70 @@ impl WarpWindow {
                     .into_any_element()
             }
         }
+    }
+
+    /// A linked worktree's header under its repository: the branch over that
+    /// checkout's chats, with the new-chat button a folder row carries.
+    fn render_worktree_header(
+        &mut self,
+        folder: &str,
+        branch: &str,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let fonts = self.store.read(cx).fonts;
+        let store = self.store.clone();
+        let folder_for_new = folder.to_string();
+        div()
+            .debug_selector(|| "worktree-header".into())
+            .flex_shrink_0()
+            .h(px(SIDEBAR_ROW_HEIGHT))
+            .pl(px(30.))
+            .pr_2()
+            .flex()
+            .items_center()
+            .gap_1p5()
+            .text_size(px(fonts.font_meta))
+            .font_weight(gpui::FontWeight::SEMIBOLD)
+            .text_color(theme::text_dim())
+            .child(crate::ui::icon(
+                "icons/branch.svg",
+                px(fonts.icon_tiny),
+                theme::BRANCH,
+            ))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .child(SharedString::from(branch.to_string())),
+            )
+            .child(
+                tip(
+                    div()
+                        .id(gpui::ElementId::NamedInteger(
+                            "wt-new".into(),
+                            TileView::hash(folder),
+                        ))
+                        .role(Role::Button)
+                        .aria_label(SharedString::from(format!("New chat in {branch}")))
+                        .cursor_pointer()
+                        .p_1()
+                        .rounded_sm()
+                        .hover(|s| s.bg(theme::HOVER))
+                        .on_click(move |_, _, cx| {
+                            // the header is not a row: no expansion behind it
+                            cx.stop_propagation();
+                            store.update(cx, |s, cx| s.new_chat_in_folder(&folder_for_new, cx));
+                        }),
+                    "New chat",
+                )
+                .child(crate::ui::icon(
+                    "icons/plus.svg",
+                    px(fonts.icon_small),
+                    theme::text_muted(),
+                )),
+            )
+            .into_any_element()
     }
 
     fn render_workspace_row(
@@ -3382,13 +3542,21 @@ impl WarpWindow {
 /// inputs from WarpWindow made each keystroke repaint the whole window —
 /// sidebar and tile grid included. The owner keeps the shared InputState
 /// handle for reading values; this view is only the renderer.
-struct InputLeaf {
+pub(crate) struct InputLeaf {
     state: Entity<InputState>,
     /// The prototype's `.field text`: a settings value (a path, an executable,
     /// a model) is mono, while a filter or a chat title is the UI face.
     mono: bool,
     /// A leading icon inside the box — the sidebar filter's search.
     icon: Option<&'static str>,
+}
+
+impl InputLeaf {
+    /// The one renderer for a plain single-line field: a settings value, a
+    /// chat title, or a worktree's branch name.
+    pub(crate) fn new(state: Entity<InputState>, mono: bool, icon: Option<&'static str>) -> Self {
+        Self { state, mono, icon }
+    }
 }
 
 impl Render for InputLeaf {

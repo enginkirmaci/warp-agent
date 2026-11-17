@@ -285,6 +285,12 @@ pub struct TileView {
     /// field text as of the last Change event or programmatic set_value
     /// (set_value emits no Change) — replaces render-time value reads
     last_field_text: String,
+    /// The draft's worktree branch field: created when the toggle turns on and
+    /// dropped once the first send locks the chat.
+    worktree_field: Option<Entity<InputState>>,
+    /// The same field as its own leaf view, so typing re-renders the field and
+    /// not the transcript.
+    worktree_leaf: Option<Entity<crate::ui::window::InputLeaf>>,
     question_inputs: HashMap<String, Entity<QuestionField>>,
     /// question input keys of the current transcript — the prune after the
     /// transcript loop drops inputs of resolved/removed questions
@@ -880,6 +886,8 @@ impl TileView {
             composer_field,
             composer_focused: false,
             last_field_text: initial_text,
+            worktree_field: None,
+            worktree_leaf: None,
             question_inputs: HashMap::new(),
             question_keys: HashSet::new(),
             last_composer_text: String::new(),
@@ -2617,6 +2625,15 @@ struct TileSnap {
     /// whether the toggle currently keeps them enabled
     has_mcp: bool,
     mcp_on: bool,
+    /// Worktree controls: offered on a draft in a repository, and kept on the
+    /// chat afterwards so it still shows where it runs.
+    worktree_visible: bool,
+    worktree_on: bool,
+    worktree_locked: bool,
+    worktree_creating: bool,
+    worktree_branch: SharedString,
+    /// The checkout's folder is gone: the composer offers a restore.
+    worktree_missing: bool,
     spring: bool,
 }
 
@@ -3094,6 +3111,111 @@ impl TileView {
         attachments_el.into_any_element()
     }
 
+    /// The worktree slot beside the pills: an editable branch while the chat
+    /// is still a draft, and the branch it runs on once the session exists.
+    fn render_worktree_field(&self, snap: &TileSnap) -> gpui::AnyElement {
+        let fonts = snap.fonts;
+        let show_branch = snap.worktree_locked || self.worktree_leaf.is_none();
+        if show_branch {
+            // a missing checkout keeps its branch on show, in the alarm colour,
+            // and offers the one repair the user can make from here
+            let text_color = if snap.worktree_missing {
+                theme::WARN
+            } else {
+                theme::text_muted()
+            };
+            let mut chip = div()
+                .debug_selector(|| "worktree-branch".into())
+                .flex_shrink_0()
+                .flex()
+                .items_center()
+                .gap_1()
+                .h(px(PILL_HEIGHT))
+                .px_1p5()
+                .rounded(px(6.))
+                .text_color(text_color)
+                .child(crate::ui::icon(
+                    "icons/branch.svg",
+                    px(fonts.icon_tiny),
+                    text_color,
+                ))
+                .child(
+                    div()
+                        .text_size(px(fonts.font_meta))
+                        .truncate()
+                        .child(snap.worktree_branch.clone()),
+                );
+            if snap.worktree_missing {
+                let store = self.store.clone();
+                let key = self.key.clone();
+                chip = chip.child(div().debug_selector(|| "worktree-restore".into()).child(
+                    crate::ui::button(
+                        "worktree-restore-button",
+                        "Restore",
+                        BtnKind::Chip,
+                        snap.accent,
+                        fonts.font_meta,
+                        true,
+                        move |_, _, cx| {
+                            let key = key.clone();
+                            store.update(cx, |s, cx| s.recreate_worktree(&key, cx));
+                        },
+                    ),
+                ));
+            }
+            return chip.into_any_element();
+        }
+        let Some(leaf) = self.worktree_leaf.clone() else {
+            return div().into_any_element();
+        };
+        div()
+            .debug_selector(|| "worktree-branch".into())
+            .flex_shrink_0()
+            .w(px(190.))
+            .h(px(PILL_HEIGHT))
+            .child(leaf)
+            .into_any_element()
+    }
+
+    /// The draft's branch field follows the toggle: created when it turns on,
+    /// dropped once the first send locks the chat or creation starts.
+    fn sync_worktree_field(
+        &mut self,
+        snap: &TileSnap,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let wanted = snap.worktree_on && !snap.worktree_locked && !snap.worktree_creating;
+        if !wanted {
+            self.worktree_field = None;
+            self.worktree_leaf = None;
+            return;
+        }
+        if self.worktree_field.is_some() {
+            return;
+        }
+        let initial = snap.worktree_branch.to_string();
+        let entity = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("Branch")
+                .default_value(initial)
+        });
+        let store = self.store.clone();
+        let key = self.key.clone();
+        cx.subscribe(&entity, move |_, field, event: &InputEvent, cx| {
+            if matches!(event, InputEvent::Change) {
+                let text = field.read(cx).value().to_string();
+                store.update(cx, |s, _| s.set_worktree_branch(&key, text));
+            }
+        })
+        .detach();
+        let leaf = cx.new(|_| {
+            crate::ui::window::InputLeaf::new(entity.clone(), true, Some("icons/branch.svg"))
+        });
+        self.worktree_field = Some(entity);
+        self.worktree_leaf = Some(leaf);
+    }
+
     /// The chrome-less selector pills: agent, model and variant.
     fn render_pills(&mut self, snap: &TileSnap, cx: &mut Context<Self>) -> gpui::AnyElement {
         let fonts = snap.fonts;
@@ -3177,6 +3299,9 @@ impl TileView {
                 ))
             }),
         );
+        if snap.worktree_on {
+            pills = pills.child(self.render_worktree_field(snap));
+        }
         if snap.has_agents {
             pills = pills.child(
                 tip(
@@ -4165,6 +4290,69 @@ impl TileView {
                                 px(fonts.icon_small),
                                 theme::text_muted(),
                             )
+                        })
+                        .when(snap.worktree_visible, |toggles| {
+                            toggles.child(
+                                tip(
+                                    div()
+                                        .id("worktree-toggle")
+                                        .debug_selector(|| "worktree-toggle".into())
+                                        .role(Role::Button)
+                                        .aria_label(if snap.worktree_creating {
+                                            "Creating the worktree"
+                                        } else {
+                                            "Worktree — give this chat its own checkout"
+                                        })
+                                        .aria_toggled(if snap.worktree_on {
+                                            Toggled::True
+                                        } else {
+                                            Toggled::False
+                                        })
+                                        .when(snap.worktree_locked, |d| d.opacity(0.5))
+                                        .cursor_pointer()
+                                        .p_1()
+                                        .rounded(px(4.))
+                                        .hover(|s| s.bg(theme::raised()))
+                                        .on_click({
+                                            let store = self.store.clone();
+                                            let key = self.key.clone();
+                                            move |_, _, cx| {
+                                                store.update(cx, |s, cx| {
+                                                    s.toggle_worktree(&key, cx);
+                                                });
+                                            }
+                                        }),
+                                    if snap.worktree_creating {
+                                        "Creating the worktree"
+                                    } else if snap.worktree_on {
+                                        "Worktree on — this chat has its own checkout"
+                                    } else {
+                                        "Worktree — give this chat its own checkout"
+                                    },
+                                )
+                                .child(if snap.worktree_creating {
+                                    motion::spinner(
+                                        "worktree-spinner",
+                                        "icons/spinner.svg",
+                                        px(fonts.icon_small),
+                                        theme::text_muted(),
+                                    )
+                                } else if snap.worktree_on {
+                                    crate::ui::icon(
+                                        "icons/branch.svg",
+                                        px(fonts.icon_small),
+                                        theme::BRANCH,
+                                    )
+                                    .into_any_element()
+                                } else {
+                                    crate::ui::icon(
+                                        "icons/branch.svg",
+                                        px(fonts.icon_small),
+                                        theme::text_muted(),
+                                    )
+                                    .into_any_element()
+                                }),
+                            )
                         }),
                     ),
             )
@@ -4466,6 +4654,7 @@ impl Render for TileView {
                 return div().into_any_element();
             };
             let (has_mcp, mcp_on) = store.mcp_state(&self.key);
+            let worktree = store.worktree_view(&self.key);
             TileSnap {
                 fonts: store.fonts,
                 accent: store.accent.accent,
@@ -4513,8 +4702,16 @@ impl Render for TileView {
                 spring: store.todos_spring.as_deref() == Some(self.key.as_str()),
                 has_mcp,
                 mcp_on,
+                worktree_visible: worktree.visible,
+                worktree_on: worktree.enabled,
+                worktree_locked: worktree.locked,
+                worktree_creating: worktree.creating,
+                worktree_branch: worktree.branch.into(),
+                worktree_missing: worktree.missing,
             }
         };
+        // the branch field follows the toggle: created on, dropped on lock
+        self.sync_worktree_field(&snap, window, cx);
         let fonts = snap.fonts;
         let accent = snap.accent;
 

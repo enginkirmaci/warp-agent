@@ -5,6 +5,83 @@ impl Store {
 
     pub fn on_net_event(&mut self, event: UiEvent, cx: &mut Context<Self>) {
         match event {
+            UiEvent::RepositoryProbed {
+                folder,
+                repository,
+                worktrees,
+            } => {
+                self.repository_probing.remove(&folder);
+                self.repository_probes.insert(folder, repository.is_some());
+                if let Some(root) = repository {
+                    let mut children: Vec<WorktreeEntry> = worktrees
+                        .into_iter()
+                        .map(|(folder, branch)| WorktreeEntry { folder, branch })
+                        .collect();
+                    children.sort_by_key(|entry| entry.branch.to_lowercase());
+                    self.worktrees_by_parent.insert(root.clone(), children);
+                    self.worktree_folders = self
+                        .worktrees_by_parent
+                        .values()
+                        .flatten()
+                        .map(|entry| entry.folder.clone())
+                        .collect();
+                    // a worktree chat needs the repository's row above it
+                    self.install_missing_repository(&root, cx);
+                }
+                self.repaint(cx);
+            }
+            UiEvent::WorktreeCreated {
+                tile_key,
+                folder,
+                branch,
+            } => self.on_worktree_created(tile_key, folder, branch, cx),
+            UiEvent::WorktreeFailed { tile_key, error } => {
+                if let Some(tile) = self.tile_by_key_mut(&tile_key)
+                    && let Some(state) = tile.worktree.as_mut()
+                {
+                    state.creating = false;
+                    state.pending_send = false;
+                }
+                self.tile_note(
+                    &tile_key,
+                    &format!("Could not create the worktree: {error}"),
+                    true,
+                    cx,
+                );
+                self.repaint(cx);
+            }
+            UiEvent::WorktreeAttached {
+                tile_key,
+                folder,
+                branch,
+                error,
+            } => {
+                match error {
+                    Some(error) => self.tile_note(
+                        &tile_key,
+                        &format!("Could not restore the worktree: {error}"),
+                        true,
+                        cx,
+                    ),
+                    None => {
+                        if let Some(worktree) = self
+                            .tile_by_key_mut(&tile_key)
+                            .and_then(|tile| tile.worktree.as_mut())
+                        {
+                            worktree.missing = false;
+                            worktree.folder = Some(folder);
+                            worktree.branch = branch.clone();
+                        }
+                        self.tile_note(
+                            &tile_key,
+                            &format!("Worktree restored: {branch}"),
+                            false,
+                            cx,
+                        );
+                    }
+                }
+                self.repaint(cx);
+            }
             UiEvent::Log { ws_key, line } => {
                 let name = self
                     .workspaces
@@ -88,6 +165,22 @@ impl Store {
                         .map(|run| run.tile_key.clone())
                         .collect();
                     for tile_key in parked_runs {
+                        self.send_from_tile(&tile_key, cx);
+                    }
+                    // a send parked behind its worktree's creation: that
+                    // worktree's server is up, so the draft's send can run
+                    let parked_worktrees: Vec<String> = self
+                        .open_tiles
+                        .iter()
+                        .filter(|tile| {
+                            tile.worktree.as_ref().is_some_and(|worktree| {
+                                worktree.pending_send
+                                    && worktree.folder.as_deref() == Some(ws_key.as_str())
+                            })
+                        })
+                        .map(|tile| tile.key.clone())
+                        .collect();
+                    for tile_key in parked_worktrees {
                         self.send_from_tile(&tile_key, cx);
                     }
                     // sends parked while this server's port was closed
@@ -375,6 +468,9 @@ impl Store {
                         tile.session_id = Some(info.id.clone());
                         tile.title = title.clone();
                         tile.auto_title_pending = true;
+                        if let Some(worktree) = tile.worktree.as_mut() {
+                            worktree.pending_send = false;
+                        }
                     }
                     // a background run's chat stays out of the sidebar and the
                     // persisted session list entirely — the door client owns

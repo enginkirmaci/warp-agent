@@ -1,6 +1,6 @@
 [package]
 name = "warp-agent"
-version = "0.1.7"
+version = "0.1.8"
 edition = "2024"
 description = "WarpAgent — a tile-grid chat client for opencode serve, rebuilt on GPUI"
 license = "GPL-3.0"
@@ -19,6 +19,7 @@ warpui-kit-diff = { git = "https://github.com/enginkirmaci/warp-suite", tag = "k
 warpui-kit-markdown = { git = "https://github.com/enginkirmaci/warp-suite", tag = "kits-v0.2.49", package = "warpui-kit-markdown", features = ["all-languages"] }
 warpui-kit-picker = { git = "https://github.com/enginkirmaci/warp-suite", tag = "kits-v0.2.49", package = "warpui-kit-picker" }
 warpui-kit-platform = { git = "https://github.com/enginkirmaci/warp-suite", tag = "kits-v0.2.49", package = "warpui-kit-platform" }
+warpui-kit-worktree = { git = "https://github.com/enginkirmaci/warp-suite", tag = "kits-v0.2.74", package = "warpui-kit-worktree" }
 
 # the gpui stack, pinned here because the app builds standalone
 gpui = { package = "gpui-pre", version = "=0.3.11" }

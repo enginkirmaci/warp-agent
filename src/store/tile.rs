@@ -16,6 +16,25 @@ pub struct RunningAgentItem {
     pub needs_attention: bool,
 }
 
+/// A draft's worktree: the branch it will take until the first send, and where
+/// it landed once creation did.
+#[derive(Clone, Debug, Default)]
+pub struct WorktreeDraft {
+    /// The composer toggle is on.
+    pub enabled: bool,
+    /// The branch the chat will use; editable until the first send.
+    pub branch: String,
+    /// The worktree's folder, set when creation landed.
+    pub folder: Option<String>,
+    /// Creation is in flight: the toggle is locked and a second send must not
+    /// start another.
+    pub creating: bool,
+    /// A send is parked on this worktree's server and resumes when it is up.
+    pub pending_send: bool,
+    /// The checkout's folder is gone: sending is refused until it is restored.
+    pub missing: bool,
+}
+
 pub struct ChatTile {
     /// Grid-stable key; differs from the session id so unsent drafts are addressable.
     pub key: String,
@@ -45,6 +64,8 @@ pub struct ChatTile {
     /// render and sidebar list, and the run retires it when the turn settles.
     /// Always false for tiles the user opened.
     pub background: bool,
+    /// The draft's worktree choice; `None` until the toggle is first used.
+    pub worktree: Option<WorktreeDraft>,
     /// Notified only when THIS tile's content changed: its cached view
     /// (Entity::cached) re-renders on this and nothing else, so one tile's
     /// stream doesn't rebuild every open transcript. None on the with_tile
@@ -146,6 +167,7 @@ impl ChatTile {
             queue_rows: Vec::new(),
             is_focused: false,
             background: false,
+            worktree: None,
             rev: None,
             role_by_message: HashMap::new(),
             created_by_message: HashMap::new(),

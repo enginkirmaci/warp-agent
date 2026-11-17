@@ -8070,7 +8070,7 @@ dependencies = [
 
 [[package]]
 name = "warp-agent"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "anyhow",
  "async-channel",
@@ -8099,6 +8099,7 @@ dependencies = [
  "warpui-kit-markdown",
  "warpui-kit-picker",
  "warpui-kit-platform",
+ "warpui-kit-worktree",
 ]
 
 [[package]]
@@ -8177,6 +8178,14 @@ dependencies = [
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "warpui-kit-worktree"
+version = "0.2.74"
+source = "git+https://github.com/enginkirmaci/warp-suite?tag=kits-v0.2.74#2148dbfb3751edf4f55ead0cc10bdb87cc6bb0b4"
+dependencies = [
+ "anyhow",
 ]
 
 [[package]]

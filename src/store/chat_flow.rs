@@ -27,6 +27,8 @@ impl Store {
             self.ensure_dsh(cx);
         }
         self.open_tiles.push(tile);
+        // the composer's worktree toggle is offered only where it can work
+        self.probe_selected_repository();
         self.tile_by_key_mut(&key).unwrap()
     }
 
@@ -270,6 +272,12 @@ impl Store {
         if let Some(key) = self.tile_net_key_or(tile_key) {
             self.touch_server_activity(&key);
         }
+        if self.worktree_guard(tile_key, cx) {
+            return;
+        }
+        if self.worktree_prepare(tile_key, cx) {
+            return;
+        }
         // a leading `/name` stays as typed; send_core routes it to the
         // server's /command endpoint, which does the template expansion
         // an existing chat talks to its own workspace's server; a draft to the selected one
@@ -438,6 +446,145 @@ impl Store {
             return;
         }
         self.send_core(&session_id.unwrap(), text, attachments, cx);
+    }
+
+    /// The worktree exists: install it as a workspace, start its server, and
+    /// leave the send parked — the `ServerStarted` pickup resumes it.
+    pub(super) fn on_worktree_created(
+        &mut self,
+        tile_key: String,
+        folder: String,
+        branch: String,
+        cx: &mut Context<Self>,
+    ) {
+        let folder = normalize_dir(&folder);
+        self.install_workspace(&folder, cx);
+        if let Some(tile) = self.tile_by_key_mut(&tile_key)
+            && let Some(state) = tile.worktree.as_mut()
+        {
+            state.creating = false;
+            state.folder = Some(folder.clone());
+            state.branch = branch.clone();
+        }
+        self.tile_note(&tile_key, &format!("Worktree ready: {branch}"), false, cx);
+        let harness = self
+            .tile_by_key(&tile_key)
+            .map(|tile| tile.harness)
+            .unwrap_or_default();
+        match harness {
+            // an opencode server belongs to its folder: start the worktree's
+            // and let `ServerStarted` resume the parked send
+            HarnessKind::OpenCode => self.start_workspace(&folder, cx),
+            // the shared dsh server takes the folder per session, so the send
+            // can flow now (or park on the shared server's own start)
+            HarnessKind::Dsh => {
+                self.ensure_dsh(cx);
+                self.send_from_tile(&tile_key, cx);
+            }
+        }
+        self.save_state();
+        self.repaint(cx);
+    }
+
+    /// A chat whose worktree folder disappeared cannot send: the guard marks
+    /// the tile, says why once, and the composer offers the restore. Returns
+    /// true when it took the send.
+    fn worktree_guard(&mut self, tile_key: &str, cx: &mut Context<Self>) -> bool {
+        let Some(tile) = self.tile_by_key(tile_key) else {
+            return false;
+        };
+        let Some(folder) = tile
+            .worktree
+            .as_ref()
+            .and_then(|worktree| worktree.folder.clone())
+        else {
+            return false;
+        };
+        let was_missing = tile
+            .worktree
+            .as_ref()
+            .is_some_and(|worktree| worktree.missing);
+        if std::path::Path::new(&folder).is_dir() {
+            // a restored checkout (by hand or by the restore action) sends again
+            if was_missing {
+                if let Some(worktree) = self
+                    .tile_by_key_mut(tile_key)
+                    .and_then(|tile| tile.worktree.as_mut())
+                {
+                    worktree.missing = false;
+                }
+                self.repaint(cx);
+            }
+            return false;
+        }
+        if !was_missing {
+            let branch = self
+                .tile_by_key(tile_key)
+                .and_then(|tile| tile.worktree.as_ref())
+                .map(|worktree| worktree.branch.clone())
+                .unwrap_or_default();
+            if let Some(worktree) = self
+                .tile_by_key_mut(tile_key)
+                .and_then(|tile| tile.worktree.as_mut())
+            {
+                worktree.missing = true;
+            }
+            self.tile_note(
+                tile_key,
+                &format!(
+                    "The worktree for {branch} is gone ({folder}). Restore it to keep this chat going."
+                ),
+                true,
+                cx,
+            );
+        }
+        true
+    }
+
+    /// A draft with the worktree toggle on creates its worktree before it can
+    /// create a session; the send stays parked in the composer and resumes
+    /// when that worktree's server is up. Returns true when it took the send.
+    fn worktree_prepare(&mut self, tile_key: &str, cx: &mut Context<Self>) -> bool {
+        let Some(tile) = self.tile_by_key(tile_key) else {
+            return false;
+        };
+        if tile.session_id.is_some() {
+            return false;
+        }
+        let Some(worktree) = tile.worktree.clone() else {
+            return false;
+        };
+        if !worktree.enabled || worktree.folder.is_some() {
+            return false;
+        }
+        if worktree.creating {
+            // a second press while the first create is in flight must not
+            // start another worktree
+            return true;
+        }
+        let Some(repo) = self.draft_parent_workspace(tile_key) else {
+            return false;
+        };
+        let branch = if worktree.branch.trim().is_empty() {
+            warpui_kit_worktree::branch_name(&draft_title(tile))
+        } else {
+            worktree.branch.trim().to_string()
+        };
+        if let Some(tile) = self.tile_by_key_mut(tile_key)
+            && let Some(state) = tile.worktree.as_mut()
+        {
+            state.branch = branch.clone();
+            state.creating = true;
+            state.pending_send = true;
+        }
+        self.tile_note(tile_key, &format!("Creating worktree {branch}…"), false, cx);
+        self.net.send(NetCommand::CreateWorktree {
+            tile_key: tile_key.to_string(),
+            repo,
+            branch,
+        });
+        self.repaint(cx);
+        true
     }
 
     pub(super) fn send_core(

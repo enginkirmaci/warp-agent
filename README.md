@@ -8,6 +8,13 @@ on DeepSeek Harness: the composer's harness pill picks `dsh` per chat, and one
 shared `dsh web` process serves every dsh chat (dsh sessions carry their own
 working directory).
 
+A chat can also run in a **worktree**: the composer's worktree toggle (off by
+default, offered only where the workspace is a git repository) creates
+`<repo>/.worktrees/<branch>` on the first send and runs the chat there, so the
+main checkout stays where its owner left it. Its chats appear under the
+repository's row in the sidebar, grouped by branch, and a checkout whose folder
+disappears refuses to send until it is restored on the same branch.
+
 ## Run
 
 ```sh

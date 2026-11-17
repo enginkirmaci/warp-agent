@@ -122,6 +122,8 @@ server and Warp Station is the client. Endpoint files are
   `models`, `status` (plus pushed `status` events).
 - `new-chat`/`run-prompt` take a folder or `general` for the built-in Tasks
   workspace, and `harness`/`model`/`variant`.
+- Warp Station sends `new-chat` with a worktree's folder to start a chat
+  inside that checkout; the door opens it as a workspace like any other.
 - `models` returns the harnesses and each model's variants; `refresh: true`
   re-reads the backend instead of answering from the session catalog.
 - The app works fully standalone. A missing client changes nothing.
@@ -147,6 +149,28 @@ server and Warp Station is the client. Endpoint files are
 - All network work is on a dedicated OS thread with its own tokio runtime.
   Never do file IO, HTTP or process work on the GPUI main thread. The UI talks
   to the net thread through async channels; state arrives already parsed.
+
+## Worktrees
+
+A chat can run in a worktree of its repository instead of the main checkout:
+the composer toggle is off on every new chat, appears only where the workspace
+is a git repository, and the first send creates the checkout under
+`<repo>/.worktrees/<slug>`, installs it as a workspace and creates the session
+there. The branch is named from the chat title and stays editable until that
+send; afterwards the chat is bound to that checkout.
+
+- `warpui-kit-worktree` owns every rule (`create`, `list`, `remove`, `prune`,
+  `attach`, branch naming, the local exclude entry). This app never runs git
+  itself.
+- The worktree's own workspace row stays out of the sidebar: its chats render
+  under the repository's row, one branch group each, and a group's `+` starts
+  another chat in that checkout. A repository that is not open yet is installed
+  when one of its worktrees has a chat.
+- A chat whose checkout folder disappeared refuses to send and offers Restore,
+  which re-attaches the same branch at the same path — the one place an
+  existing branch is attached.
+- A worktree in `ui.json` is an ordinary workspace entry, so the settings
+  contract did not change.
 
 ## Tests
 

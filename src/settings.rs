@@ -62,7 +62,7 @@ impl HarnessKind {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
-#[serde(rename_all = "snake_case", default, deny_unknown_fields)]
+#[serde(rename_all = "snake_case", default)]
 pub struct AppSettings {
     #[serde(default = "default_executable")]
     pub opencode_executable: String,
@@ -179,7 +179,7 @@ impl AppSettings {
     pub fn load() -> Self {
         AppPaths::migrate_legacy_file("settings.json");
         let path = AppPaths::settings_file();
-        let store = Store::<AppSettings>::new(path.clone());
+        let store = Store::<AppSettings>::new(path.clone()).preserving_unknown();
         match store.load() {
             Ok(settings) => settings,
             Err(err) if err.needs_import() => {
@@ -210,14 +210,17 @@ impl AppSettings {
     }
 
     pub fn save(&self) {
-        if let Err(err) = Store::<AppSettings>::new(AppPaths::settings_file()).save(self) {
+        if let Err(err) = Store::<AppSettings>::new(AppPaths::settings_file())
+            .preserving_unknown()
+            .save(self)
+        {
             tracing::warn!("could not save settings: {err}");
         }
     }
 }
 
 /// The old PascalCase settings file, translated once. The live type is
-/// strict; this is the only place that knows the old spelling.
+/// tolerant; this is the only place that knows the old spelling.
 fn import_settings(path: &std::path::Path) -> Option<AppSettings> {
     let mut value: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(path).ok()?).ok()?;
@@ -275,7 +278,7 @@ impl UiState {
     pub fn load() -> Self {
         AppPaths::migrate_legacy_file("ui.json");
         let path = AppPaths::ui_state_file();
-        let store = Store::<UiState>::new(path.clone());
+        let store = Store::<UiState>::new(path.clone()).preserving_unknown();
         match store.load() {
             Ok(ui) => ui,
             Err(err) if err.needs_import() => {
@@ -306,7 +309,10 @@ impl UiState {
     }
 
     pub fn save(&self) {
-        if let Err(err) = Store::<UiState>::new(AppPaths::ui_state_file()).save(self) {
+        if let Err(err) = Store::<UiState>::new(AppPaths::ui_state_file())
+            .preserving_unknown()
+            .save(self)
+        {
             tracing::warn!("could not save ui state: {err}");
         }
     }
@@ -479,6 +485,32 @@ mod tests {
         assert!(json.contains("\"text_size\""));
         assert!(json.contains("\"show_tooltips\""));
         assert!(!json.contains("DefaultHarness"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_newer_settings_file_loads_and_keeps_its_unknown_keys() {
+        // the same store pair `load`/`save` use: a file a newer build wrote
+        // reads with the keys this build knows, and its next save keeps the
+        // rest instead of dropping to defaults
+        let dir = scratch("settings-newer");
+        let path = dir.join("settings.json");
+        std::fs::write(
+            &path,
+            r#"{"schema_version":1,"default_harness":"dsh","later_flag":true}"#,
+        )
+        .unwrap();
+
+        let store = Store::<AppSettings>::new(path.clone()).preserving_unknown();
+        let mut settings = store.load().expect("a newer file still loads");
+        assert_eq!(settings.default_harness, HarnessKind::Dsh);
+        settings.text_size = Some("large".into());
+        store.save(&settings).unwrap();
+
+        let saved: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(saved["later_flag"], true, "the newer key survives");
+        assert_eq!(saved["text_size"], "large");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

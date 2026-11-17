@@ -2,9 +2,9 @@
 //! the surface that owns it.
 //!
 //! The rows live here once, next to the handlers they describe. Only real
-//! bindings are listed: the window root's two chords, the sidebar's row keys,
-//! the transcript's scroll keys, the composer's Enter/history/agent keys and
-//! the composer's command-menu keys. Settings, About and the context menus are
+//! bindings are listed: the window root's chords, the sidebar's row keys, the
+//! transcript's scroll keys, the composer's Enter/history/agent keys and the
+//! composer's command-menu keys. Settings, About and the context menus are
 //! pointer surfaces, so they add no rows.
 
 use gpui::SharedString;
@@ -22,6 +22,7 @@ pub fn groups() -> Vec<Group> {
         vec![
             row("? / Ctrl /", "Show or hide this shortcut sheet"),
             row("Ctrl \\", "Show or hide the sidebar"),
+            row("Ctrl C", "Copy the selected read-only text"),
             row("Esc", "Close this shortcut sheet"),
         ],
     );
@@ -123,7 +124,7 @@ mod tests {
     #[test]
     fn the_window_chords_are_listed() {
         let window = keys(&groups(), "Window");
-        for key in ["? / Ctrl /", "Ctrl \\", "Esc"] {
+        for key in ["? / Ctrl /", "Ctrl \\", "Ctrl C", "Esc"] {
             assert!(window.iter().any(|row| row == key), "{key} is missing");
         }
     }

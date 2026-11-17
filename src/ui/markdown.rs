@@ -61,7 +61,7 @@ use gpui::prelude::*;
 use gpui::{AnyElement, Context, Entity, SharedString, Window, div, px};
 use gpui_kit::component::menu::PopupMenu;
 use std::rc::Rc;
-use warpui_kit_markdown::{CodeBlock, LiveEditor, LiveEditorState};
+use warpui_kit_markdown::{CodeBlock, LiveEditor, LiveEditorState, MenuKeys};
 
 use crate::ui::tile::TileView;
 
@@ -150,7 +150,14 @@ pub fn render_markdown(
         .unbounded_column()
         .margin_x_em(0.0)
         .text_size(px(font_px))
-        .code_block_overlay(overlay);
+        .code_block_overlay(overlay)
+        // the read-only host answers Ctrl+C at the window, since the surface
+        // takes no focus: the Copy row prints that key, and Select all prints
+        // none because no host binding answers it.
+        .menu_keys(MenuKeys {
+            copy: Some("Ctrl C".into()),
+            select_all: None,
+        });
     if let Some(top) = top_margin_em {
         live = live.top_margin_em(top);
     }
@@ -214,7 +221,10 @@ pub fn text_view(
         }
         .into_any_element();
         match menu {
-            Some(focus) => warpui_kit_core::text_menu::attach(id, view, Some(focus)),
+            // the window root answers Ctrl+C for the window selection
+            Some(focus) => {
+                warpui_kit_core::text_menu::attach(id, view, Some(focus), Some("Ctrl C".into()))
+            }
             None => view,
         }
     } else {

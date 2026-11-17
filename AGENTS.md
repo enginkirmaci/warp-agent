@@ -85,6 +85,15 @@ the tail follow still opens a longer chat at its newest message.
   Re-prompt / Fork to Copy / Select all through `LiveEditor::host_menu`, and
   reasoning is fed with `LiveEditorState::apply_streamed` so a chunk keeps the
   selection.
+- Read-only text takes no focus, so neither surface's own Copy action
+  dispatches: the window root answers Ctrl+C with the window selection first
+  (`TextSelection::selected_text`) and then the document's
+  (`warpui_kit_markdown::read_only_selection_text`), and leaves the key alone
+  while an `Input` context is focused. The text menus print the `Ctrl C` key
+  the host answers — `text_menu::attach(…, Some("Ctrl C".into()))` for the
+  guard, `LiveEditor::menu_keys(MenuKeys { copy: Some("Ctrl C".into()),
+  select_all: None })` for the read-only editors. A row with no real shortcut
+  passes `None` and prints no keycap.
 - The OS title mirrors the titlebar chip through
   `warpui_kit_core::activity::activity_title`: `2 running — Warp Agent`, or
   the plain app name when idle.
@@ -170,6 +179,11 @@ cargo build -p warp-agent
   chunk and proves the selection and Copy survive, checks the tool details and
   system note Copy menus and the user message's host menu (Edit in input /
   Re-prompt / Fork), and proves a tool title opens no menu.
+- `tests/read_only_copy_probe.rs` proves the read-only menus print the
+  `menu-key-Ctrl C` keycap (the reasoning `LiveEditor` and the guarded tool
+  details), that Ctrl+C copies the window selection and the document
+  selection, and that a focused sidebar filter keeps its own Ctrl+C instead of
+  copying the read-only text.
 - `tests/title_probe.rs` proves the OS title is `<n> running — Warp Agent`
   while a chat runs and the plain app name otherwise.
 - `tests/question_text_probe.rs` proves a selection in a question's text

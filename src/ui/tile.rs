@@ -1701,6 +1701,9 @@ impl TileView {
                             cx,
                         ),
                         text_menu::focus(cx),
+                        // the window answers Ctrl+C for the read-only
+                        // selection, so the Copy row prints the key
+                        Some("Ctrl C".into()),
                     )))
                 })
             })
@@ -2067,6 +2070,7 @@ impl TileView {
                                             cx,
                                         ),
                                         text_menu::focus(cx),
+                                        Some("Ctrl C".into()),
                                     )))
                                 })
                             })
@@ -3992,6 +3996,8 @@ impl TileView {
                     menu_row(
                         gpui::ElementId::NamedInteger("menu-row".into(), ix as u64),
                         label,
+                        // the image menu has no keyboard shortcut
+                        None,
                         false,
                         fonts.font_body,
                         move |_, _, cx| {

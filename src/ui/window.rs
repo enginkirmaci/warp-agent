@@ -9,9 +9,9 @@ use crate::ui::tooltip::{self, tip};
 use crate::ui::{BtnKind, menu_row, popover_card};
 use gpui::prelude::*;
 use gpui::{
-    App, Context, Entity, FocusHandle, Focusable, MouseButton, Render, Role, ScrollStrategy,
-    SharedString, StyleRefinement, UniformListScrollHandle, Window, WindowControlArea, canvas, div,
-    px, uniform_list,
+    App, ClipboardItem, Context, Entity, FocusHandle, Focusable, MouseButton, Render, Role,
+    ScrollStrategy, SharedString, StyleRefinement, UniformListScrollHandle, Window,
+    WindowControlArea, canvas, div, px, uniform_list,
 };
 use gpui_kit::component::input::{InputEvent, InputState};
 use std::collections::HashMap;
@@ -662,9 +662,10 @@ impl Render for WarpWindow {
             .bg(theme::window_chrome())
             .text_color(theme::text())
             .font_family(theme::ui_font())
-            // the window root answers the two chords no list owns: `?`/Ctrl+/
-            // for the shortcut sheet and Ctrl+\ for the list. The sheet is
-            // modal: while it is up only Escape and the help chord answer.
+            // the window root answers the chords no list owns: `?`/Ctrl+/ for
+            // the shortcut sheet, Ctrl+\ for the list and Ctrl+C for a
+            // read-only selection. The sheet is modal: while it is up only
+            // Escape and the help chord answer.
             .track_focus(&self.root_focus)
             .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, window, cx| {
                 let modifiers = event.keystroke.modifiers;
@@ -691,6 +692,24 @@ impl Render for WarpWindow {
                     this.open_shortcuts(window, cx);
                     cx.stop_propagation();
                     return;
+                }
+                // Copy for the read-only text: the transcript's markdown
+                // surfaces and the guard's `TextView` take no focus, so their
+                // own Copy action never dispatches. Hand the selection (the
+                // window's, or the document's) to the clipboard here; a
+                // focused field keeps its own Copy.
+                if modifiers.control && !modifiers.shift && key == "c" && !in_field {
+                    let selected = {
+                        let text = gpui_kit::base::TextSelection::selected_text(window, cx);
+                        (!text.is_empty())
+                            .then_some(text)
+                            .or_else(|| warpui_kit_markdown::read_only_selection_text(cx))
+                    };
+                    if let Some(text) = selected.filter(|text| !text.is_empty()) {
+                        cx.write_to_clipboard(ClipboardItem::new_string(text));
+                        cx.stop_propagation();
+                        return;
+                    }
                 }
                 if modifiers.control && !modifiers.shift && key == "\\" {
                     let visible = this.store.read(cx).sidebar_visible;
@@ -728,6 +747,9 @@ impl Render for WarpWindow {
                 rows = rows.child(menu_row(
                     gpui::ElementId::NamedInteger("menu".into(), i as u64),
                     if armed { "Confirm" } else { action.label() },
+                    // the sidebar and chat menus have no keyboard shortcuts:
+                    // a row prints no keycap rather than inventing one
+                    None,
                     destructive,
                     fonts.font_heading,
                     {

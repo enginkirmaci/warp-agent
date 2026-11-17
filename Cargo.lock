@@ -8070,7 +8070,7 @@ dependencies = [
 
 [[package]]
 name = "warp-agent"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "anyhow",
  "async-channel",
@@ -8104,16 +8104,16 @@ dependencies = [
 
 [[package]]
 name = "warpui-kit-build"
-version = "0.2.49"
-source = "git+https://github.com/enginkirmaci/warp-suite?tag=kits-v0.2.49#e9b73c96d435e06d44a9bf639363a55e0ce33d7a"
+version = "0.2.76"
+source = "git+https://github.com/enginkirmaci/warp-suite?tag=kits-v0.2.76#870e30f029aee7aaaedd68b078b29e80d2aa916d"
 dependencies = [
  "winresource",
 ]
 
 [[package]]
 name = "warpui-kit-core"
-version = "0.2.49"
-source = "git+https://github.com/enginkirmaci/warp-suite?tag=kits-v0.2.49#e9b73c96d435e06d44a9bf639363a55e0ce33d7a"
+version = "0.2.76"
+source = "git+https://github.com/enginkirmaci/warp-suite?tag=kits-v0.2.76#870e30f029aee7aaaedd68b078b29e80d2aa916d"
 dependencies = [
  "async-channel",
  "futures-util",
@@ -8128,8 +8128,8 @@ dependencies = [
 
 [[package]]
 name = "warpui-kit-diff"
-version = "0.2.49"
-source = "git+https://github.com/enginkirmaci/warp-suite?tag=kits-v0.2.49#e9b73c96d435e06d44a9bf639363a55e0ce33d7a"
+version = "0.2.76"
+source = "git+https://github.com/enginkirmaci/warp-suite?tag=kits-v0.2.76#870e30f029aee7aaaedd68b078b29e80d2aa916d"
 dependencies = [
  "gpui-kit",
  "gpui-pre",
@@ -8140,8 +8140,8 @@ dependencies = [
 
 [[package]]
 name = "warpui-kit-markdown"
-version = "0.2.49"
-source = "git+https://github.com/enginkirmaci/warp-suite?tag=kits-v0.2.49#e9b73c96d435e06d44a9bf639363a55e0ce33d7a"
+version = "0.2.76"
+source = "git+https://github.com/enginkirmaci/warp-suite?tag=kits-v0.2.76#870e30f029aee7aaaedd68b078b29e80d2aa916d"
 dependencies = [
  "anyhow",
  "gpui-kit",
@@ -8155,8 +8155,8 @@ dependencies = [
 
 [[package]]
 name = "warpui-kit-picker"
-version = "0.2.49"
-source = "git+https://github.com/enginkirmaci/warp-suite?tag=kits-v0.2.49#e9b73c96d435e06d44a9bf639363a55e0ce33d7a"
+version = "0.2.76"
+source = "git+https://github.com/enginkirmaci/warp-suite?tag=kits-v0.2.76#870e30f029aee7aaaedd68b078b29e80d2aa916d"
 dependencies = [
  "gpui-kit",
  "gpui-pre",
@@ -8165,8 +8165,8 @@ dependencies = [
 
 [[package]]
 name = "warpui-kit-platform"
-version = "0.2.49"
-source = "git+https://github.com/enginkirmaci/warp-suite?tag=kits-v0.2.49#e9b73c96d435e06d44a9bf639363a55e0ce33d7a"
+version = "0.2.76"
+source = "git+https://github.com/enginkirmaci/warp-suite?tag=kits-v0.2.76#870e30f029aee7aaaedd68b078b29e80d2aa916d"
 dependencies = [
  "anyhow",
  "gpui-kit",
@@ -8182,8 +8182,8 @@ dependencies = [
 
 [[package]]
 name = "warpui-kit-worktree"
-version = "0.2.74"
-source = "git+https://github.com/enginkirmaci/warp-suite?tag=kits-v0.2.74#2148dbfb3751edf4f55ead0cc10bdb87cc6bb0b4"
+version = "0.2.76"
+source = "git+https://github.com/enginkirmaci/warp-suite?tag=kits-v0.2.76#870e30f029aee7aaaedd68b078b29e80d2aa916d"
 dependencies = [
  "anyhow",
 ]

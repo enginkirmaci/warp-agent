@@ -453,6 +453,9 @@ pub struct WarpWindow {
     /// The OS title the last frame set: the same activity line as the
     /// titlebar chip, written only when it changes.
     window_title: String,
+    /// The title-bar running panel is open: every live chat, in the order it
+    /// started. Closed by a press outside, Escape, or the last chat settling.
+    running_open: bool,
     /// The window root's focus. The body is not made of text fields, so
     /// without a root handle Escape, `?` and Ctrl+\ only fire after an input
     /// has been clicked.
@@ -539,6 +542,7 @@ impl WarpWindow {
             sidebar_focus: cx.focus_handle(),
             sidebar_scroll: UniformListScrollHandle::default(),
             window_title: String::new(),
+            running_open: false,
             root_focus: cx.focus_handle(),
             shortcuts_open: false,
             shortcuts_focus: cx.focus_handle(),
@@ -582,11 +586,10 @@ fn execute_menu_action(store: &Entity<Store>, action: &SideMenuAction, cx: &mut 
 
 impl Render for WarpWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl gpui::IntoElement {
-        // the chip and the OS title count the chats the sidebar shows as
-        // running — a closed tile keeps its chat running, so the open tiles
+        // the chip and the OS title read the same job list the running panel
+        // draws — a closed tile keeps its chat running, so the open tiles
         // alone would say nothing runs while work does
-        let running = self.store.read(cx).running_chats();
-        let activity = (running > 0).then(|| format!("{running} running"));
+        let activity = self.store.read(cx).activity();
         let title = warpui_kit_core::activity::activity_title("Warp Agent", activity.as_deref());
         if self.window_title != title {
             window.set_window_title(&title);
@@ -674,6 +677,17 @@ impl Render for WarpWindow {
             // read-only selection. The sheet is modal: while it is up only
             // Escape and the help chord answer.
             .track_focus(&self.root_focus)
+            // any press outside the running panel takes it down; the chip and
+            // the panel itself stop the press from reaching this handler
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    if this.running_open {
+                        this.running_open = false;
+                        cx.notify();
+                    }
+                }),
+            )
             .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, window, cx| {
                 let modifiers = event.keystroke.modifiers;
                 let key = event.keystroke.key.as_str();
@@ -697,6 +711,15 @@ impl Render for WarpWindow {
                 }
                 if help_key && !in_field {
                     this.open_shortcuts(window, cx);
+                    cx.stop_propagation();
+                    return;
+                }
+                // Escape dismisses the running panel before anything under it
+                // answers; nothing else in the window listens for the key on
+                // the root, so the press is ours to take.
+                if key == "escape" && this.running_open {
+                    this.running_open = false;
+                    cx.notify();
                     cx.stop_propagation();
                     return;
                 }
@@ -732,6 +755,11 @@ impl Render for WarpWindow {
             .child(self.text_menu.clone())
             .child(self.render_titlebar(window, cx))
             .child(content);
+
+        // the running panel hangs under the title bar's chip, above the panes
+        if let Some(panel) = self.render_running_panel(cx) {
+            root = root.child(panel);
+        }
 
         // context menu overlay
         if let Some(menu) = self.menu.clone() {
@@ -1049,6 +1077,125 @@ impl WarpWindow {
             .into_any_element()
     }
 
+    /// The running panel, hanging under the title bar's activity chip: every
+    /// live chat, in the order it started, with its workspace. Closed by a
+    /// press outside, Escape, or the last chat settling.
+    fn render_running_panel(&mut self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        if !self.running_open {
+            return None;
+        }
+        let fonts = self.store.read(cx).fonts;
+        let jobs = self.store.read(cx).running_jobs();
+        if jobs.is_empty() {
+            // the last chat settled while the panel was open: close instead of
+            // flashing an empty card
+            self.running_open = false;
+            return None;
+        }
+        let count = jobs.len();
+        let mut panel = div()
+            .id("running-panel")
+            .debug_selector(|| "running-panel".into())
+            .absolute()
+            .top(px(shell::scaled(shell::TITLE_BAR_HEIGHT)))
+            .right(px(12.))
+            .w(px(380.))
+            .occlude()
+            .rounded_lg()
+            .border_1()
+            .border_color(theme::hairline())
+            .bg(theme::popup())
+            .shadow_lg()
+            .p_2()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .max_h(px(320.))
+            .overflow_y_scroll()
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(
+                        div()
+                            .text_size(px(fonts.font_body))
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_color(theme::text())
+                            .child("Running"),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(fonts.font_meta))
+                            .text_color(theme::text_faint())
+                            .child(if count == 1 {
+                                "1 chat".to_string()
+                            } else {
+                                format!("{count} chats")
+                            }),
+                    ),
+            )
+            .child(
+                div()
+                    .text_size(px(fonts.font_meta))
+                    .text_color(theme::text_faint())
+                    .child("In the order they started."),
+            );
+        for (ix, job) in jobs.into_iter().enumerate() {
+            let key = job.key.clone();
+            panel = panel.child(
+                div()
+                    .id(("running-row", ix))
+                    .debug_selector(move || format!("running-row-{key}"))
+                    .role(gpui::Role::Status)
+                    .aria_label(job.title.clone())
+                    .flex()
+                    .items_start()
+                    .gap_2()
+                    .rounded(px(4.))
+                    .px_1()
+                    .py_1()
+                    .child(warpui_kit_core::motion::spinner(
+                        SharedString::from(format!("running-row-spin-{ix}")),
+                        "icons/spinner.svg",
+                        px(fonts.icon_tiny),
+                        theme::BEHIND,
+                    ))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .gap(px(1.))
+                            .child(
+                                div()
+                                    .text_size(px(fonts.font_meta))
+                                    .font_weight(gpui::FontWeight::MEDIUM)
+                                    .text_color(theme::text())
+                                    .whitespace_nowrap()
+                                    .overflow_hidden()
+                                    .text_ellipsis()
+                                    .child(job.title),
+                            )
+                            .when_some(job.detail, |col, detail| {
+                                col.child(
+                                    div()
+                                        .text_size(px(fonts.font_meta))
+                                        .text_color(theme::text_faint())
+                                        .whitespace_nowrap()
+                                        .overflow_hidden()
+                                        .text_ellipsis()
+                                        .child(detail),
+                                )
+                            }),
+                    ),
+            );
+        }
+        Some(panel.into_any_element())
+    }
+
     fn render_titlebar(&mut self, window: &Window, cx: &mut Context<Self>) -> gpui::AnyElement {
         let (fonts, visible) = {
             let store = self.store.read(cx);
@@ -1067,9 +1214,9 @@ impl WarpWindow {
             }
         };
         let store_handle = self.store.clone();
-        // the chip counts the chats the sidebar shows as running, so it keeps
-        // naming work whose tile was closed
-        let running = self.store.read(cx).running_chats();
+        // the chip reads the same job list the running panel draws, so it
+        // keeps naming work whose tile was closed
+        let activity = self.store.read(cx).activity();
         shell::title_bar()
             .pl_3()
             // the app's own mark on the family's graphite tile, the same
@@ -1138,17 +1285,17 @@ impl WarpWindow {
                         window.start_window_move();
                     }),
             )
-            .when(running > 0, |d| {
+            .when_some(activity, |d, label| {
                 d.child(tip(
                     div()
                         .id("activity-chip")
                         .debug_selector(|| "activity-chip".into())
-                        .role(Role::Status)
-                        .aria_label(SharedString::from(format!("{running} running")))
+                        .a11y_button(format!("{label} — show every running chat"))
+                        .cursor_pointer()
                         .flex_shrink_0()
                         .h(px(28.))
                         .px_2p5()
-                        .rounded(px(14.))
+                        .rounded_full()
                         .bg(theme::panel())
                         .flex()
                         .items_center()
@@ -1156,14 +1303,21 @@ impl WarpWindow {
                         .text_size(px(fonts.font_meta))
                         .font_weight(gpui::FontWeight::MEDIUM)
                         .text_color(theme::BEHIND)
+                        .whitespace_nowrap()
+                        .hover(|s| s.bg(theme::raised()))
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.running_open = !this.running_open;
+                            cx.notify();
+                        }))
                         .child(warpui_kit_core::motion::spinner(
                             "activity-spinner",
                             "icons/spinner.svg",
                             px(fonts.icon_tiny),
                             theme::BEHIND,
                         ))
-                        .child(format!("{running} running")),
-                    format!("{running} running"),
+                        .child(label.clone()),
+                    format!("{label} — show every running chat"),
                 ))
             })
             .child(

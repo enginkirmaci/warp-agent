@@ -93,10 +93,14 @@ impl Store {
             return;
         }
         let changed = if running {
+            self.begin_running(session_id);
             self.running_by_session.insert(session_id.to_string())
         } else {
             self.running_by_session.remove(session_id)
         };
+        if changed && !running {
+            self.end_running(session_id);
+        }
         if !changed {
             return;
         }

@@ -284,6 +284,19 @@ pub struct SubagentInfo {
     pub agent: String,
 }
 
+/// One live chat in the title bar's running panel, worded for display. The
+/// chip shows the only job's title when one runs; the panel lists every job
+/// in started order.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RunningJob {
+    /// Stable id for the row (also the probe selector): "chat:<session id>".
+    pub key: String,
+    /// The chat's title, e.g. "Fix the login bug".
+    pub title: String,
+    /// The workspace the chat belongs to.
+    pub detail: Option<String>,
+}
+
 pub struct Store {
     pub settings: AppSettings,
     pub ui: UiState,
@@ -342,6 +355,11 @@ pub struct Store {
     pub queue: Vec<QueueEntry>,
     workspace_generation: u64,
     running_by_session: HashSet<String>,
+    /// The start order behind the title bar's running panel: session id →
+    /// the sequence the chat began its run in. A key already live keeps its
+    /// original position, so rows never reshuffle while a run is on.
+    running_order: HashMap<String, u64>,
+    running_seq: u64,
     /// Every catalog entry with its harness, including the two harnesses'
     /// same-named models; `models` stays the de-duplicated picker list.
     model_infos: Vec<ModelInfo>,
@@ -553,6 +571,8 @@ impl Store {
             queue: Vec::new(),
             workspace_generation: 0,
             running_by_session: HashSet::new(),
+            running_order: HashMap::new(),
+            running_seq: 0,
             model_infos,
             models_live: HashSet::new(),
             models_refreshing: None,
@@ -1411,6 +1431,7 @@ impl Store {
         self.open_tiles.retain(|tile| tile.key != key);
         self.open_tiles.push(tile);
         if running {
+            self.begin_running(session_id);
             self.running_by_session.insert(session_id.to_string());
         }
         self.repaint(cx);
@@ -1471,6 +1492,61 @@ impl Store {
             .iter()
             .filter(|id| !self.hidden_sessions.contains(*id))
             .count()
+    }
+
+    /// Every live chat, in the order it started. The title bar's chip counts
+    /// this list and its panel draws it; one caller owns both so the count
+    /// and the rows can never disagree. The same hidden filter as
+    /// [Self::running_chats] keeps the panel off the door's background runs.
+    pub fn running_jobs(&self) -> Vec<RunningJob> {
+        let mut jobs: Vec<(u64, RunningJob)> = Vec::new();
+        for id in &self.running_by_session {
+            if self.hidden_sessions.contains(id) {
+                continue;
+            }
+            let seq = self.running_order.get(id).copied().unwrap_or(u64::MAX);
+            let workspace = self.workspace_name_for(id);
+            // the chat's visible name: the tile's title (a rename reaches it
+            // at once), or the session registry when no tile is open
+            let title = self
+                .tile_for_session(id)
+                .map(|tile| tile.title.clone())
+                .filter(|title| !title.is_empty())
+                .unwrap_or_else(|| self.title_for(id));
+            jobs.push((
+                seq,
+                RunningJob {
+                    key: format!("chat:{id}"),
+                    title,
+                    detail: (!workspace.is_empty()).then_some(workspace),
+                },
+            ));
+        }
+        jobs.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.key.cmp(&b.1.key)));
+        jobs.into_iter().map(|(_, job)| job).collect()
+    }
+
+    /// What the title bar says, from the same list the running panel draws.
+    pub fn activity(&self) -> Option<String> {
+        match self.running_jobs().as_slice() {
+            [] => None,
+            [job] => Some(job.title.clone()),
+            jobs => Some(format!("{} running", jobs.len())),
+        }
+    }
+
+    /// Records the sequence a chat's run began in; a session already live
+    /// keeps its original position.
+    pub(super) fn begin_running(&mut self, session_id: &str) {
+        if !self.running_order.contains_key(session_id) {
+            self.running_seq += 1;
+            self.running_order
+                .insert(session_id.to_string(), self.running_seq);
+        }
+    }
+
+    pub(super) fn end_running(&mut self, session_id: &str) {
+        self.running_order.remove(session_id);
     }
 
     pub fn tile_columns(&self) -> usize {
@@ -3121,5 +3197,48 @@ mod command_flow_tests {
             );
         }
         let _ = draft;
+    }
+
+    #[gpui_kit::gpui::test]
+    fn running_jobs_orders_chats_by_start_and_activity_follows(cx: &mut gpui::TestAppContext) {
+        let _lock = super::test_support::lock_home();
+        let home = HomeGuard::new();
+        let folder = home.home.join("workspace");
+        std::fs::create_dir_all(&folder).expect("workspace");
+        let folder = folder.to_string_lossy().to_string();
+        let store = cx.update(Store::for_probe);
+        store.update(cx, |store, cx| {
+            store.add_workspace(&folder, cx);
+            // the panel titles chats from their visible tile titles
+            store.seed_probe_tile(&folder, "session-one", "First chat", Vec::new(), true, cx);
+            store.seed_probe_tile(&folder, "session-two", "Second chat", Vec::new(), true, cx);
+
+            let jobs = store.running_jobs();
+            assert_eq!(
+                jobs.iter()
+                    .map(|job| job.title.as_str())
+                    .collect::<Vec<_>>(),
+                vec!["First chat", "Second chat"],
+                "the panel lists chats in the order they started"
+            );
+            assert_eq!(
+                jobs.iter()
+                    .map(|job| job.detail.as_deref())
+                    .collect::<Vec<_>>(),
+                // the workspace name comes from the folder's basename
+                vec![Some("workspace"), Some("workspace")],
+            );
+            // several jobs count; one names itself
+            assert_eq!(store.activity().as_deref(), Some("2 running"));
+            store.set_running(Some("session-one"), false);
+            assert_eq!(store.activity().as_deref(), Some("Second chat"));
+            assert_eq!(
+                store.running_jobs()[0].title,
+                "Second chat",
+                "the surviving row keeps the list without reshuffling the gap"
+            );
+            store.set_running(Some("session-two"), false);
+            assert_eq!(store.activity(), None);
+        });
     }
 }

@@ -1,9 +1,10 @@
 //! The real window's OS title: the titlebar activity rule reaches
 //! `VisualTestContext::window_title()` exactly as it reaches the platform.
 //!
-//! The title is `warpui_kit_core::activity::activity_title`: the running count
-//! and the app name joined by the kit's em-dash separator while a chat runs,
-//! and the bare app name otherwise. The titlebar chip carries the same count
+//! The title is `warpui_kit_core::activity::activity_title`: the lone
+//! running chat's own name — or the running count when several run — and the
+//! app name joined by the kit's em-dash separator while a chat runs, and the
+//! bare app name otherwise. The titlebar chip carries the same activity line
 //! as its accessible name, so the accessibility tree is checked next to the
 //! OS title when this test platform builds one.
 
@@ -101,22 +102,23 @@ fn a_running_chat_sets_the_counted_title(cx: &mut TestAppContext) {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let _home = HomeGuard::new("title-running");
-    let (_window, cx) = seed_and_open(cx, &_home.home, true);
+    let (window, cx) = seed_and_open(cx, &_home.home, true);
 
     assert_eq!(
         cx.window_title().as_deref(),
-        Some("1 running — Warp Agent"),
-        "a running tile puts its count before the app name in the OS title"
+        Some("Probe chat — Warp Agent"),
+        "one running chat names itself before the app name, the way \
+         Store::activity names a lone job"
     );
 
-    // The chip draws only while something runs; its aria_label is the same
-    // "<n> running" line. The debug tree retains the last frame's a11y update,
+    // The chip draws only while something runs; its label names the same job
+    // the OS title does. The debug tree retains the last frame's a11y update,
     // which this headless platform may never build (accessibility activates
     // from the platform adapter, and the test adapter is a no-op).
     let a11y = cx.update(|window, _| window.debug_a11y_tree_json());
     match a11y.as_deref() {
         Some(json) => assert!(
-            json.contains("1 running"),
+            json.contains("Probe chat"),
             "the running chip's accessible name is in the a11y tree: {json}"
         ),
         None => eprintln!(
@@ -125,6 +127,28 @@ fn a_running_chat_sets_the_counted_title(cx: &mut TestAppContext) {
              assertion above is the proof of the running state"
         ),
     }
+
+    // several running chats fall back to the counted form, exactly the shape
+    // the design doc's example shows
+    window.update(cx, |window, cx| {
+        let folder = &_home.home.join("workspace").to_string_lossy().to_string();
+        window.store.update(cx, |store, cx| {
+            store.seed_probe_tile(
+                folder,
+                "probe-chat-two",
+                "Second chat",
+                Vec::new(),
+                true,
+                cx,
+            );
+        });
+    });
+    draw(cx);
+    assert_eq!(
+        cx.window_title().as_deref(),
+        Some("2 running — Warp Agent"),
+        "two running chats put the count before the app name in the OS title"
+    );
 }
 
 #[gpui::test]

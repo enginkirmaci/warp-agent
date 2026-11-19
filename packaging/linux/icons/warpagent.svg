@@ -1,5 +1,17 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128" role="img" aria-label="Warp Agent">
-  <rect width="128" height="128" rx="28" fill="#6B6157"/>
-  <path fill="#F5EFE4" d="M56 46 Q61.7 64.3 80 70 Q61.7 75.7 56 94 Q50.3 75.7 32 70 Q50.3 64.3 56 46 Z"/>
-  <path fill="#C9BFAF" d="M80 32 Q82.38 39.62 90 42 Q82.38 44.38 80 52 Q77.62 44.38 70 42 Q77.62 39.62 80 32 Z"/>
+  <defs>
+    <linearGradient id="g" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#3A3C40"/>
+      <stop offset="1" stop-color="#141517"/>
+    </linearGradient>
+    <filter id="s" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="2" stdDeviation="2.2" flood-color="#000000" flood-opacity="0.24"/>
+    </filter>
+  </defs>
+  <g filter="url(#s)">
+    <g transform="translate(64 67) scale(1.45) translate(-64 -64)">
+      <path fill="url(#g)" d="M56 46 Q61.7 64.3 80 70 Q61.7 75.7 56 94 Q50.3 75.7 32 70 Q50.3 64.3 56 46 Z"/>
+      <path fill="#F2F3F4" d="M80 32 Q82.38 39.62 90 42 Q82.38 44.38 80 52 Q77.62 44.38 70 42 Q77.62 39.62 80 32 Z"/>
+    </g>
+  </g>
 </svg>

@@ -17,6 +17,7 @@ use gpui_kit::component::input::{InputEvent, InputState};
 use std::collections::HashMap;
 use std::rc::Rc;
 use warpui_kit_core::A11y as _;
+use warpui_kit_core::about;
 use warpui_kit_core::list_nav;
 use warpui_kit_core::pane_nav::{self, PaneNav};
 use warpui_kit_core::settings as kit;
@@ -498,11 +499,11 @@ impl WarpWindow {
             add_folder_receiver: folder_rx,
             settings_buffers,
             settings_section: SettingsSection::Appearance,
-            about_selected: warpui_kit_core::about::AppId::Agent,
+            about_selected: about::AppId::Agent,
             // the screen never renders empty: the running app needs no probe,
             // the siblings land from the one background scan
             about_members: vec![warpui_kit_core::about::current_member(
-                warpui_kit_core::about::AppId::Agent,
+                about::AppId::Agent,
                 &warpui_kit_core::build_info!(),
             )],
             about_scan_started: false,
@@ -1071,23 +1072,13 @@ impl WarpWindow {
         let running = self.store.read(cx).running_chats();
         shell::title_bar()
             .pl_3()
-            .child(
-                div()
-                    .flex_shrink_0()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .size(px(28.))
-                    .rounded(px(6.))
-                    .bg(theme::brand_bg())
-                    // the app's own mark, in the family's currentColor glyph —
-                    // a plain accent tile like the siblings', no ring
-                    .child(crate::ui::icon(
-                        "icons/logo.svg",
-                        px(fonts.icon_small),
-                        theme::accent_ink(),
-                    )),
-            )
+            // the app's own mark on the family's graphite tile, the same
+            // two-tone drawing the About screen and the sibling apps draw
+            .child(about::brand_tile(
+                about::AppId::Agent,
+                28.,
+                fonts.icon_small,
+            ))
             .child(
                 div()
                     .flex_shrink_0()
@@ -1100,16 +1091,12 @@ impl WarpWindow {
             // its own mark and name, behind one separator
             .child(
                 shell::app_links().child(tip(
-                    shell::app_link(
-                        "launch-station",
-                        "icons/logo-station.svg",
-                        "Open Warp Station",
-                    )
-                    .on_click(|_, _, _| {
-                        if let Err(err) = crate::services::launch_sibling("warp-station") {
-                            tracing::warn!("could not launch warp-station: {err}");
-                        }
-                    }),
+                    shell::app_link("launch-station", about::AppId::Station, "Open Warp Station")
+                        .on_click(|_, _, _| {
+                            if let Err(err) = crate::services::launch_sibling("warp-station") {
+                                tracing::warn!("could not launch warp-station: {err}");
+                            }
+                        }),
                     "Open Warp Station",
                 )),
             )

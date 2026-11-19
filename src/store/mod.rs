@@ -38,6 +38,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 pub use tile::*;
+use warpui_kit_platform::config::KeyMap;
 
 pub const DEFAULT_MODEL_ENTRY: &str = "(server default)";
 pub const DEFAULT_VARIANT_ENTRY: &str = "(default)";
@@ -87,6 +88,10 @@ fn repository_of(folder: &str) -> Option<std::path::PathBuf> {
 /// Minimum spacing between stream-driven repaints; 10 fps is plenty for
 /// streaming text and keeps a busy turn off the compositor's frame rate.
 const STREAM_REPAINT_INTERVAL: Duration = Duration::from_millis(100);
+
+/// How many parent links a subagent lineage walk follows before treating the
+/// chain as malformed. A real tree is shallow; a cycle must not hang the store.
+const MAX_LINEAGE_DEPTH: usize = 64;
 
 /// ["(default)"] plus the model's variants — a tile's picker list. Stays at
 /// the bare sentinel until the server's model list lands (ModelsLoaded) or
@@ -1600,24 +1605,22 @@ impl Store {
     }
 
     fn effective_workspace_path(&self, session_id: &str) -> Option<String> {
-        if let Some(path) = self.workspace_by_session.get(session_id) {
-            return Some(path.clone());
-        }
-        if let Some(sub) = self.subagent_by_session.get(session_id)
-            && let Some(path) = self.workspace_by_session.get(&sub.parent_session_id)
-        {
-            return Some(path.clone());
-        }
-        None
+        lineage_workspace_path(
+            session_id,
+            &self.workspace_by_session,
+            &self.subagent_by_session,
+        )
     }
 
     /// Which backend a session runs on. Sessions predate per-chat harnesses,
-    /// so anything unrecorded is opencode.
+    /// so anything unrecorded follows its owning chat; a tree with no recorded
+    /// harness either is opencode.
     pub fn session_harness(&self, session_id: &str) -> HarnessKind {
-        match self.ui.harness_by_session.get(session_id) {
-            Some(HarnessKind::Dsh) => HarnessKind::Dsh,
-            _ => HarnessKind::OpenCode,
-        }
+        lineage_harness(
+            session_id,
+            &self.ui.harness_by_session,
+            &self.subagent_by_session,
+        )
     }
 
     /// The net-thread key a session's server lives on: the workspace folder
@@ -1950,8 +1953,13 @@ impl Store {
     /// that spawned it (a nested subagent climbs to its top-level parent).
     fn owner_session_id(&self, session_id: &str) -> String {
         let mut current = session_id.to_string();
-        while let Some(sub) = self.subagent_by_session.get(&current) {
-            current = sub.parent_session_id.clone();
+        for _ in 0..MAX_LINEAGE_DEPTH {
+            match self.subagent_by_session.get(&current) {
+                Some(sub) if sub.parent_session_id.as_str() != current => {
+                    current = sub.parent_session_id.clone();
+                }
+                _ => break,
+            }
         }
         current
     }
@@ -2578,6 +2586,53 @@ fn rand_0_to(n: i64) -> i64 {
         .map(|d| d.subsec_nanos() as i64 ^ (d.as_secs() as i64))
         .unwrap_or(0);
     nanos.rem_euclid(n + 1)
+}
+
+/// The folder a session's harness runs in: its own workspace entry, else the
+/// nearest ancestor's. A subagent session usually has no entry of its own, so
+/// a nested run climbs to the chat that spawned it; the depth cap keeps a
+/// malformed parent cycle from looping forever.
+fn lineage_workspace_path(
+    session_id: &str,
+    workspaces: &HashMap<String, String>,
+    subagents: &HashMap<String, SubagentInfo>,
+) -> Option<String> {
+    let mut current = session_id;
+    for _ in 0..=MAX_LINEAGE_DEPTH {
+        if let Some(path) = workspaces.get(current) {
+            return Some(path.clone());
+        }
+        match subagents.get(current) {
+            Some(sub) if sub.parent_session_id.as_str() != current => {
+                current = sub.parent_session_id.as_str();
+            }
+            _ => return None,
+        }
+    }
+    None
+}
+
+/// The harness a session runs on: its own recorded harness, else the nearest
+/// ancestor's. A tree with no recorded harness is opencode, the pre-harness
+/// default. Same depth cap as the workspace walk.
+fn lineage_harness(
+    session_id: &str,
+    harnesses: &KeyMap<HarnessKind>,
+    subagents: &HashMap<String, SubagentInfo>,
+) -> HarnessKind {
+    let mut current = session_id;
+    for _ in 0..=MAX_LINEAGE_DEPTH {
+        if let Some(kind) = harnesses.get(current) {
+            return *kind;
+        }
+        match subagents.get(current) {
+            Some(sub) if sub.parent_session_id.as_str() != current => {
+                current = sub.parent_session_id.as_str();
+            }
+            _ => break,
+        }
+    }
+    HarnessKind::OpenCode
 }
 
 #[cfg(test)]
@@ -3240,5 +3295,98 @@ mod command_flow_tests {
             store.set_running(Some("session-two"), false);
             assert_eq!(store.activity(), None);
         });
+    }
+}
+
+#[cfg(test)]
+mod lineage_tests {
+    use super::{
+        HarnessKind, HashMap, KeyMap, SubagentInfo, lineage_harness, lineage_workspace_path,
+    };
+
+    fn subagent(parent: &str) -> SubagentInfo {
+        SubagentInfo {
+            parent_session_id: parent.to_string(),
+            agent: "Explore".to_string(),
+        }
+    }
+
+    #[test]
+    fn a_nested_subagent_climbs_to_the_root_workspace() {
+        let mut workspaces = HashMap::new();
+        workspaces.insert("session-root".to_string(), "/repo".to_string());
+        let mut subagents = HashMap::new();
+        subagents.insert("child".to_string(), subagent("session-root"));
+        subagents.insert("grandchild".to_string(), subagent("child"));
+
+        assert_eq!(
+            lineage_workspace_path("grandchild", &workspaces, &subagents).as_deref(),
+            Some("/repo"),
+            "a depth-2 session answers with its root chat's folder"
+        );
+    }
+
+    #[test]
+    fn a_workspace_of_its_own_wins_over_the_lineage() {
+        let mut workspaces = HashMap::new();
+        workspaces.insert("session-root".to_string(), "/repo".to_string());
+        workspaces.insert("child".to_string(), "/worktree".to_string());
+        let mut subagents = HashMap::new();
+        subagents.insert("child".to_string(), subagent("session-root"));
+
+        assert_eq!(
+            lineage_workspace_path("child", &workspaces, &subagents).as_deref(),
+            Some("/worktree")
+        );
+    }
+
+    #[test]
+    fn an_unknown_session_has_no_folder() {
+        assert_eq!(
+            lineage_workspace_path("stray", &HashMap::new(), &HashMap::new()),
+            None
+        );
+    }
+
+    #[test]
+    fn a_parent_cycle_stops_instead_of_looping() {
+        let mut subagents = HashMap::new();
+        subagents.insert("a".to_string(), subagent("b"));
+        subagents.insert("b".to_string(), subagent("a"));
+
+        assert_eq!(
+            lineage_workspace_path("a", &HashMap::new(), &subagents),
+            None,
+            "the depth cap ends a malformed chain"
+        );
+    }
+
+    #[test]
+    fn a_subagent_inherits_its_owners_harness() {
+        let mut harnesses = KeyMap::new();
+        harnesses.insert("session-root".to_string(), HarnessKind::Dsh);
+        let mut subagents = HashMap::new();
+        subagents.insert("child".to_string(), subagent("session-root"));
+        subagents.insert("grandchild".to_string(), subagent("child"));
+
+        assert_eq!(
+            lineage_harness("grandchild", &harnesses, &subagents),
+            HarnessKind::Dsh,
+            "an unmarked subagent follows the chat that spawned it"
+        );
+    }
+
+    #[test]
+    fn a_subagents_own_harness_wins_over_the_lineage() {
+        let mut harnesses = KeyMap::new();
+        harnesses.insert("session-root".to_string(), HarnessKind::Dsh);
+        harnesses.insert("child".to_string(), HarnessKind::OpenCode);
+        let mut subagents = HashMap::new();
+        subagents.insert("child".to_string(), subagent("session-root"));
+
+        assert_eq!(
+            lineage_harness("child", &harnesses, &subagents),
+            HarnessKind::OpenCode
+        );
     }
 }

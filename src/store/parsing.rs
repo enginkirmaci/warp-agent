@@ -43,6 +43,53 @@ pub fn read_token_total(info: &serde_json::Value) -> i64 {
     sum("input") + sum("output") + sum("reasoning") + cache_read + cache_write
 }
 
+/// Generated-token pace of one finished assistant reply.
+///
+/// `rate` counts output + reasoning tokens — what the model generated — over
+/// the reply's own wall time. `None` while a message still streams, when the
+/// harness stamped only one end, or when the window is too short to say
+/// anything about the model rather than the clock.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TokenPace {
+    pub rate: f64,
+    pub generated: i64,
+    pub seconds: f64,
+}
+
+impl TokenPace {
+    /// Below this a window measures clock granularity, not generation.
+    const MIN_WINDOW_MS: i64 = 200;
+
+    pub fn from_info(info: &serde_json::Value) -> Option<Self> {
+        let time = info.get("time")?;
+        let created = time.get("created")?.as_i64()?;
+        let completed = time.get("completed")?.as_i64()?;
+        let window_ms = completed.checked_sub(created)?;
+        if window_ms < Self::MIN_WINDOW_MS {
+            return None;
+        }
+        let tokens = info.get("tokens")?.as_object()?;
+        let generated = ["output", "reasoning"]
+            .iter()
+            .map(|name| {
+                tokens
+                    .get(*name)
+                    .and_then(serde_json::Value::as_i64)
+                    .unwrap_or(0)
+            })
+            .sum::<i64>();
+        if generated <= 0 {
+            return None;
+        }
+        let seconds = window_ms as f64 / 1000.0;
+        Some(Self {
+            rate: generated as f64 / seconds,
+            generated,
+            seconds,
+        })
+    }
+}
+
 /// Compact per-message detail line: token flow, cost.
 pub fn build_meta(info: &serde_json::Value) -> Option<String> {
     if !info.is_object() {
@@ -519,5 +566,45 @@ mod tests {
             &mut tool,
         );
         assert_eq!(tool.title, "apply_patch");
+    }
+
+    #[test]
+    fn a_finished_reply_carries_its_pace() {
+        let pace = TokenPace::from_info(&json!({
+            "time": { "created": 1_000, "completed": 3_000 },
+            "tokens": { "output": 90, "reasoning": 10, "input": 500 },
+        }))
+        .expect("a settled reply with generated tokens has a pace");
+        assert_eq!(pace.generated, 100);
+        assert!((pace.seconds - 2.0).abs() < f64::EPSILON);
+        assert!((pace.rate - 50.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn a_streaming_or_empty_reply_has_no_pace() {
+        // still streaming: no completed stamp
+        assert!(
+            TokenPace::from_info(&json!({
+                "time": { "created": 1_000 },
+                "tokens": { "output": 90 },
+            }))
+            .is_none()
+        );
+        // too short to read as a model rate
+        assert!(
+            TokenPace::from_info(&json!({
+                "time": { "created": 1_000, "completed": 1_050 },
+                "tokens": { "output": 90 },
+            }))
+            .is_none()
+        );
+        // input-only message: nothing was generated
+        assert!(
+            TokenPace::from_info(&json!({
+                "time": { "created": 1_000, "completed": 3_000 },
+                "tokens": { "input": 500 },
+            }))
+            .is_none()
+        );
     }
 }

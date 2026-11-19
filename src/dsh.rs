@@ -86,6 +86,10 @@ pub fn token_from_line(line: &str) -> Option<&str> {
 pub struct DshSessionState {
     pub snapshot_seen: bool,
     pub title: Option<String>,
+    /// End of the last step boundary: a turn start or the newest tool result.
+    /// The assistant message that follows is timed from here, so the header
+    /// can show a pace without dsh stamping message start times.
+    pub boundary_ms: i64,
     /// Ordered opencode-shaped messages; the fold appends and updates in place.
     pub messages: Vec<MessageAcc>,
     /// dsh event seqs each message was built from (surfaceOp replace pruning).
@@ -1163,6 +1167,7 @@ pub fn fold_event(state: &mut DshSessionState, session_id: &str, event: &Value) 
         "tool/call" => fold_tool_call(state, session_id, seq, time, &data, &mut outcome),
         "tool/result" => fold_tool_result(state, session_id, seq, time, &data, &mut outcome),
         "turn/start" => {
+            state.boundary_ms = time;
             outcome.extra.push(status_event(session_id, "busy"));
         }
         "turn/end" => {
@@ -1313,6 +1318,13 @@ fn fold_assistant_message(
     let turn = data.get("turn").and_then(Value::as_i64).unwrap_or(0);
     let step = data.get("step").and_then(Value::as_i64).unwrap_or(0);
     let id = format!("dsh-{turn}-{step}");
+    // the event lands when the model finished, so the step is the window from
+    // the last boundary (turn start, or the newest tool result) to this event
+    let started = if state.boundary_ms > 0 && time > state.boundary_ms {
+        state.boundary_ms
+    } else {
+        time
+    };
     let message_value = data.get("message").cloned().unwrap_or(Value::Null);
     let source = message_value
         .pointer("/source")
@@ -1335,13 +1347,13 @@ fn fold_assistant_message(
     let info = json!({
         "id": id,
         "role": "assistant",
-        "time": { "created": time },
+        "time": { "created": started, "completed": time },
         "providerID": source.get("provider").and_then(Value::as_str).unwrap_or(""),
         "modelID": source.get("model").and_then(Value::as_str).unwrap_or(""),
         "tokens": tokens,
         "cost": 0,
     });
-    let message = upsert_message(state, &id, "assistant", time, info);
+    let message = upsert_message(state, &id, "assistant", started, info);
     let empty_blocks = Vec::new();
     let blocks = message_value
         .get("content")
@@ -1382,6 +1394,7 @@ fn fold_assistant_message(
         "type": "message.updated",
         "properties": { "info": message.info.clone(), "sessionID": session_id },
     }));
+    state.boundary_ms = time;
     let _ = seq;
 }
 
@@ -1445,6 +1458,8 @@ fn fold_tool_result(
     if call_id.is_empty() {
         return;
     }
+    // the tool is done: the next assistant step is timed from this result
+    state.boundary_ms = time;
     let part_id = format!("tool-{call_id}");
     let is_error = message_value
         .get("isError")
@@ -2289,6 +2304,106 @@ mod tests {
         assert_eq!(state.messages.len(), 2);
         let assistant_message = state.messages.iter().find(|m| m.id == "dsh-1-1").unwrap();
         assert_eq!(assistant_message.parts.len(), 3); // reasoning, text, tool
+    }
+
+    #[test]
+    fn a_model_step_carries_its_window_and_pace() {
+        let mut state = DshSessionState::default();
+        let sid = "s";
+        // the turn opens at t=1_000; the step's message lands when the model
+        // is done, at t=3_000
+        fold_event(
+            &mut state,
+            sid,
+            &json!({ "type": "turn/start", "seq": 1, "time": 1_000, "data": { "turn": 1 } }),
+        );
+        let outcome = fold_event(
+            &mut state,
+            sid,
+            &json!({
+                "type": "assistant/message",
+                "seq": 2,
+                "time": 3_000,
+                "data": {
+                    "turn": 1,
+                    "step": 1,
+                    "message": {
+                        "id": "msg-a",
+                        "role": "assistant",
+                        "content": [ { "type": "text", "text": "ready" } ],
+                        "source": { "kind": "model", "provider": "zai", "model": "glm" },
+                    },
+                    "usage": { "inputTokens": 10, "outputTokens": 90, "reasoningTokens": 10 },
+                },
+            }),
+        );
+        let info = outcome
+            .message_updated
+            .as_ref()
+            .unwrap()
+            .pointer("/properties/info")
+            .cloned()
+            .unwrap();
+        assert_eq!(info.pointer("/time/created"), Some(&json!(1_000)));
+        assert_eq!(info.pointer("/time/completed"), Some(&json!(3_000)));
+        let pace = crate::store::TokenPace::from_info(&info).expect("pace");
+        assert_eq!(pace.generated, 100);
+        assert!((pace.rate - 50.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn a_tool_result_moves_the_step_boundary() {
+        let mut state = DshSessionState::default();
+        let sid = "s";
+        fold_event(
+            &mut state,
+            sid,
+            &json!({ "type": "turn/start", "seq": 1, "time": 1_000, "data": { "turn": 1 } }),
+        );
+        fold_event(
+            &mut state,
+            sid,
+            &json!({
+                "type": "tool/call", "seq": 2, "time": 2_000,
+                "data": { "turn": 1, "step": 1, "callId": "c1", "name": "read", "arguments": "{}" },
+            }),
+        );
+        fold_event(
+            &mut state,
+            sid,
+            &json!({
+                "type": "tool/result", "seq": 3, "time": 2_500,
+                "data": { "turn": 1, "step": 1, "message": {
+                    "id": "msg-t", "role": "tool", "toolCallId": "c1", "isError": false,
+                    "content": [ { "type": "text", "text": "ok" } ],
+                } },
+            }),
+        );
+        let outcome = fold_event(
+            &mut state,
+            sid,
+            &json!({
+                "type": "assistant/message", "seq": 4, "time": 4_500,
+                "data": {
+                    "turn": 1, "step": 2,
+                    "message": {
+                        "id": "msg-b", "role": "assistant",
+                        "content": [ { "type": "text", "text": "done" } ],
+                        "source": { "kind": "model", "provider": "p", "model": "m" },
+                    },
+                    "usage": { "outputTokens": 50 },
+                },
+            }),
+        );
+        let info = outcome
+            .message_updated
+            .as_ref()
+            .unwrap()
+            .pointer("/properties/info")
+            .cloned()
+            .unwrap();
+        assert_eq!(info.pointer("/time/created"), Some(&json!(2_500)));
+        assert_eq!(info.pointer("/time/completed"), Some(&json!(4_500)));
     }
 
     #[test]

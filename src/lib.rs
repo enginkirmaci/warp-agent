@@ -5,6 +5,7 @@
 
 mod assets;
 mod dsh;
+pub mod harness;
 mod ipc;
 mod logging;
 mod oc;

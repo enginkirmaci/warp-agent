@@ -13,6 +13,7 @@ pub mod ipc;
 // the impl Store continuation modules, one per section
 mod chat_flow;
 mod events;
+mod harness_events;
 mod items;
 mod notes;
 mod parsing;
@@ -323,6 +324,9 @@ pub struct Store {
 
     pub is_server_running: bool,
     pub auto_allow: bool,
+    /// The typed harness-event path is inert until the adapters are wired; the
+    /// old net path stays authoritative during the expand phase.
+    harness_ingest: bool,
     pub is_settings_open: bool,
     /// The rail's About section: the family table, not a chat surface.
     pub is_about_open: bool,
@@ -547,6 +551,7 @@ impl Store {
             focused_tile: None,
             is_server_running: false,
             auto_allow,
+            harness_ingest: false,
             is_settings_open: false,
             is_about_open: false,
             menu_armed: None,
@@ -2805,6 +2810,8 @@ mod variant_lookup_tests {
 
 #[cfg(test)]
 pub(crate) mod test_support {
+    use std::ffi::OsString;
+    use std::path::PathBuf;
     use std::sync::{Mutex, MutexGuard};
 
     /// Tests that read or rewrite `HOME` take turns: the process environment
@@ -2816,26 +2823,19 @@ pub(crate) mod test_support {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
-}
 
-#[cfg(test)]
-mod command_flow_tests {
-    use super::*;
-    use crate::oc::{ApiRequest, NetCommand, UiEvent};
-    use serde_json::json;
-    use std::ffi::OsString;
-    use std::path::PathBuf;
-
-    struct HomeGuard {
-        home: PathBuf,
+    /// A scratch `HOME` for a test that reads or writes app state; pair it with
+    /// [`lock_home`].
+    pub(crate) struct HomeGuard {
+        pub(crate) home: PathBuf,
         old_home: Option<OsString>,
         old_profile: Option<OsString>,
     }
 
     impl HomeGuard {
-        fn new() -> Self {
-            let home = std::env::temp_dir()
-                .join(format!("warp-agent-command-flow-{}", std::process::id()));
+        pub(crate) fn new() -> Self {
+            let home =
+                std::env::temp_dir().join(format!("warp-agent-test-home-{}", std::process::id()));
             let _ = std::fs::remove_dir_all(&home);
             std::fs::create_dir_all(&home).expect("scratch home");
             let old_home = std::env::var_os("HOME");
@@ -2868,6 +2868,14 @@ mod command_flow_tests {
             let _ = std::fs::remove_dir_all(&self.home);
         }
     }
+}
+
+#[cfg(test)]
+mod command_flow_tests {
+    use super::test_support::HomeGuard;
+    use super::*;
+    use crate::oc::{ApiRequest, NetCommand, UiEvent};
+    use serde_json::json;
 
     /// A dsh `session/title` arrives as `session.updated`; the tile header and
     /// the sidebar row must both take the server's title, without waiting for

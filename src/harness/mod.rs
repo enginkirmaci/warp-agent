@@ -9,6 +9,11 @@ mod interface;
 mod registry;
 mod types;
 
+/// Test doubles for the harness seam: unit tests and probes use them to drive
+/// the store and the views without a network or a child process.
+#[doc(hidden)]
+pub mod test_support;
+
 pub use host::HarnessHost;
 pub use interface::Harness;
 pub use registry::{HarnessDescriptor, HarnessRegistry};
@@ -19,114 +24,13 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
 
-    use async_channel::{Receiver, Sender, bounded};
-
+    use super::test_support::FakeHarness;
     use super::*;
 
     const FAKE_ID: &str = "fake";
 
-    struct FakeHarness {
-        id: HarnessId,
-        rx: Receiver<HarnessEvent>,
-        _tx: Sender<HarnessEvent>,
-        started: Arc<AtomicBool>,
-        stopped: Arc<AtomicBool>,
-    }
-
-    impl FakeHarness {
-        fn new() -> Self {
-            Self::with_flags(
-                Arc::new(AtomicBool::new(false)),
-                Arc::new(AtomicBool::new(false)),
-            )
-        }
-
-        fn with_flags(started: Arc<AtomicBool>, stopped: Arc<AtomicBool>) -> Self {
-            let (tx, rx) = bounded(8);
-            Self {
-                id: HarnessId::new(FAKE_ID),
-                rx,
-                _tx: tx,
-                started,
-                stopped,
-            }
-        }
-    }
-
-    macro_rules! impl_fake_harness {
-        ($($name:ident($($arg:ident: $ty:ty),* $(,)?) -> $ret:ty;)*) => {
-            impl Harness for FakeHarness {
-                fn id(&self) -> HarnessId {
-                    self.id.clone()
-                }
-
-                fn health(&self) -> HarnessHealth {
-                    HarnessHealth::ready()
-                }
-
-                fn start(&mut self) -> Result<(), HarnessError> {
-                    self.started.store(true, Ordering::SeqCst);
-                    Ok(())
-                }
-
-                fn stop(&mut self) -> Result<(), HarnessError> {
-                    self.stopped.store(true, Ordering::SeqCst);
-                    Ok(())
-                }
-
-                fn events(&self) -> Receiver<HarnessEvent> {
-                    self.rx.clone()
-                }
-
-                $(
-                    fn $name(&mut self, $($arg: $ty),*) -> Result<$ret, HarnessError> {
-                        let _ = ($($arg),*);
-                        Err(HarnessError::Unsupported(stringify!($name)))
-                    }
-                )*
-            }
-        };
-    }
-
-    impl_fake_harness! {
-        providers() -> Vec<Provider>;
-        models() -> Vec<Model>;
-        agents() -> Vec<Agent>;
-        commands() -> Vec<Command>;
-        skills() -> Vec<Skill>;
-        sessions() -> Vec<SessionSummary>;
-        session(session: &SessionId) -> SessionSummary;
-        create_session(spec: NewSession) -> SessionSummary;
-        fork_session(session: &SessionId, before: Option<&str>) -> SessionSummary;
-        rename_session(session: &SessionId, title: &str) -> ();
-        delete_session(session: &SessionId) -> ();
-        send_prompt(session: &SessionId, prompt: Prompt) -> ();
-        interrupt(session: &SessionId) -> ();
-        compact(session: &SessionId) -> ();
-        run_command(session: &SessionId, command: CommandRun) -> ();
-        activate_skill(session: &SessionId, skill: &str) -> ();
-        permissions(session: &SessionId) -> Vec<PermissionRequest>;
-        reply_permission(session: &SessionId, request: &str, decision: PermissionDecision) -> ();
-        forms(session: &SessionId) -> Vec<FormRequest>;
-        reply_form(session: &SessionId, form: &str, answer: FormAnswer) -> ();
-        diff(session: &SessionId) -> Vec<FileDiff>;
-        inbox(session: &SessionId) -> Vec<InboxItem>;
-        update_inbox(session: &SessionId, item: &str, delivery: InboxDelivery) -> ();
-        cancel_inbox(session: &SessionId, item: &str) -> ();
-        stage_revert(session: &SessionId, before: &str) -> ();
-        commit_revert(session: &SessionId) -> ();
-        clear_revert(session: &SessionId) -> ();
-        run_shell(session: &SessionId, command: &str) -> ();
-        background_session(session: &SessionId) -> ();
-        mcp_servers() -> Vec<McpServer>;
-        add_mcp(config: McpConfig) -> ();
-        connect_mcp(name: &str) -> ();
-        disconnect_mcp(name: &str) -> ();
-        remove_mcp(name: &str) -> ();
-    }
-
     fn fake_harness_factory(_config: HarnessConfig) -> Box<dyn Harness> {
-        Box::new(FakeHarness::new())
+        Box::new(FakeHarness::new(FAKE_ID))
     }
 
     fn fake_descriptor() -> HarnessDescriptor {
@@ -226,6 +130,7 @@ mod tests {
         let started = Arc::new(AtomicBool::new(false));
         let stopped = Arc::new(AtomicBool::new(false));
         host.register_instance(Box::new(FakeHarness::with_flags(
+            FAKE_ID,
             started.clone(),
             stopped.clone(),
         )))
@@ -246,7 +151,7 @@ mod tests {
     fn the_host_rejects_an_unknown_harness() {
         let mut host = HarnessHost::new(HarnessRegistry::new());
         let error = host
-            .register_instance(Box::new(FakeHarness::new()))
+            .register_instance(Box::new(FakeHarness::new(FAKE_ID)))
             .unwrap_err();
         assert_eq!(error, HarnessError::UnknownHarness(FAKE_ID.into()));
     }
@@ -257,10 +162,10 @@ mod tests {
         registry.register(fake_descriptor()).unwrap();
 
         let mut host = HarnessHost::new(registry);
-        host.register_instance(Box::new(FakeHarness::new()))
+        host.register_instance(Box::new(FakeHarness::new(FAKE_ID)))
             .unwrap();
         let error = host
-            .register_instance(Box::new(FakeHarness::new()))
+            .register_instance(Box::new(FakeHarness::new(FAKE_ID)))
             .unwrap_err();
         assert!(matches!(error, HarnessError::DuplicateInstance(_)));
     }

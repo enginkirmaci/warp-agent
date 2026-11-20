@@ -264,16 +264,199 @@ impl HarnessHealth {
     }
 }
 
-/// What a harness instance reports on its event stream.
-///
-/// The full session/message/approval vocabulary lands with the typed-event
-/// ticket; this scaffold carries only the lifecycle and error events.
+/// The running state of one session.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SessionState {
+    Idle,
+    Busy,
+    Retry,
+}
+
+/// The author of one message.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MessageRole {
+    User,
+    Assistant,
+}
+
+impl MessageRole {
+    pub fn as_wire(self) -> &'static str {
+        match self {
+            Self::User => "user",
+            Self::Assistant => "assistant",
+        }
+    }
+}
+
+/// Token totals one message reports.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TokenUsage {
+    pub input: i64,
+    pub output: i64,
+    pub reasoning: i64,
+    pub cache_read: i64,
+    pub cache_write: i64,
+}
+
+/// A full message snapshot; adapters send the whole message, not a delta.
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MessageSnapshot {
+    pub id: String,
+    pub session: SessionId,
+    pub role: MessageRole,
+    pub created_ms: i64,
+    pub completed_ms: Option<i64>,
+    pub provider: Option<String>,
+    pub model: Option<String>,
+    pub error: Option<String>,
+    pub tokens: Option<TokenUsage>,
+    /// Cost in millionths of a currency unit; `None` when unknown.
+    pub cost_micros: Option<i64>,
+}
+
+/// One tool call's state.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ToolState {
+    Pending,
+    Running,
+    Completed { output: String },
+    Failed { message: String },
+}
+
+/// One tool call carried by a part snapshot.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ToolSnapshot {
+    pub name: String,
+    pub state: ToolState,
+    pub input: Option<serde_json::Value>,
+    pub title: Option<String>,
+    pub metadata: Option<serde_json::Value>,
+}
+
+/// One file/image part.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FileSnapshot {
+    pub url: String,
+    pub filename: String,
+}
+
+/// A part's payload; the variant says which fields exist.
+#[derive(Clone, Debug, PartialEq)]
+pub enum PartPayload {
+    Text(String),
+    Reasoning(String),
+    Tool(ToolSnapshot),
+    StepStart,
+    StepFinish,
+    File(FileSnapshot),
+}
+
+impl PartPayload {
+    pub fn as_wire(&self) -> &'static str {
+        match self {
+            Self::Text(_) => "text",
+            Self::Reasoning(_) => "reasoning",
+            Self::Tool(_) => "tool",
+            Self::StepStart => "step-start",
+            Self::StepFinish => "step-finish",
+            Self::File(_) => "file",
+        }
+    }
+}
+
+/// A full part snapshot; the v2 adapter accumulates deltas into this shape.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PartSnapshot {
+    pub id: String,
+    pub session: SessionId,
+    pub message_id: String,
+    pub payload: PartPayload,
+}
+
+/// What a harness instance reports on its event stream.
+#[derive(Clone, Debug, PartialEq)]
 pub enum HarnessEvent {
     Connected,
-    Disconnected { reason: Option<String> },
+    Disconnected {
+        reason: Option<String>,
+    },
     Health(HarnessHealth),
-    Error { message: String },
+    /// A session was created; the parent establishes subagent lineage.
+    SessionCreated {
+        session: SessionId,
+        title: Option<String>,
+        parent: Option<SessionId>,
+        agent: Option<String>,
+    },
+    /// A session's title or agent moved.
+    SessionChanged {
+        session: SessionId,
+        title: Option<String>,
+        agent: Option<String>,
+    },
+    /// A session was deleted.
+    SessionDeleted {
+        session: SessionId,
+    },
+    /// The session started, retried or went idle.
+    SessionStatus {
+        session: SessionId,
+        state: SessionState,
+    },
+    /// A full message snapshot.
+    MessageSnapshot {
+        message: MessageSnapshot,
+    },
+    /// A full part snapshot (text, reasoning, tool, step or file).
+    PartSnapshot {
+        part: PartSnapshot,
+    },
+    /// An approval request.
+    PermissionAsked {
+        request: PermissionRequest,
+    },
+    /// An approval was answered, possibly elsewhere.
+    PermissionReplied {
+        session: SessionId,
+        request: String,
+        decision: PermissionDecision,
+    },
+    /// A structured question or form.
+    QuestionAsked {
+        request: FormRequest,
+    },
+    /// A question or form was answered, possibly elsewhere.
+    QuestionResolved {
+        session: SessionId,
+        request: String,
+        summary: Option<String>,
+    },
+    /// The model catalog landed.
+    ModelsLoaded {
+        models: Vec<Model>,
+    },
+    /// The agent catalog landed.
+    AgentsLoaded {
+        agents: Vec<Agent>,
+    },
+    /// The command/skill catalog landed.
+    CommandsLoaded {
+        /// The workspace the catalog belongs to, for a per-workspace harness.
+        directory: Option<PathBuf>,
+        commands: Vec<Command>,
+    },
+    /// The skill catalog landed.
+    SkillsLoaded {
+        /// The workspace the catalog belongs to, for a per-workspace harness.
+        directory: Option<PathBuf>,
+        skills: Vec<Skill>,
+    },
+    /// A structured error; `session` is None for a server-level failure.
+    Error {
+        session: Option<SessionId>,
+        message: String,
+        retryable: bool,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -294,6 +477,7 @@ pub struct Model {
 pub struct Agent {
     pub name: String,
     pub mode: String,
+    pub hidden: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

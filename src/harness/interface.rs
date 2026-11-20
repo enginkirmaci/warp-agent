@@ -6,6 +6,7 @@
 //! descriptor says which of them the UI should offer.
 
 use async_channel::Receiver;
+use std::path::PathBuf;
 
 use super::types::{
     Agent, Command, CommandRun, FileDiff, FormAnswer, FormRequest, HarnessError, HarnessEvent,
@@ -22,6 +23,11 @@ use super::types::{
 pub trait Harness: Send + Sync {
     /// The stable id this instance was created for.
     fn id(&self) -> HarnessId;
+
+    /// The workspace this instance serves, for a per-workspace harness.
+    fn scope(&self) -> Option<PathBuf> {
+        None
+    }
 
     /// The last known health state; cheap, never blocks on the network.
     fn health(&self) -> HarnessHealth;

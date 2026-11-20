@@ -10,8 +10,8 @@ use std::path::Path;
 
 use super::Store;
 use crate::harness::{
-    FormFieldKind, HarnessError, HarnessEvent, HarnessId, PartPayload, PermissionDecision,
-    SessionId, SessionState, ToolSnapshot, ToolState,
+    FormFieldKind, HarnessError, HarnessEvent, HarnessId, PartPayload, SessionId, SessionState,
+    ToolSnapshot, ToolState,
 };
 use crate::oc::{AgentInfo, CommandInfo, DSH_SERVER_KEY, ModelInfo, UiEvent};
 use crate::settings::HarnessKind;
@@ -70,6 +70,7 @@ impl Store {
             HarnessEvent::SessionChanged {
                 session,
                 title,
+                parent,
                 agent,
             } => {
                 let ws_key = self.harness_ws_key(harness, Some(&session), None)?;
@@ -82,8 +83,13 @@ impl Store {
                 }
                 // a title update must not detach a subagent: carry the parent
                 // the store already knows about when the event omits it
-                if let Some(parent) = self.subagent_by_session.get(session.as_str()) {
-                    info["parentID"] = json!(parent.parent_session_id);
+                let parent = parent.or_else(|| {
+                    self.subagent_by_session
+                        .get(session.as_str())
+                        .map(|parent| SessionId::new(parent.parent_session_id.clone()))
+                });
+                if let Some(parent) = parent {
+                    info["parentID"] = json!(parent.as_str());
                 }
                 self.stream_event(
                     ws_key,
@@ -206,11 +212,26 @@ impl Store {
                 );
                 Ok(())
             }
+            HarnessEvent::PartRemoved { session, part_id } => {
+                let ws_key = self.harness_ws_key(harness, Some(&session), None)?;
+                self.stream_event(
+                    ws_key,
+                    json!({
+                        "type": "message.part.removed",
+                        "properties": {
+                            "sessionID": session.as_str(),
+                            "partID": part_id,
+                        },
+                    }),
+                    cx,
+                );
+                Ok(())
+            }
             HarnessEvent::PermissionAsked { request } => {
                 let ws_key = self.harness_ws_key(harness, Some(&request.session), None)?;
                 // the legacy v1 card reads `permission`/`patterns`; the exact
                 // action/resources shape lands with the v2 adapter
-                let event = json!({
+                let mut event = json!({
                     "type": "permission.asked",
                     "properties": {
                         "id": request.id,
@@ -219,29 +240,23 @@ impl Store {
                         "patterns": request.resources,
                     },
                 });
+                if request.message.is_some() || request.diff.is_some() {
+                    let mut metadata = json!({});
+                    if let Some(message) = request.message {
+                        metadata["command"] = json!(message);
+                    }
+                    if let Some(diff) = request.diff {
+                        metadata["diff"] = json!(diff);
+                    }
+                    event["properties"]["metadata"] = metadata;
+                }
                 self.stream_event(ws_key, event, cx);
                 Ok(())
             }
-            HarnessEvent::PermissionReplied {
-                session,
-                request,
-                decision,
-            } => {
-                let ws_key = self.harness_ws_key(harness, Some(&session), None)?;
-                let reply = match decision {
-                    PermissionDecision::Once => "once",
-                    PermissionDecision::Always => "always",
-                    PermissionDecision::Reject => "reject",
-                };
-                let event = json!({
-                    "type": "permission.replied",
-                    "properties": {
-                        "sessionID": session.as_str(),
-                        "requestID": request,
-                        "reply": reply,
-                    },
-                });
-                self.stream_event(ws_key, event, cx);
+            HarnessEvent::PermissionReplied { request, .. } => {
+                // the legacy card resolves by request id and says "answered
+                // elsewhere"; the typed decision is for the door/v2 path
+                self.on_permission_replied(&json!({ "requestID": request }));
                 Ok(())
             }
             HarnessEvent::QuestionAsked { request } => {
@@ -275,11 +290,8 @@ impl Store {
                 Ok(())
             }
             HarnessEvent::QuestionResolved {
-                session,
-                request,
-                summary,
+                request, summary, ..
             } => {
-                let _ = self.harness_ws_key(harness, Some(&session), None)?;
                 self.resolve_question(&request, summary.as_deref().unwrap_or("dismissed"));
                 Ok(())
             }
@@ -494,6 +506,7 @@ mod tests {
             HarnessEvent::SessionChanged {
                 session: session.clone(),
                 title: Some("Typed chat".into()),
+                parent: None,
                 agent: None,
             },
             HarnessEvent::MessageSnapshot {
@@ -577,6 +590,7 @@ mod tests {
                     action: "bash".into(),
                     resources: vec!["ls".into()],
                     message: None,
+                    diff: None,
                 },
             },
             HarnessEvent::ModelsLoaded {

@@ -92,6 +92,15 @@ pub enum ConnectionKind {
     Attached,
 }
 
+/// How many instances a harness has.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InstanceScope {
+    /// One instance for the whole app (dsh, opencode v2).
+    App,
+    /// One instance per workspace folder (opencode v1).
+    Workspace,
+}
+
 /// What an adapter can do, as data.
 ///
 /// The UI and the door render or enable from this descriptor; it is not a user
@@ -392,6 +401,9 @@ pub enum HarnessEvent {
     SessionChanged {
         session: SessionId,
         title: Option<String>,
+        /// The parent when the update carries it; `None` leaves the known
+        /// lineage in place.
+        parent: Option<SessionId>,
         agent: Option<String>,
     },
     /// A session was deleted.
@@ -411,13 +423,18 @@ pub enum HarnessEvent {
     PartSnapshot {
         part: PartSnapshot,
     },
+    /// A part disappeared from a message.
+    PartRemoved {
+        session: SessionId,
+        part_id: String,
+    },
     /// An approval request.
     PermissionAsked {
         request: PermissionRequest,
     },
     /// An approval was answered, possibly elsewhere.
     PermissionReplied {
-        session: SessionId,
+        session: Option<SessionId>,
         request: String,
         decision: PermissionDecision,
     },
@@ -427,7 +444,7 @@ pub enum HarnessEvent {
     },
     /// A question or form was answered, possibly elsewhere.
     QuestionResolved {
-        session: SessionId,
+        session: Option<SessionId>,
         request: String,
         summary: Option<String>,
     },
@@ -576,6 +593,7 @@ pub struct PermissionRequest {
     pub action: String,
     pub resources: Vec<String>,
     pub message: Option<String>,
+    pub diff: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

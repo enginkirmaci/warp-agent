@@ -5,7 +5,10 @@
 //! pickers iterate this table rather than matching on an enum.
 
 use super::interface::Harness;
-use super::types::{ConnectionKind, HarnessCapabilities, HarnessConfig, HarnessError, HarnessId};
+use super::opencode::OpenCodeV1Harness;
+use super::types::{
+    ConnectionKind, HarnessCapabilities, HarnessConfig, HarnessError, HarnessId, InstanceScope,
+};
 
 /// One row of the registry: what the harness is called, how the app reaches
 /// it, what it supports and how an instance is made.
@@ -15,6 +18,8 @@ pub struct HarnessDescriptor {
     pub label: &'static str,
     pub default_executable: &'static str,
     pub connection: ConnectionKind,
+    /// Whether the harness has one app-wide instance or one per workspace.
+    pub scope: InstanceScope,
     pub capabilities: HarnessCapabilities,
     /// `None` until the adapter ticket fills the factory; the registry still
     /// resolves the id, label, connection and capabilities in the expand phase.
@@ -41,13 +46,7 @@ impl HarnessRegistry {
     pub fn builtin() -> Self {
         Self {
             entries: vec![
-                descriptor(
-                    "opencode",
-                    "opencode",
-                    "opencode",
-                    ConnectionKind::Managed,
-                    HarnessCapabilities::OPENCODE_V1,
-                ),
+                opencode_descriptor(),
                 descriptor(
                     "opencode-v2",
                     "opencode v2",
@@ -106,7 +105,25 @@ fn descriptor(
         label,
         default_executable: executable,
         connection,
+        scope: InstanceScope::App,
         capabilities,
         factory: None,
     }
+}
+
+fn opencode_descriptor() -> HarnessDescriptor {
+    let mut descriptor = descriptor(
+        "opencode",
+        "opencode",
+        "opencode",
+        ConnectionKind::Managed,
+        HarnessCapabilities::OPENCODE_V1,
+    );
+    descriptor.scope = InstanceScope::Workspace;
+    descriptor.factory = Some(opencode_factory);
+    descriptor
+}
+
+fn opencode_factory(config: HarnessConfig) -> Box<dyn Harness> {
+    Box::new(OpenCodeV1Harness::new(config))
 }

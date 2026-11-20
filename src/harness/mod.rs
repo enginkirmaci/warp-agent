@@ -6,6 +6,7 @@
 
 mod host;
 mod interface;
+mod opencode;
 mod registry;
 mod types;
 
@@ -16,6 +17,7 @@ pub mod test_support;
 
 pub use host::HarnessHost;
 pub use interface::Harness;
+pub use opencode::OpenCodeV1Harness;
 pub use registry::{HarnessDescriptor, HarnessRegistry};
 pub use types::*;
 
@@ -39,6 +41,7 @@ mod tests {
             label: "fake",
             default_executable: "fake",
             connection: ConnectionKind::Managed,
+            scope: InstanceScope::App,
             capabilities: HarnessCapabilities::NONE,
             factory: Some(fake_harness_factory),
         }
@@ -87,6 +90,58 @@ mod tests {
         assert!(dsh.capabilities.skills);
         assert!(!dsh.capabilities.inbox);
         assert_eq!(v2.default_executable, "opencode");
+        assert_eq!(v1.scope, InstanceScope::Workspace);
+        assert_eq!(v2.scope, InstanceScope::App);
+        assert!(v2.factory.is_none());
+        assert!(dsh.factory.is_none());
+    }
+
+    #[test]
+    fn the_v1_descriptor_builds_the_real_adapter() {
+        let registry = HarnessRegistry::builtin();
+        let factory = registry
+            .resolve("opencode")
+            .unwrap()
+            .factory
+            .expect("the v1 adapter has a factory");
+        let mut adapter = factory(HarnessConfig::new("opencode"));
+        assert_eq!(adapter.id().as_str(), "opencode");
+        assert_eq!(adapter.health().state, HealthState::Starting);
+        assert!(matches!(
+            adapter.sessions().unwrap_err(),
+            HarnessError::Unavailable(_)
+        ));
+    }
+
+    #[test]
+    fn the_host_keeps_one_v1_instance_per_workspace() {
+        let registry = HarnessRegistry::builtin();
+        let factory = registry
+            .resolve("opencode")
+            .unwrap()
+            .factory
+            .expect("the v1 adapter has a factory");
+        let mut host = HarnessHost::new(registry);
+        let id = HarnessId::new("opencode");
+        for folder in ["/tmp/warp-agent-a", "/tmp/warp-agent-b"] {
+            let mut config = HarnessConfig::new("opencode");
+            config.directory = Some(std::path::PathBuf::from(folder));
+            host.register_instance(factory(config)).unwrap();
+        }
+        assert!(
+            host.instance_at(&id, Some(std::path::Path::new("/tmp/warp-agent-a")))
+                .is_some()
+        );
+        assert!(
+            host.instance_at(&id, Some(std::path::Path::new("/tmp/warp-agent-b")))
+                .is_some()
+        );
+        let mut duplicate = HarnessConfig::new("opencode");
+        duplicate.directory = Some(std::path::PathBuf::from("/tmp/warp-agent-a"));
+        assert!(matches!(
+            host.register_instance(factory(duplicate)).unwrap_err(),
+            HarnessError::DuplicateInstance(_)
+        ));
     }
 
     #[test]

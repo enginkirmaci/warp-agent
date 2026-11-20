@@ -132,7 +132,7 @@ pub struct ServerProcess {
 
 /// True when the spawned serve process exited on its own. A taken (stopped)
 /// or never-spawned (attached) child reads false.
-fn child_exited(probe: &Mutex<Option<tokio::process::Child>>) -> bool {
+pub(crate) fn child_exited(probe: &Mutex<Option<tokio::process::Child>>) -> bool {
     let mut guard = probe.lock().expect("child lock");
     match guard.as_mut() {
         Some(child) => matches!(child.try_wait(), Ok(Some(_))),
@@ -141,6 +141,11 @@ fn child_exited(probe: &Mutex<Option<tokio::process::Child>>) -> bool {
 }
 
 impl ServerProcess {
+    /// The child-handle probe the health poll watches for an early exit.
+    pub(crate) fn exit_probe(&self) -> Arc<Mutex<Option<tokio::process::Child>>> {
+        Arc::clone(&self.child)
+    }
+
     pub async fn start(
         kind: HarnessKind,
         executable: &str,
@@ -373,6 +378,12 @@ impl ApiClient {
             rest,
             base_url: base_url.trim_end_matches('/').to_string(),
         }
+    }
+
+    /// One low-cost `/global/health` probe, used by the harness adapter's
+    /// health poll and its reconnect gate.
+    pub async fn healthy(&self) -> bool {
+        is_healthy(&self.rest, &self.base_url).await
     }
 
     pub async fn create_session(&self, title: &str) -> Result<SessionInfo> {
@@ -810,6 +821,28 @@ impl ApiClient {
             }
         }
         Ok(models)
+    }
+
+    /// Provider ids and display names from the same catalog `/config/providers`
+    /// exposes; the model list only carries the `provider/model` key.
+    pub async fn get_providers(&self) -> Result<Vec<(String, String)>> {
+        let resp = self
+            .rest
+            .get(format!("{}/config/providers", self.base_url))
+            .send()
+            .await?;
+        let value: Value = error_for_status(resp).await?.json().await?;
+        let mut providers = Vec::new();
+        if let Some(entries) = value.get("providers").and_then(Value::as_array) {
+            for provider in entries {
+                let Some(id) = provider.get("id").and_then(Value::as_str) else {
+                    continue;
+                };
+                let name = provider.get("name").and_then(Value::as_str).unwrap_or(id);
+                providers.push((id.to_string(), name.to_string()));
+            }
+        }
+        Ok(providers)
     }
 
     /// Yields events from the /event SSE stream until it ends. `on_attached`

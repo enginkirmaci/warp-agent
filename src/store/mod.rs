@@ -45,7 +45,9 @@ pub const DEFAULT_VARIANT_ENTRY: &str = "(default)";
 pub const DEFAULT_AGENT_ENTRY: &str = "(default build)";
 pub const DRAFT_TITLE: &str = "New chat";
 
-/// What the composer's worktree controls show for a tile.
+/// What the composer's worktree toggle and restore affordance read for a
+/// tile. The branch name is carried for restore and probes; the composer
+/// never displays it.
 #[derive(Clone, Debug, Default)]
 pub struct WorktreeView {
     pub visible: bool,
@@ -1110,7 +1112,9 @@ impl Store {
             .or_else(|| self.selected_workspace.clone())
     }
 
-    /// What the composer's worktree controls show for a tile.
+    /// What the composer's worktree toggle and restore affordance read for a
+    /// tile. The branch name is carried for restore and probes; the composer
+    /// never displays it.
     pub fn worktree_view(&self, tile_key: &str) -> WorktreeView {
         let Some(tile) = self.tile_by_key(tile_key) else {
             return WorktreeView::default();
@@ -1168,36 +1172,15 @@ impl Store {
         {
             return;
         }
-        let title = draft_title(tile);
         let Some(tile) = self.tile_by_key_mut(tile_key) else {
             return;
         };
         let mut worktree = tile.worktree.clone().unwrap_or_default();
         worktree.enabled = !worktree.enabled;
-        if worktree.enabled && worktree.branch.trim().is_empty() {
-            worktree.branch = warpui_kit_worktree::branch_name(&title);
-        }
+        // the name is not asked for here: the first send derives it from the
+        // prompt, and the kit appends a suffix when it is already taken
         tile.worktree = Some(worktree);
         self.repaint(cx);
-    }
-
-    /// The branch field's edits. The value only reaches git at the first send,
-    /// so this deliberately does not repaint the tile.
-    pub fn set_worktree_branch(&mut self, tile_key: &str, text: String) {
-        let Some(tile) = self.tile_by_key_mut(tile_key) else {
-            return;
-        };
-        if tile.session_id.is_some()
-            || tile
-                .worktree
-                .as_ref()
-                .is_some_and(|worktree| worktree.folder.is_some())
-        {
-            return;
-        }
-        if let Some(worktree) = tile.worktree.as_mut() {
-            worktree.branch = text;
-        }
     }
 
     /// Probes a folder once: the worktree toggle is hidden until the answer

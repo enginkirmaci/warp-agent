@@ -24,6 +24,7 @@ pub struct SettingsBuffers {
     pub show_tooltips: bool,
     pub reduce_motion: bool,
     pub mcp_disabled: bool,
+    pub chats_per_workspace: String,
     pub auto_allow_default_min: String,
     pub auto_allow_default_max: String,
     pub auto_allow_away_min: String,
@@ -59,6 +60,7 @@ impl SettingsBuffers {
             show_tooltips: s.show_tooltips,
             reduce_motion: s.reduce_motion,
             mcp_disabled: s.mcp_disabled,
+            chats_per_workspace: s.sidebar_chats_per_workspace.to_string(),
             auto_allow_default_min: s.auto_allow_default_min_seconds.to_string(),
             auto_allow_default_max: s.auto_allow_default_max_seconds.to_string(),
             auto_allow_away_min: s.auto_allow_away_min_seconds.to_string(),
@@ -112,6 +114,12 @@ impl SettingsBuffers {
             set.show_tooltips = self.show_tooltips;
             set.reduce_motion = self.reduce_motion;
             set.mcp_disabled = self.mcp_disabled;
+            set.sidebar_chats_per_workspace = Self::parse_int(
+                &self.chats_per_workspace,
+                set.sidebar_chats_per_workspace,
+                crate::settings::DEFAULT_SIDEBAR_CHATS_PER_WORKSPACE,
+            )
+            .clamp(1, 500);
             set.auto_allow_default_min_seconds = Self::parse_int(
                 &self.auto_allow_default_min,
                 set.auto_allow_default_min_seconds,

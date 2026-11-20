@@ -35,6 +35,16 @@ const GRID_GAP: f32 = 12.;
 /// virtualized list can size itself without measuring.
 const SIDEBAR_ROW_HEIGHT: f32 = 40.;
 
+/// The chats the All list renders under one workspace or worktree: the store's
+/// pinned-then-recent order, capped at the Settings page's limit. Scoped lists
+/// (Needs attention, Running) keep every match.
+fn visible_chats(
+    chats: &[crate::store::SessionItem],
+    limit: usize,
+) -> &[crate::store::SessionItem] {
+    &chats[..chats.len().min(limit.max(1))]
+}
+
 /// One flattened sidebar row: the virtualized list renders these by index.
 #[derive(Clone)]
 enum SidebarRow {
@@ -76,7 +86,7 @@ impl SidebarScope {
     fn label(self) -> &'static str {
         match self {
             SidebarScope::All => "All",
-            SidebarScope::NeedsYou => "Needs you",
+            SidebarScope::NeedsYou => "Needs attention",
             SidebarScope::Favorites => "Favorites",
             SidebarScope::Running => "Running",
         }
@@ -96,7 +106,7 @@ impl SidebarScope {
     fn empty_hint(self) -> &'static str {
         match self {
             SidebarScope::All => "No workspaces yet",
-            SidebarScope::NeedsYou => "Nothing needs you",
+            SidebarScope::NeedsYou => "Nothing needs attention",
             SidebarScope::Favorites => "No favorites yet",
             SidebarScope::Running => "Nothing running",
         }
@@ -115,7 +125,7 @@ fn chat_in_scope(chat: &crate::store::SessionItem, scope: SidebarScope, waiting:
 }
 
 /// A workspace row stays in a scoped list when it matches the scope itself
-/// (Favorites) or as the parent of matching chats (Needs you / Running).
+/// (Favorites) or as the parent of matching chats (Needs attention / Running).
 fn workspace_in_scope(
     ws: &crate::store::WorkspaceItem,
     scope: SidebarScope,
@@ -277,9 +287,9 @@ fn line_width(window: &Window, text: &str, font_size: f32, weight: gpui::FontWei
 }
 
 /// The star of the station repos list, in a sidebar row's hover actions:
-/// filled in the accent when the item is a favorite, quiet and dimmed until
-/// the row is hovered otherwise. The click must stop propagation — the press
-/// is not on the row.
+/// filled in the accent when the item is a favorite, hidden until the row is
+/// hovered otherwise. The click must stop propagation — the press is not on
+/// the row.
 fn star_toggle(
     id: gpui::ElementId,
     favorite: bool,
@@ -301,7 +311,7 @@ fn star_toggle(
             .rounded_sm()
             .hover(|s| s.bg(theme::HOVER))
             .when(!favorite, |star| {
-                star.opacity(0.62).group_hover(row_group, |s| s.opacity(1.))
+                star.invisible().group_hover(row_group, |s| s.visible())
             })
             .on_click(move |_, _, cx| {
                 // the star is not a press on the row
@@ -423,7 +433,7 @@ pub struct WarpWindow {
     /// leaf (InputLeaf) and only a Change event copies the text out and
     /// nudges the window to refilter the list
     sidebar_filter: String,
-    /// the scope chip under the filter field: All, Needs you, Favorites or
+    /// the scope chip under the filter field: All, Needs attention, Favorites or
     /// Running. Kept in the window, like the filter text, so it is a view
     /// state and never touches the saved layout.
     sidebar_scope: SidebarScope,
@@ -1668,9 +1678,9 @@ impl WarpWindow {
                     .font_weight(gpui::FontWeight::SEMIBOLD)
                     .text_color(theme::CHANGES)
                     .child(if need == 1 {
-                        "1 needs you".to_string()
+                        "1 needs attention".to_string()
                     } else {
-                        format!("{need} need you")
+                        format!("{need} need attention")
                     }),
             );
             summary = summary.child("·");
@@ -1962,7 +1972,8 @@ impl WarpWindow {
         if ws.show_empty_hint() {
             rows.push(SidebarRow::Placeholder("No chats yet"));
         }
-        for chat in &ws.chats {
+        let limit = store.settings.sidebar_chats_per_workspace.max(1) as usize;
+        for chat in visible_chats(&ws.chats, limit) {
             rows.push(SidebarRow::Chat(chat.clone()));
         }
         for (entry, chats) in Self::worktree_groups(ws, store, SidebarScope::All) {
@@ -1970,8 +1981,8 @@ impl WarpWindow {
                 folder: entry.folder,
                 branch: entry.branch,
             });
-            for chat in chats {
-                rows.push(SidebarRow::Chat(chat));
+            for chat in visible_chats(&chats, limit) {
+                rows.push(SidebarRow::Chat(chat.clone()));
             }
         }
     }
@@ -2054,11 +2065,12 @@ impl WarpWindow {
                         tip(
                             div()
                                 .id("add-workspace")
+                                .debug_selector(|| "add-workspace".into())
                                 .role(Role::Button)
                                 .aria_label("Add a workspace folder")
                                 .cursor_pointer()
-                                .p_1p5()
-                                .rounded(px(6.))
+                                .p_1()
+                                .rounded_sm()
                                 .hover(|s| s.bg(theme::raised()))
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.pick_folder(cx);
@@ -2090,8 +2102,15 @@ impl WarpWindow {
         div()
             .debug_selector(|| "worktree-header".into())
             .flex_shrink_0()
+            // the row owns the full list width so the branch's new-chat `+`
+            // lands in the same right-hand column as the folder and section
+            // buttons instead of hugging the branch name
+            .w_full()
             .h(px(SIDEBAR_ROW_HEIGHT))
-            .pl(px(30.))
+            // the same left rhythm as the chat rows under it: the branch
+            // glyph takes the gutter column and the name starts where their
+            // titles do
+            .pl(px(24.))
             .pr_2()
             .flex()
             .items_center()
@@ -2106,6 +2125,7 @@ impl WarpWindow {
             ))
             .child(
                 div()
+                    .debug_selector(|| "worktree-branch-name".into())
                     .flex_1()
                     .min_w_0()
                     .truncate()
@@ -2118,6 +2138,7 @@ impl WarpWindow {
                             "wt-new".into(),
                             TileView::hash(folder),
                         ))
+                        .debug_selector(|| "worktree-new".into())
                         .role(Role::Button)
                         .aria_label(SharedString::from(format!("New chat in {branch}")))
                         .cursor_pointer()
@@ -2243,7 +2264,7 @@ impl WarpWindow {
                 )
             })
             // folder rows keep the star, station's repos-list style: filled
-            // in the accent while a favorite, dimmed until the row hover else
+            // in the accent while a favorite, hidden until the row hover else
             .when(!general, |row| {
                 row.child(star_toggle(
                     gpui::ElementId::NamedInteger("ws-star".into(), TileView::hash(&path)),
@@ -2340,6 +2361,7 @@ impl WarpWindow {
                                     "ws-new".into(),
                                     TileView::hash(&path),
                                 ))
+                                .when(general, |d| d.debug_selector(|| "tasks-new".into()))
                                 .role(Role::Button)
                                 .aria_label(SharedString::from(format!("New chat in {}", ws.name)))
                                 .cursor_pointer()
@@ -2492,7 +2514,7 @@ impl WarpWindow {
         let more_store = self.store.clone();
         let more_id = id.clone();
         // the gutter pin is the row's pin/unpin switch — accent while pinned
-        // like the star's favorite state, dim until the row hover else — so
+        // like the star's favorite state, hidden until the row hover else — so
         // the ⋯ menu's Pin entry is the fallback, not the primary affordance
         let pin_store = self.store.clone();
         let pin_id = id.clone();
@@ -2536,7 +2558,7 @@ impl WarpWindow {
                     .items_center()
                     .justify_center()
                     .when(!pinned, |pin| {
-                        pin.opacity(0.62).group_hover("chatrow", |s| s.opacity(1.))
+                        pin.invisible().group_hover("chatrow", |s| s.visible())
                     })
                     .on_click(move |_, _, cx| {
                         // the row must not select behind the button
@@ -2640,6 +2662,7 @@ impl WarpWindow {
             row = row
                 .child(
                     div()
+                        .debug_selector(|| "chat-title".into())
                         .flex_1()
                         .min_w_0()
                         .text_size(px(fonts.font_body))
@@ -2882,6 +2905,7 @@ impl WarpWindow {
             ("awaymin", b.auto_allow_away_min),
             ("awaymax", b.auto_allow_away_max),
             ("idlemin", b.server_idle_min),
+            ("chatsperws", b.chats_per_workspace),
             ("lunchstart", b.lunch_start),
             ("lunchend", b.lunch_end),
             ("offstart", b.off_hours_start),
@@ -3468,6 +3492,11 @@ impl WarpWindow {
                     buffers.show_tooltips,
                     show_tooltips
                 );
+                field!(
+                    "Chats per workspace",
+                    "chatsperws",
+                    Some("The latest chats shown under each workspace in All")
+                );
             }
             SettingsSection::ChatDefaults => {
                 rows.push(kit::row(
@@ -3667,6 +3696,7 @@ impl WarpWindow {
                 "awaymin" => buffers.auto_allow_away_min = text,
                 "awaymax" => buffers.auto_allow_away_max = text,
                 "idlemin" => buffers.server_idle_min = text,
+                "chatsperws" => buffers.chats_per_workspace = text,
                 "lunchstart" => buffers.lunch_start = text,
                 "lunchend" => buffers.lunch_end = text,
                 "offstart" => buffers.off_hours_start = text,
@@ -3690,14 +3720,6 @@ pub(crate) struct InputLeaf {
     mono: bool,
     /// A leading icon inside the box — the sidebar filter's search.
     icon: Option<&'static str>,
-}
-
-impl InputLeaf {
-    /// The one renderer for a plain single-line field: a settings value, a
-    /// chat title, or a worktree's branch name.
-    pub(crate) fn new(state: Entity<InputState>, mono: bool, icon: Option<&'static str>) -> Self {
-        Self { state, mono, icon }
-    }
 }
 
 impl Render for InputLeaf {
@@ -4088,10 +4110,9 @@ fn variant_rows(model: &str, variants: &[String], selected: &str) -> Vec<PickerR
 
 #[cfg(test)]
 mod scope_tests {
-    use super::{SidebarScope, chat_in_scope, workspace_in_scope};
-    use crate::settings::WorkspaceState;
+    use super::{SidebarScope, chat_in_scope, visible_chats, workspace_in_scope};
+    use crate::settings::{DEFAULT_SIDEBAR_CHATS_PER_WORKSPACE, WorkspaceState};
     use crate::store::{SessionItem, WorkspaceItem};
-
     fn chat(id: &str, running: bool) -> SessionItem {
         SessionItem {
             id: id.into(),
@@ -4118,6 +4139,25 @@ mod scope_tests {
             is_favorite: favorite,
             chats,
         }
+    }
+
+    #[test]
+    fn all_shows_only_the_newest_chats_per_workspace() {
+        let limit = DEFAULT_SIDEBAR_CHATS_PER_WORKSPACE as usize;
+        let chats: Vec<SessionItem> = (0..limit + 5)
+            .map(|ix| chat(&format!("chat-{ix}"), false))
+            .collect();
+
+        let shown = visible_chats(&chats, limit);
+
+        let expected_last = format!("chat-{}", limit - 1);
+        assert_eq!(shown.len(), limit);
+        assert_eq!(shown.first().map(|c| c.id.as_str()), Some("chat-0"));
+        assert_eq!(
+            shown.last().map(|c| c.id.as_str()),
+            Some(expected_last.as_str()),
+            "the store's pinned-then-recent order is kept, truncated"
+        );
     }
 
     #[test]

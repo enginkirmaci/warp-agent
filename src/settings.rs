@@ -10,6 +10,10 @@ use warpui_kit_platform::config::{Error, KeyMap, Store, rename_legacy_keys};
 pub const DEFAULT_EXECUTABLE: &str = "opencode";
 pub const DEFAULT_DSH_EXECUTABLE: &str = "dsh";
 
+/// How many of a workspace's chats the All sidebar list shows by default:
+/// pinned rows lead, then the most recent.
+pub const DEFAULT_SIDEBAR_CHATS_PER_WORKSPACE: i64 = 20;
+
 /// Which backend a chat runs on. Sessions carry their own harness so a
 /// workspace can mix opencode and dsh tiles; dsh chats all live on one
 /// shared `dsh web` process (dsh sessions carry their own cwd).
@@ -99,6 +103,8 @@ pub struct AppSettings {
     pub off_hours_start_hour: i64,
     #[serde(default = "h8")]
     pub workday_start_hour: i64,
+    #[serde(default = "chats20")]
+    pub sidebar_chats_per_workspace: i64,
     pub text_size: Option<String>,
     #[serde(default = "tru")]
     pub show_tooltips: bool,
@@ -129,6 +135,9 @@ fn d600() -> i64 {
 }
 fn idle10() -> i64 {
     10
+}
+fn chats20() -> i64 {
+    DEFAULT_SIDEBAR_CHATS_PER_WORKSPACE
 }
 fn h12() -> i64 {
     12
@@ -163,6 +172,7 @@ impl Default for AppSettings {
             auto_allow_away_min_seconds: 60,
             auto_allow_away_max_seconds: 600,
             server_idle_stop_minutes: 10,
+            sidebar_chats_per_workspace: DEFAULT_SIDEBAR_CHATS_PER_WORKSPACE,
             lunch_start_hour: 12,
             lunch_end_hour: 14,
             off_hours_start_hour: 18,
@@ -451,6 +461,23 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn the_sidebar_chat_limit_defaults_and_round_trips() {
+        assert_eq!(
+            AppSettings::default().sidebar_chats_per_workspace,
+            DEFAULT_SIDEBAR_CHATS_PER_WORKSPACE
+        );
+        // a file written before the key existed still reads the default
+        let old: AppSettings = serde_json::from_str(r#"{"show_tooltips":false}"#).unwrap();
+        assert_eq!(
+            old.sidebar_chats_per_workspace,
+            DEFAULT_SIDEBAR_CHATS_PER_WORKSPACE
+        );
+        let saved: AppSettings =
+            serde_json::from_str(r#"{"sidebar_chats_per_workspace":5}"#).unwrap();
+        assert_eq!(saved.sidebar_chats_per_workspace, 5);
     }
 
     #[test]

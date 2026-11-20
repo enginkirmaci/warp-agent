@@ -17,13 +17,12 @@ pub struct RunningAgentItem {
     pub needs_attention: bool,
 }
 
-/// A draft's worktree: the branch it will take until the first send, and where
-/// it landed once creation did.
+/// A draft's worktree: where the checkout is, and the branch git named it.
 #[derive(Clone, Debug, Default)]
 pub struct WorktreeDraft {
     /// The composer toggle is on.
     pub enabled: bool,
-    /// The branch the chat will use; editable until the first send.
+    /// The branch git created when the first send made the checkout.
     pub branch: String,
     /// The worktree's folder, set when creation landed.
     pub folder: Option<String>,

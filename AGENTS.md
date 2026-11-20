@@ -156,8 +156,9 @@ A chat can run in a worktree of its repository instead of the main checkout:
 the composer toggle is off on every new chat, appears only where the workspace
 is a git repository, and the first send creates the checkout under
 `<repo>/.worktrees/<slug>`, installs it as a workspace and creates the session
-there. The branch is named from the chat title and stays editable until that
-send; afterwards the chat is bound to that checkout.
+there. The branch is named from the prompt's first line at that send, never
+asked for and never shown in the composer; afterwards the chat is bound to that
+checkout, and a taken name gets the next free suffix from the kit.
 
 - `warpui-kit-worktree` owns every rule (`create`, `list`, `remove`, `prune`,
   `attach`, branch naming, the local exclude entry). This app never runs git

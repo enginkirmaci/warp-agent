@@ -7,7 +7,7 @@
 //! result arrive as the same events it sends in the app, so the probe covers
 //! the state machine and not a fake git.
 
-use gpui::TestAppContext;
+use gpui::{TestAppContext, px};
 use std::ffi::OsString;
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -145,7 +145,7 @@ fn the_toggle_is_offered_only_where_the_workspace_is_a_repository(cx: &mut TestA
 }
 
 #[gpui_kit::gpui::test]
-fn the_toggle_names_the_branch_after_the_chat(cx: &mut TestAppContext) {
+fn the_first_send_names_the_branch_after_the_prompt(cx: &mut TestAppContext) {
     let _lock = HOME_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -169,23 +169,27 @@ fn the_toggle_names_the_branch_after_the_chat(cx: &mut TestAppContext) {
         key
     });
 
+    // the toggle asks for no name: the branch is generated at send time
     let view = store.read_with(cx, |store, _| store.worktree_view(&key));
     assert!(view.enabled);
-    assert_eq!(view.branch, "agent/fix-the-login-retry");
-    assert!(!view.locked, "a draft keeps the branch editable");
+    assert_eq!(view.branch, "");
+    assert!(
+        !view.locked,
+        "a draft keeps the choice until the first send"
+    );
 
-    // the field's edits are what git will use
-    store.update(cx, |store, _| {
-        store.set_worktree_branch(&key, "agent/renamed".into());
-    });
-    let view = store.read_with(cx, |store, _| store.worktree_view(&key));
-    assert_eq!(view.branch, "agent/renamed");
-
-    // a second click turns it off and leaves the branch remembered
+    // a second click before the send turns it off again
     store.update(cx, |store, cx| store.toggle_worktree(&key, cx));
     let view = store.read_with(cx, |store, _| store.worktree_view(&key));
     assert!(!view.enabled);
-    assert_eq!(view.branch, "agent/renamed");
+    assert_eq!(view.branch, "");
+    store.update(cx, |store, cx| store.toggle_worktree(&key, cx));
+
+    // the prompt's first line names the branch, at the moment it is sent
+    store.update(cx, |store, cx| store.send_from_tile(&key, cx));
+    let view = store.read_with(cx, |store, _| store.worktree_view(&key));
+    assert_eq!(view.branch, "agent/fix-the-login-retry");
+    assert!(view.creating, "the first send creates the worktree");
 }
 
 #[gpui_kit::gpui::test]
@@ -390,6 +394,46 @@ fn the_composer_renders_with_the_worktree_toggle(cx: &mut TestAppContext) {
     cx.update(|window, cx| drop(window.draw(cx)));
     cx.run_until_parked();
     cx.update(|window, cx| drop(window.draw(cx)));
+
+    // the toggle is its own control on the toggle line, not a child of the
+    // MCP button: it shares the plug's row instead of stacking under it
+    let row = cx
+        .debug_bounds("composer-row")
+        .expect("the composer row draws");
+    let mcp = cx.debug_bounds("mcp-toggle").expect("the MCP toggle draws");
+    let toggle = cx
+        .debug_bounds("worktree-toggle")
+        .expect("the worktree toggle draws");
+    assert!(
+        (toggle.center().y - mcp.center().y).abs() <= px(0.5),
+        "the worktree toggle sits on the MCP toggle's line: {:?} vs {:?}",
+        toggle,
+        mcp
+    );
+    assert!(
+        toggle.left() >= mcp.right(),
+        "the worktree toggle is beside the plug, never over it: {:?} vs {:?}",
+        toggle,
+        mcp
+    );
+    assert!(
+        (toggle.size.height - mcp.size.height).abs() <= px(0.5),
+        "the two toggles are the same height: {:?} vs {:?}",
+        toggle,
+        mcp
+    );
+
+    // no branch name is shown: it is generated from the prompt at send time
+    assert!(
+        cx.debug_bounds("worktree-branch").is_none(),
+        "the composer asks for no worktree name"
+    );
+    assert!(
+        toggle.top() >= row.top() && toggle.bottom() <= row.bottom(),
+        "the worktree toggle stays inside the composer row: {:?} vs {:?}",
+        toggle,
+        row
+    );
 }
 
 #[gpui_kit::gpui::test]
@@ -462,6 +506,49 @@ fn a_worktree_lists_its_chats_under_its_repository(cx: &mut TestAppContext) {
     assert!(
         parent < header,
         "the repository leads its worktrees: {rows:?}"
+    );
+
+    // the branch row owns the full list width, so its new-chat `+` sits in
+    // the right-hand column with the section label's add button instead of
+    // hugging the branch name
+    let branch_row = cx
+        .debug_bounds("worktree-header")
+        .expect("the worktree header draws");
+    let add_folder = cx
+        .debug_bounds("add-workspace")
+        .expect("the Workspaces add button draws");
+    let new_chat = cx
+        .debug_bounds("worktree-new")
+        .expect("the branch's new-chat button draws");
+    assert!(
+        new_chat.left() > branch_row.center().x,
+        "the branch + is in the right column: {new_chat:?} vs {branch_row:?}"
+    );
+    let branch_name = cx
+        .debug_bounds("worktree-branch-name")
+        .expect("the branch name draws");
+    let chat_title = cx
+        .debug_bounds("chat-title")
+        .expect("the worktree chat's title draws");
+    assert!(
+        (branch_name.left() - chat_title.left()).abs() <= px(0.5),
+        "the branch name starts on the chat-title line: {branch_name:?} vs {chat_title:?}"
+    );
+    let tasks_new = cx
+        .debug_bounds("tasks-new")
+        .expect("the Tasks new-chat button draws");
+    assert!(
+        (new_chat.right() - add_folder.right()).abs() <= px(0.5),
+        "the branch + aligns with the Workspaces +: {new_chat:?} vs {add_folder:?}"
+    );
+    assert!(
+        (tasks_new.right() - add_folder.right()).abs() <= px(0.5),
+        "the Tasks + aligns with the Workspaces +: {tasks_new:?} vs {add_folder:?}"
+    );
+    assert!(
+        (tasks_new.size.width - add_folder.size.width).abs() <= px(0.5)
+            && (tasks_new.size.height - add_folder.size.height).abs() <= px(0.5),
+        "the + buttons share one box: {tasks_new:?} vs {add_folder:?}"
     );
     let _ = home;
 }

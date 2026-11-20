@@ -6,7 +6,7 @@
 //! and the idle stop. The store still reads the legacy net path until the
 //! contract ticket; the adapter is the seam the host and the probes use.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -15,6 +15,7 @@ use async_channel::{Receiver, Sender, unbounded};
 use serde_json::Value;
 
 use super::interface::Harness;
+use super::shared::{PendingApprovals, filediffs, form_answers, partition_commands};
 use super::types::*;
 use crate::oc::{
     ApiClient, RECONNECT_INITIAL, RECONNECT_MAX, RECONNECT_MAX_ATTEMPTS, RECONNECT_RESET_AFTER,
@@ -37,8 +38,7 @@ pub struct OpenCodeV1Harness {
     stop: Option<Sender<()>>,
     pump: Option<tokio::task::JoinHandle<()>>,
     health_task: Option<tokio::task::JoinHandle<()>>,
-    pending_permissions: Arc<Mutex<HashMap<String, PermissionRequest>>>,
-    pending_forms: Arc<Mutex<HashMap<String, FormRequest>>>,
+    pending: Arc<PendingApprovals>,
     last_model: Arc<Mutex<HashMap<SessionId, String>>>,
 }
 
@@ -63,8 +63,7 @@ impl OpenCodeV1Harness {
             stop: None,
             pump: None,
             health_task: None,
-            pending_permissions: Arc::new(Mutex::new(HashMap::new())),
-            pending_forms: Arc::new(Mutex::new(HashMap::new())),
+            pending: PendingApprovals::new(),
             last_model: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -101,8 +100,7 @@ impl OpenCodeV1Harness {
     fn spawn_pump(&mut self, client: ApiClient, stop_rx: Receiver<()>) {
         let tx = self.tx.clone();
         let health = Arc::clone(&self.health);
-        let pending_permissions = Arc::clone(&self.pending_permissions);
-        let pending_forms = Arc::clone(&self.pending_forms);
+        let pending = Arc::clone(&self.pending);
         let task = self.runtime.spawn(async move {
             let mut attempts = 0u32;
             let mut delay = RECONNECT_INITIAL;
@@ -112,34 +110,10 @@ impl OpenCodeV1Harness {
                 let started = Instant::now();
                 let on_event = {
                     let tx = tx.clone();
-                    let pending_permissions = Arc::clone(&pending_permissions);
-                    let pending_forms = Arc::clone(&pending_forms);
+                    let pending = Arc::clone(&pending);
                     move |event: Value| {
                         if let Some(typed) = translate_event(&event) {
-                            match &typed {
-                                HarnessEvent::PermissionAsked { request } => {
-                                    pending_permissions
-                                        .lock()
-                                        .expect("permissions")
-                                        .insert(request.id.clone(), request.clone());
-                                }
-                                HarnessEvent::PermissionReplied { request, .. } => {
-                                    pending_permissions
-                                        .lock()
-                                        .expect("permissions")
-                                        .remove(request);
-                                }
-                                HarnessEvent::QuestionAsked { request } => {
-                                    pending_forms
-                                        .lock()
-                                        .expect("forms")
-                                        .insert(request.id.clone(), request.clone());
-                                }
-                                HarnessEvent::QuestionResolved { request, .. } => {
-                                    pending_forms.lock().expect("forms").remove(request);
-                                }
-                                _ => {}
-                            }
+                            pending.observe(&typed);
                             let _ = tx.try_send(typed);
                         }
                     }
@@ -239,52 +213,10 @@ impl OpenCodeV1Harness {
         self.health_task = Some(task);
     }
 
-    fn permissions_for(&self, session: &SessionId) -> Vec<PermissionRequest> {
-        let mut pending: Vec<PermissionRequest> = self
-            .pending_permissions
-            .lock()
-            .expect("permissions")
-            .values()
-            .filter(|request| &request.session == session)
-            .cloned()
-            .collect();
-        pending.sort_by(|left, right| left.id.cmp(&right.id));
-        pending
-    }
-
-    fn forms_for(&self, session: &SessionId) -> Vec<FormRequest> {
-        let mut pending: Vec<FormRequest> = self
-            .pending_forms
-            .lock()
-            .expect("forms")
-            .values()
-            .filter(|form| &form.session == session)
-            .cloned()
-            .collect();
-        pending.sort_by(|left, right| left.id.cmp(&right.id));
-        pending
-    }
-
     fn command_catalog(&self) -> Result<(Vec<Command>, Vec<Skill>), HarnessError> {
         let client = self.client()?;
         let commands = self.block_on(client.get_commands())?;
-        let mut typed_commands = Vec::new();
-        let mut skills = Vec::new();
-        for command in commands {
-            if command.source == "skill" {
-                skills.push(Skill {
-                    id: command.name.clone(),
-                    name: command.name,
-                    description: command.description,
-                });
-            } else {
-                typed_commands.push(Command {
-                    name: command.name,
-                    description: command.description,
-                });
-            }
-        }
-        Ok((typed_commands, skills))
+        Ok(partition_commands(commands))
     }
 }
 
@@ -444,14 +376,12 @@ impl Harness for OpenCodeV1Harness {
 
     fn fork_session(
         &mut self,
-        session: &SessionId,
+        _session: &SessionId,
         _before: Option<&str>,
     ) -> Result<SessionSummary, HarnessError> {
-        let source = self.session(session)?;
-        let title = format!("Fork of {}", source.title);
-        let client = self.client()?;
-        let info = self.block_on(client.create_session(&title))?;
-        Ok(self.session_summary(info))
+        // the app's v1 fork is a UI flow (create a session for a transcript
+        // seed); the opencode API has no server-side fork
+        Err(HarnessError::Unsupported("fork_session"))
     }
 
     fn rename_session(&mut self, session: &SessionId, title: &str) -> Result<(), HarnessError> {
@@ -562,7 +492,7 @@ impl Harness for OpenCodeV1Harness {
     }
 
     fn permissions(&mut self, session: &SessionId) -> Result<Vec<PermissionRequest>, HarnessError> {
-        Ok(self.permissions_for(session))
+        Ok(self.pending.permissions_for(session))
     }
 
     fn reply_permission(
@@ -578,15 +508,12 @@ impl Harness for OpenCodeV1Harness {
         };
         let client = self.client()?;
         self.block_on(client.respond_permission(session.as_str(), request, response))?;
-        self.pending_permissions
-            .lock()
-            .expect("permissions")
-            .remove(request);
+        self.pending.remove_permission(request);
         Ok(())
     }
 
     fn forms(&mut self, session: &SessionId) -> Result<Vec<FormRequest>, HarnessError> {
-        Ok(self.forms_for(session))
+        Ok(self.pending.forms_for(session))
     }
 
     fn reply_form(
@@ -596,63 +523,20 @@ impl Harness for OpenCodeV1Harness {
         answer: FormAnswer,
     ) -> Result<(), HarnessError> {
         let pending = self
-            .pending_forms
-            .lock()
-            .expect("forms")
-            .get(form)
-            .cloned()
+            .pending
+            .form(form)
             .ok_or_else(|| HarnessError::Unavailable(format!("form {form} not found")))?;
-        let mut answers: Vec<Vec<String>> = Vec::with_capacity(pending.fields.len());
-        for field in &pending.fields {
-            let values = match answer.values.get(&field.id) {
-                Some(Value::Array(items)) => items
-                    .iter()
-                    .filter_map(Value::as_str)
-                    .map(str::to_string)
-                    .collect(),
-                Some(Value::String(value)) => vec![value.clone()],
-                Some(Value::Bool(value)) => vec![value.to_string()],
-                Some(Value::Number(value)) => vec![value.to_string()],
-                Some(other) => vec![other.to_string()],
-                None => Vec::new(),
-            };
-            answers.push(values);
-        }
+        let answers = form_answers(&pending, answer);
         let client = self.client()?;
         self.block_on(client.reply_question(&pending.id, &answers))?;
-        self.pending_forms.lock().expect("forms").remove(form);
+        self.pending.remove_form(form);
         Ok(())
     }
 
     fn diff(&mut self, session: &SessionId) -> Result<Vec<FileDiff>, HarnessError> {
         let client = self.client()?;
         let messages = self.block_on(client.get_messages(session.as_str()))?;
-        let mut diffs: BTreeMap<String, String> = BTreeMap::new();
-        for message in messages {
-            for part in message.parts {
-                let Some(state) = part.get("state") else {
-                    continue;
-                };
-                let Some(metadata) = state.get("metadata") else {
-                    continue;
-                };
-                let Some(filediff) = metadata.get("filediff") else {
-                    continue;
-                };
-                let path = filediff
-                    .get("filepath")
-                    .and_then(Value::as_str)
-                    .or_else(|| metadata.get("filepath").and_then(Value::as_str));
-                let patch = filediff.get("patch").and_then(Value::as_str);
-                if let (Some(path), Some(patch)) = (path, patch) {
-                    diffs.insert(path.to_string(), patch.to_string());
-                }
-            }
-        }
-        Ok(diffs
-            .into_iter()
-            .map(|(path, patch)| FileDiff { path, patch })
-            .collect())
+        Ok(filediffs(messages))
     }
 
     fn inbox(&mut self, _session: &SessionId) -> Result<Vec<InboxItem>, HarnessError> {
@@ -753,7 +637,7 @@ impl Drop for OpenCodeV1Harness {
 /// Unknown events (todos, logs, plugin chatter) are ignored; the adapter's
 /// pending approval and question maps are maintained from the returned events
 /// by the pump.
-fn translate_event(event: &Value) -> Option<HarnessEvent> {
+pub(super) fn translate_event(event: &Value) -> Option<HarnessEvent> {
     let kind = event.get("type").and_then(Value::as_str).unwrap_or("");
     let properties = event.get("properties").unwrap_or(event);
     match kind {
@@ -816,6 +700,7 @@ fn translate_event(event: &Value) -> Option<HarnessEvent> {
             let message = properties
                 .pointer("/error/data/message")
                 .and_then(Value::as_str)
+                .or_else(|| properties.pointer("/error/message").and_then(Value::as_str))
                 .or_else(|| properties.get("error").and_then(Value::as_str))
                 .unwrap_or("the harness reported an error")
                 .to_string();
@@ -886,6 +771,7 @@ fn message_event(properties: &Value) -> Option<HarnessEvent> {
     let error = info
         .pointer("/error/data/message")
         .and_then(Value::as_str)
+        .or_else(|| info.pointer("/error/message").and_then(Value::as_str))
         .or_else(|| info.get("error").and_then(Value::as_str))
         .map(str::to_string);
     let tokens = info.get("tokens").and_then(Value::as_object).map(|tokens| {

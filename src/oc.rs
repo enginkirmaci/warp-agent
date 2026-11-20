@@ -976,7 +976,11 @@ pub fn read_question_request(r: &Value) -> Option<QuestionRequestInfo> {
                 .unwrap_or("")
                 .into(),
             header: q.get("header").and_then(Value::as_str).unwrap_or("").into(),
-            multiple: q.get("multiple").and_then(Value::as_bool).unwrap_or(false),
+            multiple: q
+                .get("multiple")
+                .and_then(Value::as_bool)
+                .or_else(|| q.get("multiSelect").and_then(Value::as_bool))
+                .unwrap_or(false),
             options,
         });
     }

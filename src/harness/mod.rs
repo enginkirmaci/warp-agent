@@ -1,13 +1,14 @@
-//! The app-level harness interface, registry and host.
-//!
-//! This is the expand-phase scaffold: the old opencode and dsh paths still run
-//! untouched. The adapters, the full typed event vocabulary and the store/door
-//! wiring land in the following tickets.
+//! The app-level harness interface, registry, host and the compiled-in
+//! opencode v1 and dsh adapters. The old net paths still run the app during
+//! the expand phase; the settings/UI/door wiring and the contract cleanup land
+//! in the following tickets.
 
+mod dsh;
 mod host;
 mod interface;
 mod opencode;
 mod registry;
+mod shared;
 mod types;
 
 /// Test doubles for the harness seam: unit tests and probes use them to drive
@@ -15,6 +16,7 @@ mod types;
 #[doc(hidden)]
 pub mod test_support;
 
+pub use dsh::DshHarness;
 pub use host::HarnessHost;
 pub use interface::Harness;
 pub use opencode::OpenCodeV1Harness;
@@ -93,7 +95,7 @@ mod tests {
         assert_eq!(v1.scope, InstanceScope::Workspace);
         assert_eq!(v2.scope, InstanceScope::App);
         assert!(v2.factory.is_none());
-        assert!(dsh.factory.is_none());
+        assert!(dsh.factory.is_some());
     }
 
     #[test]
@@ -106,6 +108,23 @@ mod tests {
             .expect("the v1 adapter has a factory");
         let mut adapter = factory(HarnessConfig::new("opencode"));
         assert_eq!(adapter.id().as_str(), "opencode");
+        assert_eq!(adapter.health().state, HealthState::Starting);
+        assert!(matches!(
+            adapter.sessions().unwrap_err(),
+            HarnessError::Unavailable(_)
+        ));
+    }
+
+    #[test]
+    fn the_dsh_descriptor_builds_the_real_adapter() {
+        let registry = HarnessRegistry::builtin();
+        let factory = registry
+            .resolve("dsh")
+            .unwrap()
+            .factory
+            .expect("the dsh adapter has a factory");
+        let mut adapter = factory(HarnessConfig::new("dsh"));
+        assert_eq!(adapter.id().as_str(), "dsh");
         assert_eq!(adapter.health().state, HealthState::Starting);
         assert!(matches!(
             adapter.sessions().unwrap_err(),

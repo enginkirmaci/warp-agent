@@ -28,6 +28,10 @@ through a bold run.
   thread.
 - `src/dsh.rs` — DeepSeek Harness (`dsh web`) client and the event translation
   into opencode-shaped events.
+- `src/harness/` — the app-level `Harness` trait, the compile-time registry and
+  host, and the opencode v1 / dsh adapters. The old `oc.rs`/`dsh.rs` paths still
+  run the app until the contract ticket; the adapters translate each protocol
+  into the typed `HarnessEvent` vocabulary.
 - `src/ipc.rs` — the warp-agent door: token-authenticated NDJSON on the net
   thread's runtime.
 - `src/ui/` — the window, sidebar, tile grid, settings and markdown view.
@@ -135,6 +139,9 @@ server and Warp Station is the client. Endpoint files are
 - `oc.rs` owns the `opencode serve` processes: one per workspace, a free port,
   a 25 s health wait, `OPENCODE_CONFIG_CONTENT` with ask-forcing permissions,
   REST calls and the SSE event pump with its reconnect ladder.
+- `harness/opencode.rs` wraps that client as the `opencode` adapter: it keeps
+  the same readiness, SSE pump and reconnect behaviour and emits the typed
+  stream. The host keys one instance per workspace (`InstanceScope::Workspace`).
 - `dsh.rs` owns `dsh web`: one shared process for every dsh chat. Unary calls
   are `POST /api/<method>` with the `{type:"client-request", ...}` envelope;
   streams ride one WebSocket at `/api/remote.mux`. The launch token is
@@ -146,6 +153,10 @@ server and Warp Station is the client. Endpoint files are
   into `session.updated` with `info.title`, and `Store::adopt_session_title`
   moves the tile header, sidebar row and workspace section together. Reading
   only the object shape from a list made every dsh chat show "New chat".
+- `harness/dsh.rs` wraps the dsh client as the `dsh` adapter: one app-wide
+  instance (`InstanceScope::App`), the launch-token/cookie flow, the WebSocket
+  pump and the same fold, with typed command output. The old `"dsh"` sentinel
+  stays the pump's internal net key and never reaches the host or the door.
 - All network work is on a dedicated OS thread with its own tokio runtime.
   Never do file IO, HTTP or process work on the GPUI main thread. The UI talks
   to the net thread through async channels; state arrives already parsed.

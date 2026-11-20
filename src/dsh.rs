@@ -225,12 +225,12 @@ impl DshHandle {
     /// Remembers the registry's cumulative archived-session ids (the reply of
     /// `workspace/archiveSession`; the delete call site falls back to the
     /// deleted id itself when the reply carries no list).
-    fn note_archived(&self, ids: &[String]) {
+    pub(crate) fn note_archived(&self, ids: &[String]) {
         let mut archived = self.inner.archived.lock().expect("dsh archived");
         archived.extend(ids.iter().cloned());
     }
 
-    fn is_archived(&self, session_id: &str) -> bool {
+    pub(crate) fn is_archived(&self, session_id: &str) -> bool {
         self.inner
             .archived
             .lock()
@@ -744,7 +744,7 @@ pub async fn run_request(handle: &DshHandle, ws_key: String, request: ApiRequest
     }
 }
 
-async fn create_session(
+pub(crate) async fn create_session(
     handle: &DshHandle,
     folder: Option<&str>,
     title: &str,
@@ -799,7 +799,10 @@ async fn create_session(
     })
 }
 
-async fn list_sessions_filtered(handle: &DshHandle, folder: &str) -> Result<Vec<SessionInfo>> {
+pub(crate) async fn list_sessions(
+    handle: &DshHandle,
+    folder: Option<&str>,
+) -> Result<Vec<(SessionInfo, Option<String>)>> {
     let value = handle
         .rpc("session/list", json!({ "_request": {} }))
         .await?;
@@ -809,16 +812,19 @@ async fn list_sessions_filtered(handle: &DshHandle, folder: &str) -> Result<Vec<
         .and_then(Value::as_array)
         .unwrap_or(&Vec::new())
     {
-        // dsh serves every folder from one process; a workspace only sees its own
-        if item.get("cwd").and_then(Value::as_str) != Some(folder) {
-            continue;
+        let cwd = item.get("cwd").and_then(Value::as_str);
+        if let Some(folder) = folder {
+            // dsh serves every folder from one process; a workspace only sees its own
+            if cwd != Some(folder) {
+                continue;
+            }
         }
         // archived chats keep riding the list (see Inner.archived)
         let id = item.get("sessionId").and_then(Value::as_str).unwrap_or("");
         if handle.is_archived(id) {
             continue;
         }
-        sessions.push(SessionInfo {
+        let info = SessionInfo {
             id: id.to_string(),
             title: projection_title(item)
                 .filter(|t| !t.is_empty())
@@ -830,23 +836,32 @@ async fn list_sessions_filtered(handle: &DshHandle, folder: &str) -> Result<Vec<
                 .get("parentSessionId")
                 .and_then(Value::as_str)
                 .map(String::from),
-        });
+        };
+        sessions.push((info, cwd.map(str::to_string)));
     }
     Ok(sessions)
+}
+
+async fn list_sessions_filtered(handle: &DshHandle, folder: &str) -> Result<Vec<SessionInfo>> {
+    Ok(list_sessions(handle, Some(folder))
+        .await?
+        .into_iter()
+        .map(|(info, _)| info)
+        .collect())
 }
 
 /// The normalized title in a dsh projection. `session/list` flattens the
 /// title projection to a plain string, while a follow snapshot carries the
 /// projection object (`{ title, messageSeqs, source, … }`); both shapes name
 /// the same value.
-fn projection_title(value: &Value) -> Option<&str> {
+pub(crate) fn projection_title(value: &Value) -> Option<&str> {
     let title = value.pointer("/projections/values/title")?;
     title
         .as_str()
         .or_else(|| title.get("title").and_then(Value::as_str))
 }
 
-async fn model_catalog(handle: &DshHandle) -> Result<Vec<ModelInfo>> {
+pub(crate) async fn model_catalog(handle: &DshHandle) -> Result<Vec<ModelInfo>> {
     let value = handle.rpc("session/modelCatalog", json!({})).await?;
     let mut models = Vec::new();
     for group in value
@@ -889,7 +904,7 @@ async fn model_catalog(handle: &DshHandle) -> Result<Vec<ModelInfo>> {
     Ok(models)
 }
 
-async fn agent_presets(handle: &DshHandle) -> Result<Vec<AgentInfo>> {
+pub(crate) async fn agent_presets(handle: &DshHandle) -> Result<Vec<AgentInfo>> {
     let value = handle.rpc("agentPresets/list", json!({})).await?;
     let mut agents = Vec::new();
     for preset in value

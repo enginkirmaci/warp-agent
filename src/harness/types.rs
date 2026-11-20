@@ -172,7 +172,7 @@ impl HarnessCapabilities {
         mcp_read: true,
         mcp_management: false,
         compaction: true,
-        fork: true,
+        fork: false,
         multi_location: false,
     };
 
@@ -214,7 +214,7 @@ impl HarnessCapabilities {
         mcp_read: false,
         mcp_management: false,
         compaction: true,
-        fork: true,
+        fork: false,
         multi_location: false,
     };
 }
@@ -447,6 +447,11 @@ pub enum HarnessEvent {
         session: Option<SessionId>,
         request: String,
         summary: Option<String>,
+    },
+    /// A command completed and produced a note for its chat.
+    CommandOutput {
+        session: SessionId,
+        result: Result<String, String>,
     },
     /// The model catalog landed.
     ModelsLoaded {

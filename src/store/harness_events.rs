@@ -295,6 +295,20 @@ impl Store {
                 self.resolve_question(&request, summary.as_deref().unwrap_or("dismissed"));
                 Ok(())
             }
+            HarnessEvent::CommandOutput { session, result } => {
+                let result = match result {
+                    Ok(text) => Ok(text),
+                    Err(error) => Err(anyhow::anyhow!(error)),
+                };
+                self.on_net_event(
+                    UiEvent::DshCommandExecuted {
+                        session_id: session.as_str().to_string(),
+                        result,
+                    },
+                    cx,
+                );
+                Ok(())
+            }
             HarnessEvent::ModelsLoaded { models } => {
                 let harness = harness_kind(harness)?;
                 let models = models

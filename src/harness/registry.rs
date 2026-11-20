@@ -4,6 +4,7 @@
 //! settings page, the composer pill, the door's harness list and the model
 //! pickers iterate this table rather than matching on an enum.
 
+use super::dsh::DshHarness;
 use super::interface::Harness;
 use super::opencode::OpenCodeV1Harness;
 use super::types::{
@@ -54,13 +55,7 @@ impl HarnessRegistry {
                     ConnectionKind::Attached,
                     HarnessCapabilities::OPENCODE_V2,
                 ),
-                descriptor(
-                    "dsh",
-                    "DeepSeek (dsh)",
-                    "dsh",
-                    ConnectionKind::Managed,
-                    HarnessCapabilities::DSH,
-                ),
+                dsh_descriptor(),
             ],
         }
     }
@@ -126,4 +121,20 @@ fn opencode_descriptor() -> HarnessDescriptor {
 
 fn opencode_factory(config: HarnessConfig) -> Box<dyn Harness> {
     Box::new(OpenCodeV1Harness::new(config))
+}
+
+fn dsh_descriptor() -> HarnessDescriptor {
+    let mut descriptor = descriptor(
+        "dsh",
+        "DeepSeek (dsh)",
+        "dsh",
+        ConnectionKind::Managed,
+        HarnessCapabilities::DSH,
+    );
+    descriptor.factory = Some(dsh_factory);
+    descriptor
+}
+
+fn dsh_factory(config: HarnessConfig) -> Box<dyn Harness> {
+    Box::new(DshHarness::new(config))
 }

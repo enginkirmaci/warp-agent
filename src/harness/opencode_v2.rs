@@ -486,10 +486,16 @@ impl Harness for OpenCodeV2Harness {
 
     fn run_command(
         &mut self,
-        _session: &SessionId,
-        _command: CommandRun,
+        session: &SessionId,
+        command: CommandRun,
     ) -> Result<(), HarnessError> {
-        Err(HarnessError::Unsupported("run_command"))
+        self.block_on(self.request(
+            reqwest::Method::POST,
+            &format!("/api/session/{}/command", session.as_str()),
+            false,
+            Some(json!({ "name": command.name, "text": command.text })),
+        ))
+        .map(|_| ())
     }
 
     fn activate_skill(&mut self, _session: &SessionId, _skill: &str) -> Result<(), HarnessError> {
@@ -550,8 +556,9 @@ impl Harness for OpenCodeV2Harness {
         .map(|_| ())
     }
 
-    fn diff(&mut self, _session: &SessionId) -> Result<Vec<FileDiff>, HarnessError> {
-        Err(HarnessError::Unsupported("diff"))
+    fn diff(&mut self, session: &SessionId) -> Result<Vec<FileDiff>, HarnessError> {
+        let value = self.get(&format!("/api/session/{}/diff", session.as_str()), false)?;
+        Ok(list_values(&value).filter_map(file_diff).collect())
     }
 
     fn inbox(&mut self, _session: &SessionId) -> Result<Vec<InboxItem>, HarnessError> {
@@ -895,6 +902,23 @@ fn permission_decision(value: &Value) -> Option<PermissionDecision> {
         Some("reject") => Some(PermissionDecision::Reject),
         _ => None,
     }
+}
+
+fn file_diff(value: &Value) -> Option<FileDiff> {
+    let path = value
+        .get("path")
+        .or_else(|| value.get("file"))
+        .or_else(|| value.get("filename"))
+        .and_then(Value::as_str)?;
+    let patch = value
+        .get("patch")
+        .or_else(|| value.get("diff"))
+        .or_else(|| value.get("text"))
+        .and_then(Value::as_str)?;
+    Some(FileDiff {
+        path: path.to_string(),
+        patch: patch.to_string(),
+    })
 }
 
 fn variant_names(value: Option<&Value>) -> Vec<String> {
@@ -1557,6 +1581,11 @@ mod tests {
             ("POST", "/api/session/s1/form/bad/reply") => {
                 ("400 Bad Request", r#"{"error":"invalid answer"}"#)
             }
+            ("POST", "/api/session/s1/command") => ("200 OK", r#"{"data":{}}"#),
+            ("GET", "/api/session/s1/diff") => (
+                "200 OK",
+                r#"{"data":[{"path":"src/main.rs","patch":"@@ -1 +1 @@\n-old\n+new"}]}"#,
+            ),
             _ => ("404 Not Found", r#"{"error":"not found"}"#),
         };
         respond(&mut stream, status, body);
@@ -1865,6 +1894,38 @@ mod tests {
             error,
             HarnessError::Failed(ref detail) if detail.contains("invalid answer")
         ));
+    }
+
+    #[test]
+    fn a_v2_command_and_diff_round_trip() {
+        let _lock = lock_home();
+        let xdg = XdgGuard::new("command-diff");
+        let server = FakeV2::start("secret");
+        xdg.write_registration(&server.url, "secret");
+        let mut harness = v2_harness(&fake_cli(xdg.dir(), &server.url, false));
+        harness.start().expect("attaches");
+        let session = SessionId::new("s1");
+
+        harness
+            .run_command(
+                &session,
+                CommandRun {
+                    name: "review".into(),
+                    text: "check the diff".into(),
+                },
+            )
+            .expect("command");
+        assert!(server.requests().iter().any(|request| {
+            request.contains("/api/session/s1/command")
+                && request.contains("\"name\":\"review\"")
+                && request.contains("\"text\":\"check the diff\"")
+        }));
+
+        let diffs = harness.diff(&session).expect("diff");
+        assert_eq!(diffs.len(), 1);
+        assert_eq!(diffs[0].path, "src/main.rs");
+        assert!(diffs[0].patch.contains("-old"));
+        assert!(diffs[0].patch.contains("+new"));
     }
 
     #[test]

@@ -496,33 +496,58 @@ impl Harness for OpenCodeV2Harness {
         Err(HarnessError::Unsupported("activate_skill"))
     }
 
-    fn permissions(
-        &mut self,
-        _session: &SessionId,
-    ) -> Result<Vec<PermissionRequest>, HarnessError> {
-        Err(HarnessError::Unsupported("permissions"))
+    fn permissions(&mut self, session: &SessionId) -> Result<Vec<PermissionRequest>, HarnessError> {
+        let value = self.get(
+            &format!("/api/session/{}/permission", session.as_str()),
+            false,
+        )?;
+        Ok(list_values(&value)
+            .filter_map(permission_from_value)
+            .collect())
     }
 
     fn reply_permission(
         &mut self,
-        _session: &SessionId,
-        _request: &str,
-        _decision: PermissionDecision,
+        session: &SessionId,
+        request: &str,
+        decision: PermissionDecision,
     ) -> Result<(), HarnessError> {
-        Err(HarnessError::Unsupported("reply_permission"))
+        let reply = match decision {
+            PermissionDecision::Once => "once",
+            PermissionDecision::Always => "always",
+            PermissionDecision::Reject => "reject",
+        };
+        self.block_on(self.request(
+            reqwest::Method::POST,
+            &format!(
+                "/api/session/{}/permission/{}/reply",
+                session.as_str(),
+                request
+            ),
+            false,
+            Some(json!({ "reply": reply })),
+        ))
+        .map(|_| ())
     }
 
-    fn forms(&mut self, _session: &SessionId) -> Result<Vec<FormRequest>, HarnessError> {
-        Err(HarnessError::Unsupported("forms"))
+    fn forms(&mut self, session: &SessionId) -> Result<Vec<FormRequest>, HarnessError> {
+        let value = self.get(&format!("/api/session/{}/form", session.as_str()), false)?;
+        Ok(list_values(&value).filter_map(form_from_value).collect())
     }
 
     fn reply_form(
         &mut self,
-        _session: &SessionId,
-        _form: &str,
-        _answer: FormAnswer,
+        session: &SessionId,
+        form: &str,
+        answer: FormAnswer,
     ) -> Result<(), HarnessError> {
-        Err(HarnessError::Unsupported("reply_form"))
+        self.block_on(self.request(
+            reqwest::Method::POST,
+            &format!("/api/session/{}/form/{}/reply", session.as_str(), form),
+            false,
+            Some(json!({ "answer": answer.values })),
+        ))
+        .map(|_| ())
     }
 
     fn diff(&mut self, _session: &SessionId) -> Result<Vec<FileDiff>, HarnessError> {
@@ -734,6 +759,142 @@ fn data_array(value: &Value) -> impl Iterator<Item = &Value> {
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
+}
+
+fn list_values(value: &Value) -> impl Iterator<Item = &Value> {
+    value
+        .get("data")
+        .and_then(Value::as_array)
+        .or_else(|| value.as_array())
+        .into_iter()
+        .flatten()
+}
+
+fn string_list(value: Option<&Value>) -> Vec<String> {
+    match value {
+        Some(Value::Array(items)) => items
+            .iter()
+            .filter_map(|item| {
+                item.as_str().map(str::to_string).or_else(|| {
+                    item.get("value")
+                        .or_else(|| item.get("label"))
+                        .or_else(|| item.get("name"))
+                        .and_then(Value::as_str)
+                        .map(str::to_string)
+                })
+            })
+            .collect(),
+        Some(Value::String(text)) => vec![text.clone()],
+        _ => Vec::new(),
+    }
+}
+
+fn permission_from_value(value: &Value) -> Option<PermissionRequest> {
+    let id = value
+        .get("id")
+        .or_else(|| value.get("requestID"))
+        .and_then(Value::as_str)?;
+    let session = value
+        .get("sessionID")
+        .or_else(|| value.get("sessionId"))
+        .and_then(Value::as_str)
+        .map(SessionId::new)?;
+    Some(PermissionRequest {
+        id: id.to_string(),
+        session,
+        action: value
+            .get("action")
+            .and_then(Value::as_str)
+            .unwrap_or("permission")
+            .to_string(),
+        resources: string_list(value.get("resources")),
+        message: value
+            .get("message")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        diff: value
+            .pointer("/metadata/diff")
+            .and_then(Value::as_str)
+            .or_else(|| value.get("diff").and_then(Value::as_str))
+            .map(str::to_string),
+    })
+}
+
+fn form_from_value(value: &Value) -> Option<FormRequest> {
+    let id = value
+        .get("id")
+        .or_else(|| value.get("formID"))
+        .and_then(Value::as_str)?;
+    let session = value
+        .get("sessionID")
+        .or_else(|| value.get("sessionId"))
+        .and_then(Value::as_str)
+        .map(SessionId::new)?;
+    let fields = value
+        .get("fields")
+        .and_then(Value::as_array)
+        .map(|fields| fields.iter().filter_map(form_field).collect())
+        .unwrap_or_default();
+    Some(FormRequest {
+        id: id.to_string(),
+        session,
+        title: value
+            .get("title")
+            .and_then(Value::as_str)
+            .unwrap_or("Question")
+            .to_string(),
+        fields,
+    })
+}
+
+fn form_field(value: &Value) -> Option<FormField> {
+    let id = value
+        .get("id")
+        .or_else(|| value.get("fieldID"))
+        .and_then(Value::as_str)?;
+    let raw = value
+        .get("kind")
+        .or_else(|| value.get("type"))
+        .and_then(Value::as_str)
+        .unwrap_or("string")
+        .to_ascii_lowercase();
+    let kind = match raw.as_str() {
+        "number" => FormFieldKind::Number,
+        "integer" => FormFieldKind::Integer,
+        "boolean" | "bool" => FormFieldKind::Boolean,
+        "multiselect" | "multi-select" | "multi_select" => FormFieldKind::Multiselect,
+        "external" => FormFieldKind::External,
+        _ => FormFieldKind::Text,
+    };
+    Some(FormField {
+        id: id.to_string(),
+        title: value
+            .get("title")
+            .or_else(|| value.get("label"))
+            .or_else(|| value.get("name"))
+            .and_then(Value::as_str)
+            .unwrap_or(id)
+            .to_string(),
+        kind,
+        required: value
+            .get("required")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        options: string_list(value.get("options")),
+    })
+}
+
+fn permission_decision(value: &Value) -> Option<PermissionDecision> {
+    match value
+        .get("reply")
+        .or_else(|| value.get("decision"))
+        .and_then(Value::as_str)
+    {
+        Some("once") => Some(PermissionDecision::Once),
+        Some("always") => Some(PermissionDecision::Always),
+        Some("reject") => Some(PermissionDecision::Reject),
+        _ => None,
+    }
 }
 
 fn variant_names(value: Option<&Value>) -> Vec<String> {
@@ -960,6 +1121,41 @@ fn translate_v2_event(value: &Value, state: &mut V2StreamState) -> Option<Harnes
                 .and_then(Value::as_str)
                 .map(str::to_string),
         }),
+        "permission.asked" => {
+            permission_from_value(data).map(|request| HarnessEvent::PermissionAsked { request })
+        }
+        "permission.replied" => {
+            let request = data
+                .get("requestID")
+                .or_else(|| data.get("id"))
+                .and_then(Value::as_str)?;
+            Some(HarnessEvent::PermissionReplied {
+                session: event_session(data),
+                request: request.to_string(),
+                decision: permission_decision(data)?,
+            })
+        }
+        "form.created" => {
+            let form = data.get("form").unwrap_or(data);
+            form_from_value(form).map(|request| HarnessEvent::QuestionAsked { request })
+        }
+        "form.replied" | "form.cancelled" => {
+            let request = data
+                .get("id")
+                .or_else(|| data.get("formID"))
+                .and_then(Value::as_str)?;
+            let summary = if kind == "form.replied" {
+                data.get("answer")
+                    .and_then(|answer| serde_json::to_string(answer).ok())
+            } else {
+                None
+            };
+            Some(HarnessEvent::QuestionResolved {
+                session: event_session(data),
+                request: request.to_string(),
+                summary,
+            })
+        }
         _ => None,
     }
 }
@@ -1204,6 +1400,7 @@ mod tests {
         url: String,
         stop: Arc<AtomicBool>,
         rotation: Arc<Mutex<Option<Rotation>>>,
+        requests: Arc<Mutex<Vec<String>>>,
     }
 
     impl FakeV2 {
@@ -1214,14 +1411,16 @@ mod tests {
             let stop = Arc::new(AtomicBool::new(false));
             let password = Arc::new(Mutex::new(password.to_string()));
             let rotation = Arc::new(Mutex::new(None));
+            let requests = Arc::new(Mutex::new(Vec::new()));
             let thread_password = password.clone();
             let thread_rotation = rotation.clone();
+            let thread_requests = requests.clone();
             let thread_stop = stop.clone();
             std::thread::spawn(move || {
                 while !thread_stop.load(Ordering::SeqCst) {
                     match listener.accept() {
                         Ok((stream, _)) => {
-                            handle(stream, &thread_password, &thread_rotation);
+                            handle(stream, &thread_password, &thread_rotation, &thread_requests);
                         }
                         Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
                             std::thread::sleep(Duration::from_millis(5));
@@ -1234,6 +1433,7 @@ mod tests {
                 url,
                 stop,
                 rotation,
+                requests,
             }
         }
 
@@ -1243,6 +1443,10 @@ mod tests {
                 url: self.url.clone(),
                 password: password.to_string(),
             });
+        }
+
+        fn requests(&self) -> Vec<String> {
+            self.requests.lock().expect("requests").clone()
         }
     }
 
@@ -1256,10 +1460,15 @@ mod tests {
         mut stream: TcpStream,
         password: &Arc<Mutex<String>>,
         rotation: &Arc<Mutex<Option<Rotation>>>,
+        requests: &Arc<Mutex<Vec<String>>>,
     ) {
-        let Some((method, path, authorization)) = read_request(&mut stream) else {
+        let Some((method, path, authorization, body)) = read_request(&mut stream) else {
             return;
         };
+        requests
+            .lock()
+            .expect("requests")
+            .push(format!("{method} {path} {body}"));
         let expected = format!(
             "Basic {}",
             crate::oc::base64_encode(
@@ -1335,31 +1544,64 @@ mod tests {
             ("POST", "/api/session/s1/prompt")
             | ("POST", "/api/session/s1/interrupt")
             | ("POST", "/api/session/s1/compact") => ("200 OK", r#"{"data":{}}"#),
+            ("GET", "/api/session/s1/permission") => (
+                "200 OK",
+                r#"{"data":[{"id":"p1","sessionID":"s1","action":"edit","resources":["src/main.rs"],"metadata":{"diff":"@@ -1 +1 @@"},"message":"Allow edit?"}]}"#,
+            ),
+            ("POST", "/api/session/s1/permission/p1/reply") => ("200 OK", "{}"),
+            ("GET", "/api/session/s1/form") => (
+                "200 OK",
+                r#"{"data":[{"id":"f1","sessionID":"s1","title":"Deploy where?","fields":[{"id":"target","title":"Target","type":"string","required":true},{"id":"envs","title":"Environments","type":"multiselect","options":["dev","prod"]}]}]}"#,
+            ),
+            ("POST", "/api/session/s1/form/f1/reply") => ("200 OK", "{}"),
+            ("POST", "/api/session/s1/form/bad/reply") => {
+                ("400 Bad Request", r#"{"error":"invalid answer"}"#)
+            }
             _ => ("404 Not Found", r#"{"error":"not found"}"#),
         };
         respond(&mut stream, status, body);
     }
 
-    fn read_request(stream: &mut TcpStream) -> Option<(String, String, String)> {
+    fn read_request(stream: &mut TcpStream) -> Option<(String, String, String, String)> {
         stream
             .set_read_timeout(Some(Duration::from_millis(500)))
             .ok()?;
         let mut buffer = Vec::new();
         let mut chunk = [0u8; 1024];
+        let mut header_end = None;
         loop {
             let read = stream.read(&mut chunk).ok()?;
             if read == 0 {
                 break;
             }
             buffer.extend_from_slice(&chunk[..read]);
-            if buffer.windows(4).any(|window| window == b"\r\n\r\n") {
+            if let Some(position) = buffer.windows(4).position(|window| window == b"\r\n\r\n") {
+                header_end = Some(position + 4);
                 break;
             }
             if buffer.len() > 64 * 1024 {
                 break;
             }
         }
-        let text = String::from_utf8_lossy(&buffer);
+        let header_end = header_end?;
+        let headers = String::from_utf8_lossy(&buffer[..header_end]).to_string();
+        let content_length = headers
+            .lines()
+            .find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                name.eq_ignore_ascii_case("content-length")
+                    .then(|| value.trim().parse::<usize>().ok())
+                    .flatten()
+            })
+            .unwrap_or(0);
+        while buffer.len() < header_end + content_length {
+            let read = stream.read(&mut chunk).ok()?;
+            if read == 0 {
+                break;
+            }
+            buffer.extend_from_slice(&chunk[..read]);
+        }
+        let text = String::from_utf8_lossy(&buffer[..header_end]).to_string();
         let mut lines = text.split("\r\n");
         let request_line = lines.next()?;
         let mut parts = request_line.split_whitespace();
@@ -1373,7 +1615,14 @@ mod tests {
                 authorization = value.trim().to_string();
             }
         }
-        Some((method, path, authorization))
+        let body = if buffer.len() > header_end {
+            String::from_utf8_lossy(&buffer[header_end..])
+                .trim()
+                .to_string()
+        } else {
+            String::new()
+        };
+        Some((method, path, authorization, body))
     }
 
     fn respond(stream: &mut TcpStream, status: &str, body: &str) {
@@ -1398,6 +1647,11 @@ mod tests {
             json!({"type":"session.tool.called","data":{"sessionID":"s1","assistantMessageID":"m1","id":"t1","name":"bash","input":{"command":"ls"},"executed":true}}),
             json!({"type":"session.tool.success","data":{"sessionID":"s1","assistantMessageID":"m1","id":"t1","content":[{"type":"text","text":"ok"}],"metadata":{},"executed":true}}),
             json!({"type":"session.step.ended","data":{"sessionID":"s1","assistantMessageID":"m1"}}),
+            json!({"type":"permission.asked","data":{"id":"p1","sessionID":"s1","action":"edit","resources":["src/main.rs"],"message":"Allow edit?"}}),
+            json!({"type":"form.created","data":{"form":{"id":"f1","sessionID":"s1","title":"Deploy where?","fields":[{"id":"target","title":"Target","type":"string","required":true}]}}}),
+            json!({"type":"permission.replied","data":{"sessionID":"s1","requestID":"p1","reply":"once"}}),
+            json!({"type":"form.replied","data":{"sessionID":"s1","id":"f1","answer":{"target":"prod"}}}),
+            json!({"type":"form.cancelled","data":{"sessionID":"s1","id":"f2"}}),
             json!({"type":"session.idle","data":{"sessionID":"s1"}}),
         ];
         for frame in frames {
@@ -1512,6 +1766,9 @@ mod tests {
         let mut tool = None;
         let mut idle = false;
         let mut steps = Vec::new();
+        let mut permission_asked = 0;
+        let mut form_asked = 0;
+        let mut resolved = 0;
         while std::time::Instant::now() < deadline {
             while let Ok(event) = events.try_recv() {
                 match event {
@@ -1533,6 +1790,9 @@ mod tests {
                         state: SessionState::Idle,
                         ..
                     } => idle = true,
+                    HarnessEvent::PermissionAsked { .. } => permission_asked += 1,
+                    HarnessEvent::QuestionAsked { .. } => form_asked += 1,
+                    HarnessEvent::QuestionResolved { .. } => resolved += 1,
                     _ => {}
                 }
             }
@@ -1545,7 +1805,66 @@ mod tests {
         assert_eq!(reasoning.as_deref(), Some("think"));
         assert_eq!(tool.as_deref(), Some("ok"));
         assert_eq!(steps, ["start", "finish"]);
+        assert_eq!(permission_asked, 1);
+        assert_eq!(form_asked, 1);
+        assert_eq!(resolved, 2);
         assert!(idle, "session.idle settled the turn");
+    }
+
+    #[test]
+    fn a_v2_permission_and_form_round_trip() {
+        let _lock = lock_home();
+        let xdg = XdgGuard::new("approvals");
+        let server = FakeV2::start("secret");
+        xdg.write_registration(&server.url, "secret");
+        let mut harness = v2_harness(&fake_cli(xdg.dir(), &server.url, false));
+        harness.start().expect("attaches");
+        let session = SessionId::new("s1");
+
+        let permissions = harness.permissions(&session).expect("permissions");
+        assert_eq!(permissions.len(), 1);
+        assert_eq!(permissions[0].id, "p1");
+        assert_eq!(permissions[0].action, "edit");
+        assert_eq!(permissions[0].resources, ["src/main.rs"]);
+        assert_eq!(permissions[0].diff.as_deref(), Some("@@ -1 +1 @@"));
+        assert_eq!(permissions[0].message.as_deref(), Some("Allow edit?"));
+
+        let forms = harness.forms(&session).expect("forms");
+        assert_eq!(forms.len(), 1);
+        assert_eq!(forms[0].title, "Deploy where?");
+        assert_eq!(forms[0].fields[0].kind, FormFieldKind::Text);
+        assert!(forms[0].fields[0].required);
+        assert_eq!(forms[0].fields[1].kind, FormFieldKind::Multiselect);
+        assert_eq!(forms[0].fields[1].options, ["dev", "prod"]);
+
+        harness
+            .reply_permission(&session, "p1", PermissionDecision::Once)
+            .expect("reply once");
+        let mut answer = FormAnswer::default();
+        answer.values.insert("target".into(), json!("prod"));
+        answer.values.insert("envs".into(), json!(["dev"]));
+        harness
+            .reply_form(&session, "f1", answer.clone())
+            .expect("multi-field answer");
+
+        let requests = server.requests();
+        assert!(requests.iter().any(|request| {
+            request.contains("/api/session/s1/permission/p1/reply")
+                && request.contains("\"reply\":\"once\"")
+        }));
+        assert!(requests.iter().any(|request| {
+            request.contains("/api/session/s1/form/f1/reply")
+                && request.contains("\"answer\"")
+                && request.contains("\"target\":\"prod\"")
+        }));
+
+        let error = harness
+            .reply_form(&session, "bad", answer)
+            .expect_err("the fake rejects the bad form id");
+        assert!(matches!(
+            error,
+            HarnessError::Failed(ref detail) if detail.contains("invalid answer")
+        ));
     }
 
     #[test]

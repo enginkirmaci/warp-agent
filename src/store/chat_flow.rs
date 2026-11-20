@@ -9,7 +9,7 @@ impl Store {
     pub(super) fn create_tile(&mut self, cx: &mut Context<Self>) -> &mut ChatTile {
         let key = format!("t{}", self.next_tile_key);
         self.next_tile_key += 1;
-        let harness = self.settings.default_harness;
+        let harness = self.settings.default_harness_kind();
         let model = self.seed_model_for(harness);
         // a variant only makes sense next to a model; the model's own list
         // decides the rest when the tile is built
@@ -115,6 +115,9 @@ impl Store {
         harness: HarnessKind,
         cx: &mut Context<Self>,
     ) {
+        if !self.harness_enabled(harness) {
+            return;
+        }
         if let Some(tile) = self.tile_by_key_mut(tile_key)
             && tile.session_id.is_none()
             && tile.harness != harness
@@ -267,6 +270,21 @@ impl Store {
             (tile.input.trim().to_string(), tile.attachments.len())
         };
         if text.is_empty() && attachment_count == 0 {
+            return;
+        }
+        if let Some(harness) = self.tile_by_key(tile_key).map(|tile| tile.harness)
+            && !self.harness_enabled(harness)
+        {
+            self.tile_note(
+                tile_key,
+                &format!(
+                    "{} is disabled. Enable it in Settings to send.",
+                    harness.option_label()
+                ),
+                true,
+                cx,
+            );
+            self.repaint(cx);
             return;
         }
         if let Some(key) = self.tile_net_key_or(tile_key) {

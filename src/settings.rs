@@ -4,11 +4,30 @@
 
 use crate::paths::AppPaths;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::fs;
 use warpui_kit_platform::config::{Error, KeyMap, Store, rename_legacy_keys};
 
 pub const DEFAULT_EXECUTABLE: &str = "opencode";
 pub const DEFAULT_DSH_EXECUTABLE: &str = "dsh";
+
+/// One registry harness's user settings: whether the app may use it and the
+/// executable the managed connection spawns.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct HarnessEntry {
+    pub enabled: bool,
+    #[serde(default = "default_executable")]
+    pub executable: String,
+}
+
+impl HarnessEntry {
+    pub fn new(enabled: bool, executable: impl Into<String>) -> Self {
+        Self {
+            enabled,
+            executable: executable.into(),
+        }
+    }
+}
 
 /// How many of a workspace's chats the All sidebar list shows by default:
 /// pinned rows lead, then the most recent.
@@ -68,6 +87,11 @@ impl HarnessKind {
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(rename_all = "snake_case", default)]
 pub struct AppSettings {
+    /// Per-harness settings keyed by the stable wire id; the registry supplies
+    /// the rows and the default executable, so a new adapter adds no settings
+    /// type here.
+    #[serde(default)]
+    pub harnesses: BTreeMap<String, HarnessEntry>,
     #[serde(default = "default_executable")]
     pub opencode_executable: String,
     #[serde(default = "default_dsh_executable")]
@@ -121,6 +145,21 @@ fn default_executable() -> String {
 fn default_dsh_executable() -> String {
     DEFAULT_DSH_EXECUTABLE.into()
 }
+
+fn default_harnesses() -> BTreeMap<String, HarnessEntry> {
+    crate::harness::HarnessRegistry::builtin()
+        .iter()
+        .map(|descriptor| {
+            (
+                descriptor.id.as_str().to_string(),
+                HarnessEntry::new(
+                    descriptor.id.as_str() != "opencode-v2",
+                    descriptor.default_executable,
+                ),
+            )
+        })
+        .collect()
+}
 fn d1() -> i64 {
     1
 }
@@ -160,6 +199,7 @@ impl Default for AppSettings {
         Self {
             opencode_executable: default_executable(),
             dsh_executable: default_dsh_executable(),
+            harnesses: default_harnesses(),
             default_harness: HarnessKind::default(),
             default_model: None,
             default_variant: None,
@@ -186,11 +226,124 @@ impl Default for AppSettings {
 }
 
 impl AppSettings {
+    pub fn harness_entry(&self, id: &str) -> Option<&HarnessEntry> {
+        self.harnesses.get(id)
+    }
+
+    pub fn harness_enabled(&self, id: &str) -> bool {
+        self.harnesses.get(id).is_some_and(|entry| entry.enabled)
+    }
+
+    pub fn harness_executable(&self, id: &str) -> String {
+        self.harnesses
+            .get(id)
+            .map(|entry| entry.executable.trim().to_string())
+            .filter(|executable| !executable.is_empty())
+            .or_else(|| {
+                crate::harness::HarnessRegistry::builtin()
+                    .resolve(id)
+                    .ok()
+                    .map(|descriptor| descriptor.default_executable.to_string())
+            })
+            .unwrap_or_else(default_executable)
+    }
+
+    /// The enabled harness ids in registry order.
+    pub fn enabled_harness_ids(&self) -> Vec<String> {
+        crate::harness::HarnessRegistry::builtin()
+            .iter()
+            .filter(|descriptor| self.harness_enabled(descriptor.id.as_str()))
+            .map(|descriptor| descriptor.id.as_str().to_string())
+            .collect()
+    }
+
+    /// The default harness, falling back to the first enabled one. The legacy
+    /// enum cannot name v2 yet; v2 becomes selectable with the registry-fed
+    /// default in the contract ticket.
+    pub fn default_harness_kind(&self) -> HarnessKind {
+        if self.harness_enabled(self.default_harness.label()) {
+            return self.default_harness;
+        }
+        HarnessKind::ALL
+            .into_iter()
+            .find(|harness| self.harness_enabled(harness.label()))
+            .unwrap_or(HarnessKind::OpenCode)
+    }
+
+    /// Fill the harness map from the defaults and the pre-map executable
+    /// fields, then keep the "one enabled harness" and default invariants.
+    /// Returns true when anything changed, so load can persist the migration.
+    pub fn migrate_harnesses(&mut self) -> bool {
+        let defaults = default_harnesses();
+        let was_empty = self.harnesses.is_empty();
+        let mut changed = was_empty;
+        if was_empty {
+            self.harnesses = defaults.clone();
+        }
+        for (id, entry) in &defaults {
+            if !self.harnesses.contains_key(id) {
+                self.harnesses.insert(id.clone(), entry.clone());
+                changed = true;
+            }
+        }
+        if was_empty {
+            if let Some(entry) = self.harnesses.get_mut("opencode")
+                && !self.opencode_executable.trim().is_empty()
+            {
+                entry.executable = self.opencode_executable.trim().to_string();
+            }
+            if let Some(entry) = self.harnesses.get_mut("dsh")
+                && !self.dsh_executable.trim().is_empty()
+            {
+                entry.executable = self.dsh_executable.trim().to_string();
+            }
+        }
+        for (id, entry) in &mut self.harnesses {
+            if entry.executable.trim().is_empty() {
+                entry.executable = defaults
+                    .get(id)
+                    .map(|default| default.executable.clone())
+                    .unwrap_or_else(default_executable);
+                changed = true;
+            }
+        }
+        if !self.harnesses.values().any(|entry| entry.enabled) {
+            if let Some(entry) = self.harnesses.get_mut("opencode") {
+                entry.enabled = true;
+            } else if let Some(entry) = self.harnesses.values_mut().next() {
+                entry.enabled = true;
+            }
+            changed = true;
+        }
+        if !HarnessKind::ALL
+            .iter()
+            .any(|harness| self.harness_enabled(harness.label()))
+        {
+            if let Some(entry) = self.harnesses.get_mut("opencode") {
+                entry.enabled = true;
+            } else if let Some(entry) = self.harnesses.get_mut("dsh") {
+                entry.enabled = true;
+            }
+            changed = true;
+        }
+        if !self.harness_enabled(self.default_harness.label()) {
+            self.default_harness = self.default_harness_kind();
+            changed = true;
+        }
+        self.sync_legacy_executables();
+        changed
+    }
+
+    fn sync_legacy_executables(&mut self) {
+        self.opencode_executable = self.harness_executable("opencode");
+        self.dsh_executable = self.harness_executable("dsh");
+    }
+
     pub fn load() -> Self {
         AppPaths::migrate_legacy_file("settings.json");
         let path = AppPaths::settings_file();
         let store = Store::<AppSettings>::new(path.clone()).preserving_unknown();
-        match store.load() {
+        let mut settings = match store.load() {
             Ok(settings) => settings,
             Err(err) if err.needs_import() => {
                 let settings = import_settings(&path).unwrap_or_default();
@@ -216,13 +369,19 @@ impl AppSettings {
                 let _ = fs::rename(&path, path.with_extension("json.bad"));
                 Self::default()
             }
+        };
+        if settings.migrate_harnesses() {
+            settings.save();
         }
+        settings
     }
 
     pub fn save(&self) {
+        let mut settings = self.clone();
+        settings.sync_legacy_executables();
         if let Err(err) = Store::<AppSettings>::new(AppPaths::settings_file())
             .preserving_unknown()
-            .save(self)
+            .save(&settings)
         {
             tracing::warn!("could not save settings: {err}");
         }
@@ -478,6 +637,46 @@ mod tests {
         let saved: AppSettings =
             serde_json::from_str(r#"{"sidebar_chats_per_workspace":5}"#).unwrap();
         assert_eq!(saved.sidebar_chats_per_workspace, 5);
+    }
+
+    #[test]
+    fn the_harness_map_defaults_and_migrates_the_old_executables() {
+        let settings = AppSettings::default();
+        assert!(settings.harness_enabled("opencode"));
+        assert!(settings.harness_enabled("dsh"));
+        assert!(!settings.harness_enabled("opencode-v2"));
+        assert_eq!(settings.harness_executable("opencode"), DEFAULT_EXECUTABLE);
+        assert_eq!(settings.harness_executable("dsh"), DEFAULT_DSH_EXECUTABLE);
+
+        let mut old: AppSettings = serde_json::from_str(
+            r#"{
+                "opencode_executable": "/tmp/oc",
+                "dsh_executable": "/tmp/dsh",
+                "default_harness": "dsh"
+            }"#,
+        )
+        .unwrap();
+        assert!(old.migrate_harnesses());
+        assert_eq!(old.harness_executable("opencode"), "/tmp/oc");
+        assert_eq!(old.harness_executable("dsh"), "/tmp/dsh");
+        assert_eq!(old.default_harness, HarnessKind::Dsh);
+        assert!(!old.harness_enabled("opencode-v2"));
+    }
+
+    #[test]
+    fn the_last_enabled_harness_and_default_fallback_are_kept() {
+        let mut settings = AppSettings::default();
+        for entry in settings.harnesses.values_mut() {
+            entry.enabled = false;
+        }
+        assert!(settings.migrate_harnesses());
+        assert!(settings.harness_enabled("opencode"));
+
+        let mut settings = AppSettings::default();
+        settings.harnesses.get_mut("opencode").unwrap().enabled = false;
+        settings.default_harness = HarnessKind::OpenCode;
+        assert!(settings.migrate_harnesses());
+        assert_eq!(settings.default_harness, HarnessKind::Dsh);
     }
 
     #[test]

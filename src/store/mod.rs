@@ -8,7 +8,7 @@ use crate::oc::{
 };
 // the store's event intake is public, so its event type is reachable from here
 pub use crate::oc::UiEvent;
-use crate::settings::{AppSettings, DEFAULT_EXECUTABLE, HarnessKind, UiState, WorkspaceState};
+use crate::settings::{AppSettings, HarnessKind, UiState, WorkspaceState};
 pub mod ipc;
 // the impl Store continuation modules, one per section
 mod chat_flow;
@@ -757,6 +757,9 @@ impl Store {
     /// scopes its rows to the harness the segmented control shows; the
     /// merged `models` list cannot distinguish the two catalogs.
     pub fn model_keys_for(&self, harness: HarnessKind) -> Vec<String> {
+        if !self.harness_enabled(harness) {
+            return Vec::new();
+        }
         self.model_infos
             .iter()
             .filter(|model| model.harness == harness)
@@ -768,6 +771,9 @@ impl Store {
     /// harness's catalog lands (or when the model has no tiers), which the
     /// settings Variant picker explains instead of showing an empty list.
     pub fn variants_for(&self, harness: HarnessKind, model: &str) -> Vec<String> {
+        if !self.harness_enabled(harness) {
+            return Vec::new();
+        }
         variants_for_entry(&self.model_infos, harness, model)
     }
 
@@ -1641,19 +1647,121 @@ impl Store {
         if self.runtimes.contains_key(DSH_SERVER_KEY) {
             return;
         }
-        let executable = self.settings.dsh_executable.clone();
+        let executable = self.settings.harness_executable("dsh");
         tracing::info!("starting the shared dsh server");
         self.net.send(NetCommand::StartServer {
             ws_key: DSH_SERVER_KEY.into(),
             kind: HarnessKind::Dsh,
-            executable: if executable.is_empty() {
-                crate::settings::DEFAULT_DSH_EXECUTABLE.into()
-            } else {
-                executable
-            },
+            executable,
             folder: ".".into(),
         });
         let _ = cx;
+    }
+
+    pub fn harness_enabled(&self, harness: HarnessKind) -> bool {
+        self.settings.harness_enabled(harness.label())
+    }
+
+    pub fn harness_id_enabled(&self, id: &str) -> bool {
+        self.settings.harness_enabled(id)
+    }
+
+    /// The next enabled harness after `current`, for the composer pill.
+    pub fn next_enabled_harness(&self, current: HarnessKind) -> Option<HarnessKind> {
+        let all = HarnessKind::ALL;
+        let start = all
+            .iter()
+            .position(|harness| *harness == current)
+            .map(|index| index + 1)
+            .unwrap_or(0);
+        for offset in 0..all.len() {
+            let harness = all[(start + offset) % all.len()];
+            if harness != current && self.harness_enabled(harness) {
+                return Some(harness);
+            }
+        }
+        None
+    }
+
+    /// Whether a running turn belongs to this harness.
+    pub fn harness_has_running_turn(&self, id: &str) -> bool {
+        self.running_by_session
+            .iter()
+            .any(|session| self.session_harness(session).label() == id)
+    }
+
+    /// Enable or disable one harness. Disabling a managed harness stops its
+    /// processes; the last enabled harness cannot be disabled, and the default
+    /// falls back to another enabled one. Re-enabling refreshes the catalog.
+    pub fn set_harness_enabled(
+        &mut self,
+        id: &str,
+        enabled: bool,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        if crate::harness::HarnessRegistry::builtin()
+            .resolve(id)
+            .is_err()
+        {
+            return Err(format!("unknown harness: {id}"));
+        }
+        if self.settings.harness_enabled(id) == enabled {
+            return Ok(());
+        }
+        if !enabled {
+            // v2 cannot be the default until the registry-fed default lands;
+            // counting only the enum-backed harnesses keeps a usable backend.
+            let enabled_count = HarnessKind::ALL
+                .iter()
+                .filter(|harness| self.harness_enabled(**harness))
+                .count();
+            if enabled_count <= 1 {
+                return Err("The last enabled harness cannot be disabled.".into());
+            }
+        }
+        let executable = self.settings.harness_executable(id);
+        self.settings
+            .harnesses
+            .entry(id.to_string())
+            .or_insert(crate::settings::HarnessEntry::new(enabled, executable))
+            .enabled = enabled;
+        if !enabled {
+            match id {
+                "opencode" => {
+                    let keys: Vec<String> = self
+                        .runtimes
+                        .keys()
+                        .filter(|key| key.as_str() != DSH_SERVER_KEY)
+                        .cloned()
+                        .collect();
+                    for key in keys {
+                        self.net.send(NetCommand::StopServer {
+                            ws_key: key.clone(),
+                        });
+                        self.teardown_runtime(&key);
+                    }
+                }
+                "dsh" if self.runtimes.contains_key(DSH_SERVER_KEY) => {
+                    self.net.send(NetCommand::StopServer {
+                        ws_key: DSH_SERVER_KEY.into(),
+                    });
+                    self.teardown_runtime(DSH_SERVER_KEY);
+                }
+                // attached opencode-v2 disconnects in the v2 connection ticket
+                _ => {}
+            }
+            if self.settings.default_harness.label() == id {
+                self.settings.default_harness = self.settings.default_harness_kind();
+            }
+        }
+        self.settings.save();
+        self.save_state();
+        self.ipc_push_status();
+        if enabled && let Some(harness) = HarnessKind::from_wire(id) {
+            self.refresh_models(harness, cx);
+        }
+        self.repaint(cx);
+        Ok(())
     }
 
     /// Re-reads one harness's model catalog for the settings picker. Starts
@@ -2072,16 +2180,12 @@ impl Store {
             return;
         };
         let folder = ws.folder_path().to_string();
-        let executable = self.settings.opencode_executable.clone();
+        let executable = self.settings.harness_executable("opencode");
         tracing::info!("starting server for {}", ws.name);
         self.net.send(NetCommand::StartServer {
             ws_key: folder,
             kind: HarnessKind::OpenCode,
-            executable: if executable.is_empty() {
-                DEFAULT_EXECUTABLE.into()
-            } else {
-                executable
-            },
+            executable,
             folder: path.into(),
         });
         let _ = cx;
@@ -3459,5 +3563,67 @@ mod lineage_tests {
             lineage_harness("child", &harnesses, &subagents),
             HarnessKind::OpenCode
         );
+    }
+}
+
+#[cfg(test)]
+mod harness_settings_tests {
+    use super::*;
+    use crate::store::test_support::{HomeGuard, lock_home};
+
+    #[gpui_kit::gpui::test]
+    fn disabling_a_harness_falls_back_the_default_and_keeps_one(cx: &mut gpui::TestAppContext) {
+        let _lock = lock_home();
+        let _home = HomeGuard::new();
+        let store = cx.update(Store::for_probe);
+        store.update(cx, |store, _| {
+            store.settings.default_harness = HarnessKind::Dsh;
+        });
+        store.update(cx, |store, cx| {
+            store
+                .set_harness_enabled("opencode", false, cx)
+                .expect("opencode can be disabled while dsh is on");
+        });
+        store.read_with(cx, |store, _| {
+            assert!(!store.harness_id_enabled("opencode"));
+            assert_eq!(store.settings.default_harness, HarnessKind::Dsh);
+        });
+        store.update(cx, |store, cx| {
+            assert!(store.set_harness_enabled("dsh", false, cx).is_err());
+            assert!(store.harness_id_enabled("dsh"));
+        });
+    }
+
+    #[gpui_kit::gpui::test]
+    fn a_disabled_harness_refuses_sends_with_a_note(cx: &mut gpui::TestAppContext) {
+        let _lock = lock_home();
+        let home = HomeGuard::new();
+        let folder = home.home.join("workspace");
+        std::fs::create_dir_all(&folder).expect("workspace");
+        let folder = folder.to_string_lossy().to_string();
+        let store = cx.update(Store::for_probe);
+        let key = cx.update(|cx| {
+            store.update(cx, |store, cx| {
+                store.add_workspace(&folder, cx);
+                store.seed_probe_tile(&folder, "s1", "Probe", Vec::new(), false, cx)
+            })
+        });
+        store.update(cx, |store, cx| {
+            if let Some(tile) = store.tile_by_key_mut(&key) {
+                tile.input = "hello".into();
+            }
+            store
+                .set_harness_enabled("opencode", false, cx)
+                .expect("dsh keeps the app usable");
+            store.send_from_tile(&key, cx);
+        });
+        store.read_with(cx, |store, _| {
+            let tile = store.tile_by_key(&key).expect("the tile is open");
+            assert!(tile.items.iter().any(|item| matches!(
+                item.as_ref(),
+                ChatItem::SystemNote { text, .. } if text.contains("disabled")
+            )));
+            assert!(!store.is_busy("s1"));
+        });
     }
 }

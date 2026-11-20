@@ -3206,13 +3206,15 @@ impl TileView {
             .items_center()
             .gap_0p5()
             .overflow_hidden();
-        // harness pill: click toggles opencode ↔ dsh on a draft; a chat that
-        // already has a session is bound to the server it was created on
-        let next_harness = if snap.harness_label == "dsh" {
-            "opencode"
-        } else {
-            "dsh"
-        };
+        // harness pill: click cycles to the next enabled harness on a draft; a
+        // chat that already has a session is bound to its server
+        let current_harness = HarnessKind::from_label(snap.harness_label);
+        let next_harness = self
+            .store
+            .read(cx)
+            .next_enabled_harness(current_harness)
+            .map(|harness| harness.label())
+            .unwrap_or(snap.harness_label);
         pills = pills.child(
             tip(
                 div()
@@ -3452,12 +3454,14 @@ impl TileView {
         if locked {
             return;
         }
-        let is_dsh = store
+        let current = store
             .read(cx)
             .tile_by_key(&key)
-            .map(|t| t.harness == HarnessKind::Dsh)
-            .unwrap_or(false);
-        let next = HarnessKind::from_label(if is_dsh { "opencode" } else { "dsh" });
+            .map(|t| t.harness)
+            .unwrap_or(HarnessKind::OpenCode);
+        let Some(next) = store.read(cx).next_enabled_harness(current) else {
+            return;
+        };
         store.update(cx, |s, cx| s.set_tile_harness(&key, next, cx));
         // the kit placeholder was baked in at construction; the flip rewrites
         // it (the leaf's aria_placeholder follows via notify)

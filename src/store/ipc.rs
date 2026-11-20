@@ -111,6 +111,11 @@ impl Store {
         model: DoorModel,
         cx: &mut Context<Self>,
     ) -> Result<Value, String> {
+        if let Some(harness) = model.harness
+            && !self.harness_enabled(harness)
+        {
+            return Err(format!("harness {} is disabled", harness.label()));
+        }
         let path = resolve_workspace(workspace)?;
         self.open_workspace_at(&path, cx)?;
         self.new_chat(cx);
@@ -225,6 +230,12 @@ impl Store {
         reply: Reply,
         cx: &mut Context<Self>,
     ) {
+        if let Some(harness) = model.harness
+            && !self.harness_enabled(harness)
+        {
+            let _ = reply.send(Err(format!("harness {} is disabled", harness.label())));
+            return;
+        }
         if !self.workspaces.iter().any(|w| w.folder_path() == path)
             && !self.install_workspace(path, cx)
         {
@@ -318,6 +329,12 @@ impl Store {
         reply: Reply,
         cx: &mut Context<Self>,
     ) {
+        if let Some(harness) = harness
+            && !self.harness_enabled(harness)
+        {
+            let _ = reply.send(Err(format!("harness {} is disabled", harness.label())));
+            return;
+        }
         if refresh {
             // a refresh is a request to re-read the backend, not a cache
             // lookup: drop the "live" marker so the answer lands only after
@@ -377,7 +394,8 @@ impl Store {
     /// variant metadata the settings pickers need. A requested harness only
     /// sees its own catalog; without one every known model is included.
     pub(super) fn models_payload(&self, harness: Option<HarnessKind>) -> Value {
-        models_payload(&self.model_infos, harness)
+        let enabled = self.settings.enabled_harness_ids();
+        models_payload(&self.model_infos, harness, &enabled)
     }
 
     /// The last assistant message of a run, as the run's answer.
@@ -465,9 +483,18 @@ impl Store {
 /// The wire shape of one `models` answer: the released flat `models` key list
 /// plus the harness-qualified `catalog` (variants included) and the harness
 /// options. Kept separate from [`Store`] so the contract is unit-testable.
-fn models_payload(infos: &[crate::oc::ModelInfo], harness: Option<HarnessKind>) -> Value {
+fn models_payload(
+    infos: &[crate::oc::ModelInfo],
+    harness: Option<HarnessKind>,
+    enabled_ids: &[String],
+) -> Value {
+    let enabled: Vec<HarnessKind> = enabled_ids
+        .iter()
+        .filter_map(|id| HarnessKind::from_wire(id))
+        .collect();
     let entries: Vec<&crate::oc::ModelInfo> = infos
         .iter()
+        .filter(|model| enabled.contains(&model.harness))
         .filter(|model| harness.is_none_or(|harness| model.harness == harness))
         .collect();
     let models: Vec<&str> = entries.iter().map(|model| model.key.as_str()).collect();
@@ -484,6 +511,7 @@ fn models_payload(infos: &[crate::oc::ModelInfo], harness: Option<HarnessKind>) 
         .collect();
     let harnesses: Vec<Value> = HarnessKind::ALL
         .iter()
+        .filter(|harness| enabled.contains(harness))
         .map(|harness| {
             json!({
                 "id": harness.label(),
@@ -519,7 +547,8 @@ mod tests {
                 context_limit: 0,
             },
         ];
-        let dsh = models_payload(&infos, Some(HarnessKind::Dsh));
+        let enabled = vec!["opencode".to_string(), "dsh".to_string()];
+        let dsh = models_payload(&infos, Some(HarnessKind::Dsh), &enabled);
         assert_eq!(dsh["models"], json!(["b/y"]));
         assert_eq!(dsh["catalog"][0]["key"], "b/y");
         assert_eq!(dsh["catalog"][0]["harness"], "dsh");
@@ -527,9 +556,14 @@ mod tests {
         assert_eq!(dsh["harnesses"][0]["id"], "opencode");
         assert_eq!(dsh["harnesses"][1]["label"], "DeepSeek (dsh)");
 
-        let all = models_payload(&infos, None);
+        let all = models_payload(&infos, None, &enabled);
         assert_eq!(all["models"], json!(["a/x", "b/y"]));
         assert_eq!(all["catalog"].as_array().unwrap().len(), 2);
+
+        let only_opencode = vec!["opencode".to_string()];
+        let disabled = models_payload(&infos, Some(HarnessKind::Dsh), &only_opencode);
+        assert_eq!(disabled["models"], json!([]));
+        assert_eq!(disabled["harnesses"].as_array().unwrap().len(), 1);
     }
 
     /// The wands send `general`: it must name the built-in Tasks workspace,

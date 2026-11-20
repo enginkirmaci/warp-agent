@@ -3,6 +3,7 @@
 
 use crate::store::Store;
 use gpui::Entity;
+use std::collections::BTreeMap;
 
 /// The harness the Chat defaults page is configuring. A tiny entity because
 /// the model picker's data closure outlives a render and must re-scope when
@@ -12,8 +13,12 @@ pub struct HarnessChoice(pub crate::settings::HarnessKind);
 
 #[derive(Clone)]
 pub struct SettingsBuffers {
+    /// Per-harness settings keyed by wire id; the Server section renders a row
+    /// per registry descriptor and Save writes this map straight back.
+    pub harnesses: BTreeMap<String, crate::settings::HarnessEntry>,
     pub opencode_executable: String,
     pub dsh_executable: String,
+    pub v2_executable: String,
     pub default_harness_dsh: bool,
     pub default_model: String,
     pub default_variant: String,
@@ -37,6 +42,14 @@ pub struct SettingsBuffers {
 }
 
 impl SettingsBuffers {
+    pub fn harness_entry(&self, id: &str) -> Option<&crate::settings::HarnessEntry> {
+        self.harnesses.get(id)
+    }
+
+    pub fn harness_enabled(&self, id: &str) -> bool {
+        self.harness_entry(id).is_some_and(|entry| entry.enabled)
+    }
+
     /// The harness the buffers currently select.
     pub fn harness(&self) -> crate::settings::HarnessKind {
         if self.default_harness_dsh {
@@ -48,8 +61,10 @@ impl SettingsBuffers {
 
     pub fn from_settings(s: &crate::settings::AppSettings) -> Self {
         Self {
-            opencode_executable: s.opencode_executable.clone(),
-            dsh_executable: s.dsh_executable.clone(),
+            harnesses: s.harnesses.clone(),
+            opencode_executable: s.harness_executable("opencode"),
+            dsh_executable: s.harness_executable("dsh"),
+            v2_executable: s.harness_executable("opencode-v2"),
             default_harness_dsh: s.default_harness == crate::settings::HarnessKind::Dsh,
             default_model: s.default_model.clone().unwrap_or_default(),
             default_variant: s.default_variant.clone().unwrap_or_default(),
@@ -86,20 +101,52 @@ impl SettingsBuffers {
     pub fn save(&self, store: &Entity<Store>, cx: &mut gpui::App) {
         store.update(cx, |s, cx| {
             let set = &mut s.settings;
-            set.opencode_executable = if self.opencode_executable.trim().is_empty() {
-                crate::settings::DEFAULT_EXECUTABLE.into()
-            } else {
-                self.opencode_executable.trim().to_string()
+            let executable = |text: &str, fallback: &str| {
+                let text = text.trim();
+                if text.is_empty() {
+                    fallback.to_string()
+                } else {
+                    text.to_string()
+                }
             };
-            set.dsh_executable = if self.dsh_executable.trim().is_empty() {
-                crate::settings::DEFAULT_DSH_EXECUTABLE.into()
-            } else {
-                self.dsh_executable.trim().to_string()
-            };
+            set.harnesses = self.harnesses.clone();
+            set.harnesses
+                .entry("opencode".into())
+                .or_insert_with(|| crate::settings::HarnessEntry::new(true, "opencode"))
+                .executable = executable(
+                &self.opencode_executable,
+                crate::settings::DEFAULT_EXECUTABLE,
+            );
+            set.harnesses
+                .entry("dsh".into())
+                .or_insert_with(|| crate::settings::HarnessEntry::new(true, "dsh"))
+                .executable = executable(
+                &self.dsh_executable,
+                crate::settings::DEFAULT_DSH_EXECUTABLE,
+            );
+            set.harnesses
+                .entry("opencode-v2".into())
+                .or_insert_with(|| crate::settings::HarnessEntry::new(false, "opencode"))
+                .executable = executable(&self.v2_executable, crate::settings::DEFAULT_EXECUTABLE);
+            if !crate::settings::HarnessKind::ALL
+                .iter()
+                .any(|harness| set.harness_enabled(harness.label()))
+                && let Some(entry) = set.harnesses.get_mut("opencode")
+            {
+                entry.enabled = true;
+            }
             set.default_harness = if self.default_harness_dsh {
-                crate::settings::HarnessKind::Dsh
+                if set.harness_enabled("dsh") {
+                    crate::settings::HarnessKind::Dsh
+                } else {
+                    set.default_harness_kind()
+                }
             } else {
-                crate::settings::HarnessKind::OpenCode
+                if set.harness_enabled("opencode") {
+                    crate::settings::HarnessKind::OpenCode
+                } else {
+                    set.default_harness_kind()
+                }
             };
             let null_if_blank = |v: &String| {
                 let t = v.trim();

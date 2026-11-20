@@ -208,9 +208,13 @@ impl SettingsSection {
 /// and the button's element id use it), the label is the product name the
 /// button draws. Keeping this separate from the render is what the unit test
 /// pins: a display label must never leak into the key.
-fn harness_choices(current: crate::settings::HarnessKind) -> Vec<kit::Choice> {
+fn harness_choices(
+    current: crate::settings::HarnessKind,
+    enabled: &[crate::settings::HarnessKind],
+) -> Vec<kit::Choice> {
     crate::settings::HarnessKind::ALL
         .iter()
+        .filter(|harness| enabled.contains(harness))
         .map(|harness| {
             kit::Choice::new(harness.label(), harness.option_label(), *harness == current)
         })
@@ -385,6 +389,9 @@ pub struct WarpWindow {
     add_folder_sender: async_channel::Sender<String>,
     add_folder_receiver: async_channel::Receiver<String>,
     settings_buffers: SettingsBuffers,
+    /// The harness whose disable is waiting for the second click because a
+    /// turn is running.
+    harness_disable_arm: Option<String>,
     /// The Settings page's open section.
     settings_section: SettingsSection,
     /// About: which suite member the detail shows; the app you are in until
@@ -511,6 +518,7 @@ impl WarpWindow {
             add_folder_sender: folder_tx,
             add_folder_receiver: folder_rx,
             settings_buffers,
+            harness_disable_arm: None,
             settings_section: SettingsSection::Appearance,
             about_selected: about::AppId::Agent,
             // the screen never renders empty: the running app needs no probe,
@@ -2897,6 +2905,7 @@ impl WarpWindow {
         let rows: Vec<(&'static str, String)> = vec![
             ("executable", b.opencode_executable),
             ("dsh_executable", b.dsh_executable),
+            ("v2_executable", b.v2_executable),
             ("model", b.default_model),
             ("variant", b.default_variant),
             ("agent", b.default_agent),
@@ -3599,8 +3608,71 @@ impl WarpWindow {
                 );
             }
             SettingsSection::Server => {
-                field!("OpenCode executable", "executable", None::<&str>);
-                field!("DSH executable", "dsh_executable", None::<&str>);
+                let store = self.store.clone();
+                for descriptor in crate::harness::HarnessRegistry::builtin().iter() {
+                    let id = descriptor.id.as_str().to_string();
+                    let (id_label, field_label, key) = match id.as_str() {
+                        "opencode" => ("opencode", "OpenCode executable", "executable"),
+                        "opencode-v2" => ("opencode v2", "opencode v2 executable", "v2_executable"),
+                        "dsh" => ("DeepSeek (dsh)", "DSH executable", "dsh_executable"),
+                        _ => continue,
+                    };
+                    let entity = entity.clone();
+                    let store = store.clone();
+                    let toggle_id = id.clone();
+                    let armed = self.harness_disable_arm.as_deref() == Some(id.as_str());
+                    let label = if armed {
+                        format!("Confirm disable {id_label}")
+                    } else {
+                        format!("Enable {id_label}")
+                    };
+                    let description = if armed {
+                        "A turn is running — click again to stop it and disable the harness"
+                    } else {
+                        "Only enabled harnesses appear in the composer and the door"
+                    };
+                    rows.push(kit::switch_row_with_desc(
+                        SharedString::from(format!("set-{id}-enabled")),
+                        label.clone(),
+                        format!("settings-row-{label}"),
+                        description,
+                        buffers.harness_enabled(&id),
+                        rows.is_empty(),
+                        move |_, _, cx| {
+                            entity.update(cx, |this, cx| {
+                                let enable = !this.settings_buffers.harness_enabled(&toggle_id);
+                                if !enable
+                                    && store.read(cx).harness_has_running_turn(&toggle_id)
+                                    && this.harness_disable_arm.as_deref()
+                                        != Some(toggle_id.as_str())
+                                {
+                                    this.harness_disable_arm = Some(toggle_id.clone());
+                                    cx.notify();
+                                    return;
+                                }
+                                this.harness_disable_arm = None;
+                                if let Err(err) = store.update(cx, |store, cx| {
+                                    store.set_harness_enabled(&toggle_id, enable, cx)
+                                }) {
+                                    tracing::warn!("harness toggle failed: {err}");
+                                    return;
+                                }
+                                this.settings_buffers =
+                                    crate::ui::settings::SettingsBuffers::from_settings(
+                                        &store.read(cx).settings,
+                                    );
+                                let harness = this.settings_buffers.harness();
+                                this.settings_harness.update(cx, |scope, cx| {
+                                    scope.0 = harness;
+                                    cx.notify();
+                                });
+                                this.commit_settings(cx);
+                                cx.notify();
+                            });
+                        },
+                    ));
+                    field!(field_label, key, None::<&str>);
+                }
                 let control = div()
                     .flex()
                     .items_center()
@@ -3632,7 +3704,15 @@ impl WarpWindow {
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let current = self.settings_buffers.harness();
-        let choices = harness_choices(current);
+        let enabled: Vec<crate::settings::HarnessKind> = self
+            .store
+            .read(cx)
+            .settings
+            .enabled_harness_ids()
+            .iter()
+            .filter_map(|id| crate::settings::HarnessKind::from_wire(id))
+            .collect();
+        let choices = harness_choices(current, &enabled);
         let entity = cx.entity();
         let scope = self.settings_harness.clone();
         kit::segmented(
@@ -3688,6 +3768,7 @@ impl WarpWindow {
             match *key {
                 "executable" => buffers.opencode_executable = text,
                 "dsh_executable" => buffers.dsh_executable = text,
+                "v2_executable" => buffers.v2_executable = text,
                 "model" => buffers.default_model = text,
                 "variant" => buffers.default_variant = text,
                 "agent" => buffers.default_agent = text,
@@ -4217,7 +4298,7 @@ mod harness_tests {
             (HarnessKind::OpenCode, "opencode"),
             (HarnessKind::Dsh, "dsh"),
         ] {
-            let choices = harness_choices(current);
+            let choices = harness_choices(current, &[HarnessKind::OpenCode, HarnessKind::Dsh]);
             assert_eq!(choices.len(), 2);
             let selected: Vec<&str> = choices
                 .iter()

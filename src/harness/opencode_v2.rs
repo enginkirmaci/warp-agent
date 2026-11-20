@@ -166,6 +166,9 @@ impl OpenCodeV2Harness {
                     detail.trim()
                 )));
             }
+            if status == reqwest::StatusCode::NO_CONTENT || response.content_length() == Some(0) {
+                return Ok(json!({}));
+            }
             return response.json().await.map_err(|err| {
                 HarnessError::Failed(format!("opencode v2 returned bad JSON: {err}"))
             });
@@ -561,41 +564,88 @@ impl Harness for OpenCodeV2Harness {
         Ok(list_values(&value).filter_map(file_diff).collect())
     }
 
-    fn inbox(&mut self, _session: &SessionId) -> Result<Vec<InboxItem>, HarnessError> {
-        Err(HarnessError::Unsupported("inbox"))
+    fn inbox(&mut self, session: &SessionId) -> Result<Vec<InboxItem>, HarnessError> {
+        let value = self.get(&format!("/api/session/{}/inbox", session.as_str()), false)?;
+        Ok(list_values(&value).filter_map(inbox_item).collect())
     }
 
     fn update_inbox(
         &mut self,
-        _session: &SessionId,
-        _item: &str,
-        _delivery: InboxDelivery,
+        session: &SessionId,
+        item: &str,
+        delivery: InboxDelivery,
     ) -> Result<(), HarnessError> {
-        Err(HarnessError::Unsupported("update_inbox"))
+        let delivery = match delivery {
+            InboxDelivery::Queue => "queue",
+            InboxDelivery::Steer => "steer",
+        };
+        self.block_on(self.request(
+            reqwest::Method::PATCH,
+            &format!("/api/session/{}/inbox/{}", session.as_str(), item),
+            false,
+            Some(json!({ "delivery": delivery })),
+        ))
+        .map(|_| ())
     }
 
-    fn cancel_inbox(&mut self, _session: &SessionId, _item: &str) -> Result<(), HarnessError> {
-        Err(HarnessError::Unsupported("cancel_inbox"))
+    fn cancel_inbox(&mut self, session: &SessionId, item: &str) -> Result<(), HarnessError> {
+        self.block_on(self.request(
+            reqwest::Method::DELETE,
+            &format!("/api/session/{}/inbox/{}", session.as_str(), item),
+            false,
+            None,
+        ))
+        .map(|_| ())
     }
 
-    fn stage_revert(&mut self, _session: &SessionId, _before: &str) -> Result<(), HarnessError> {
-        Err(HarnessError::Unsupported("stage_revert"))
+    fn stage_revert(&mut self, session: &SessionId, before: &str) -> Result<(), HarnessError> {
+        self.block_on(self.request(
+            reqwest::Method::POST,
+            &format!("/api/session/{}/revert/stage", session.as_str()),
+            false,
+            Some(json!({ "messageID": before })),
+        ))
+        .map(|_| ())
     }
 
-    fn commit_revert(&mut self, _session: &SessionId) -> Result<(), HarnessError> {
-        Err(HarnessError::Unsupported("commit_revert"))
+    fn commit_revert(&mut self, session: &SessionId) -> Result<(), HarnessError> {
+        self.block_on(self.request(
+            reqwest::Method::POST,
+            &format!("/api/session/{}/revert/commit", session.as_str()),
+            false,
+            None,
+        ))
+        .map(|_| ())
     }
 
-    fn clear_revert(&mut self, _session: &SessionId) -> Result<(), HarnessError> {
-        Err(HarnessError::Unsupported("clear_revert"))
+    fn clear_revert(&mut self, session: &SessionId) -> Result<(), HarnessError> {
+        self.block_on(self.request(
+            reqwest::Method::DELETE,
+            &format!("/api/session/{}/revert", session.as_str()),
+            false,
+            None,
+        ))
+        .map(|_| ())
     }
 
-    fn run_shell(&mut self, _session: &SessionId, _command: &str) -> Result<(), HarnessError> {
-        Err(HarnessError::Unsupported("run_shell"))
+    fn run_shell(&mut self, session: &SessionId, command: &str) -> Result<(), HarnessError> {
+        self.block_on(self.request(
+            reqwest::Method::POST,
+            &format!("/api/session/{}/shell", session.as_str()),
+            false,
+            Some(json!({ "command": command })),
+        ))
+        .map(|_| ())
     }
 
-    fn background_session(&mut self, _session: &SessionId) -> Result<(), HarnessError> {
-        Err(HarnessError::Unsupported("background_session"))
+    fn background_session(&mut self, session: &SessionId) -> Result<(), HarnessError> {
+        self.block_on(self.request(
+            reqwest::Method::POST,
+            &format!("/api/session/{}/background", session.as_str()),
+            false,
+            None,
+        ))
+        .map(|_| ())
     }
 
     fn mcp_servers(&mut self) -> Result<Vec<McpServer>, HarnessError> {
@@ -921,6 +971,37 @@ fn file_diff(value: &Value) -> Option<FileDiff> {
     })
 }
 
+fn inbox_item(value: &Value) -> Option<InboxItem> {
+    let id = value
+        .get("id")
+        .or_else(|| value.get("inboxID"))
+        .and_then(Value::as_str)?;
+    let session = value
+        .get("sessionID")
+        .and_then(Value::as_str)
+        .map(SessionId::new)?;
+    let kind = match value.get("type").and_then(Value::as_str).unwrap_or("user") {
+        "synthetic" => InboxKind::Synthetic,
+        "compaction" => InboxKind::Compaction,
+        "move" => InboxKind::Move,
+        _ => InboxKind::User,
+    };
+    let delivery = match value
+        .get("delivery")
+        .and_then(Value::as_str)
+        .unwrap_or("queue")
+    {
+        "steer" => InboxDelivery::Steer,
+        _ => InboxDelivery::Queue,
+    };
+    Some(InboxItem {
+        id: id.to_string(),
+        session,
+        kind,
+        delivery,
+    })
+}
+
 fn variant_names(value: Option<&Value>) -> Vec<String> {
     match value {
         Some(Value::Array(items)) => items
@@ -1179,6 +1260,24 @@ fn translate_v2_event(value: &Value, state: &mut V2StreamState) -> Option<Harnes
                 request: request.to_string(),
                 summary,
             })
+        }
+        "session.shell.ended" => {
+            let session = event_session(data)?;
+            let status = data
+                .pointer("/shell/status")
+                .and_then(Value::as_str)
+                .unwrap_or("exited");
+            let output = data
+                .pointer("/output/output")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            let result = if status == "exited" {
+                Ok(output)
+            } else {
+                Err(format!("shell {status}"))
+            };
+            Some(HarnessEvent::CommandOutput { session, result })
         }
         _ => None,
     }
@@ -1586,6 +1685,21 @@ mod tests {
                 "200 OK",
                 r#"{"data":[{"path":"src/main.rs","patch":"@@ -1 +1 @@\n-old\n+new"}]}"#,
             ),
+            ("GET", "/api/session/s1/inbox") => (
+                "200 OK",
+                r#"{"data":[{"id":"i1","sessionID":"s1","type":"user","delivery":"queue"},{"id":"i2","sessionID":"s1","type":"synthetic","delivery":"steer"}]}"#,
+            ),
+            ("PATCH", "/api/session/s1/inbox/i1") | ("DELETE", "/api/session/s1/inbox/i1") => {
+                ("204 No Content", "")
+            }
+            ("POST", "/api/session/s1/revert/stage") => (
+                "200 OK",
+                r#"{"data":{"messageID":"m1","files":[{"path":"src/main.rs","patch":"@@ -1 +1 @@"}]}}"#,
+            ),
+            ("POST", "/api/session/s1/revert/commit")
+            | ("DELETE", "/api/session/s1/revert")
+            | ("POST", "/api/session/s1/shell")
+            | ("POST", "/api/session/s1/background") => ("204 No Content", ""),
             _ => ("404 Not Found", r#"{"error":"not found"}"#),
         };
         respond(&mut stream, status, body);
@@ -1681,6 +1795,7 @@ mod tests {
             json!({"type":"permission.replied","data":{"sessionID":"s1","requestID":"p1","reply":"once"}}),
             json!({"type":"form.replied","data":{"sessionID":"s1","id":"f1","answer":{"target":"prod"}}}),
             json!({"type":"form.cancelled","data":{"sessionID":"s1","id":"f2"}}),
+            json!({"type":"session.shell.ended","data":{"sessionID":"s1","shell":{"status":"exited"},"output":{"output":"done"}}}),
             json!({"type":"session.idle","data":{"sessionID":"s1"}}),
         ];
         for frame in frames {
@@ -1798,6 +1913,7 @@ mod tests {
         let mut permission_asked = 0;
         let mut form_asked = 0;
         let mut resolved = 0;
+        let mut shell_output = None;
         while std::time::Instant::now() < deadline {
             while let Ok(event) = events.try_recv() {
                 match event {
@@ -1822,6 +1938,9 @@ mod tests {
                     HarnessEvent::PermissionAsked { .. } => permission_asked += 1,
                     HarnessEvent::QuestionAsked { .. } => form_asked += 1,
                     HarnessEvent::QuestionResolved { .. } => resolved += 1,
+                    HarnessEvent::CommandOutput {
+                        result: Ok(output), ..
+                    } => shell_output = Some(output),
                     _ => {}
                 }
             }
@@ -1837,6 +1956,7 @@ mod tests {
         assert_eq!(permission_asked, 1);
         assert_eq!(form_asked, 1);
         assert_eq!(resolved, 2);
+        assert_eq!(shell_output.as_deref(), Some("done"));
         assert!(idle, "session.idle settled the turn");
     }
 
@@ -1926,6 +2046,67 @@ mod tests {
         assert_eq!(diffs[0].path, "src/main.rs");
         assert!(diffs[0].patch.contains("-old"));
         assert!(diffs[0].patch.contains("+new"));
+    }
+
+    #[test]
+    fn a_v2_inbox_revert_shell_and_background_round_trip() {
+        let _lock = lock_home();
+        let xdg = XdgGuard::new("v2-surfaces");
+        let server = FakeV2::start("secret");
+        xdg.write_registration(&server.url, "secret");
+        let mut harness = v2_harness(&fake_cli(xdg.dir(), &server.url, false));
+        harness.start().expect("attaches");
+        let session = SessionId::new("s1");
+
+        let items = harness.inbox(&session).expect("inbox");
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].kind, InboxKind::User);
+        assert_eq!(items[0].delivery, InboxDelivery::Queue);
+        assert_eq!(items[1].kind, InboxKind::Synthetic);
+        assert_eq!(items[1].delivery, InboxDelivery::Steer);
+
+        harness
+            .update_inbox(&session, "i1", InboxDelivery::Steer)
+            .expect("steer");
+        harness.cancel_inbox(&session, "i1").expect("cancel");
+        harness.stage_revert(&session, "m1").expect("stage revert");
+        harness.commit_revert(&session).expect("commit revert");
+        harness.clear_revert(&session).expect("clear revert");
+        harness.run_shell(&session, "ls -la").expect("shell");
+        harness.background_session(&session).expect("background");
+
+        let requests = server.requests();
+        assert!(requests.iter().any(|request| {
+            request.contains("PATCH /api/session/s1/inbox/i1")
+                && request.contains("\"delivery\":\"steer\"")
+        }));
+        assert!(
+            requests
+                .iter()
+                .any(|request| request.contains("DELETE /api/session/s1/inbox/i1"))
+        );
+        assert!(requests.iter().any(|request| {
+            request.contains("POST /api/session/s1/revert/stage")
+                && request.contains("\"messageID\":\"m1\"")
+        }));
+        assert!(
+            requests
+                .iter()
+                .any(|request| request.contains("POST /api/session/s1/revert/commit"))
+        );
+        assert!(
+            requests
+                .iter()
+                .any(|request| request.contains("DELETE /api/session/s1/revert"))
+        );
+        assert!(requests.iter().any(|request| {
+            request.contains("POST /api/session/s1/shell") && request.contains("ls -la")
+        }));
+        assert!(
+            requests
+                .iter()
+                .any(|request| request.contains("POST /api/session/s1/background"))
+        );
     }
 
     #[test]

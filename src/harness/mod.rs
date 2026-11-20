@@ -1,12 +1,13 @@
 //! The app-level harness interface, registry, host and the compiled-in
-//! opencode v1 and dsh adapters. The old net paths still run the app during
-//! the expand phase; the settings/UI/door wiring and the contract cleanup land
-//! in the following tickets.
+//! opencode v1, dsh and opencode v2 adapters. The old net paths still run the
+//! app during the expand phase; the settings/UI/door wiring and the contract
+//! cleanup land in the following tickets.
 
 mod dsh;
 mod host;
 mod interface;
 mod opencode;
+mod opencode_v2;
 mod registry;
 mod shared;
 mod types;
@@ -20,6 +21,7 @@ pub use dsh::DshHarness;
 pub use host::HarnessHost;
 pub use interface::Harness;
 pub use opencode::OpenCodeV1Harness;
+pub use opencode_v2::OpenCodeV2Harness;
 pub use registry::{HarnessDescriptor, HarnessRegistry};
 pub use types::*;
 
@@ -94,7 +96,7 @@ mod tests {
         assert_eq!(v2.default_executable, "opencode");
         assert_eq!(v1.scope, InstanceScope::Workspace);
         assert_eq!(v2.scope, InstanceScope::App);
-        assert!(v2.factory.is_none());
+        assert!(v2.factory.is_some());
         assert!(dsh.factory.is_some());
     }
 
@@ -125,6 +127,23 @@ mod tests {
             .expect("the dsh adapter has a factory");
         let mut adapter = factory(HarnessConfig::new("dsh"));
         assert_eq!(adapter.id().as_str(), "dsh");
+        assert_eq!(adapter.health().state, HealthState::Starting);
+        assert!(matches!(
+            adapter.sessions().unwrap_err(),
+            HarnessError::Unavailable(_)
+        ));
+    }
+
+    #[test]
+    fn the_v2_descriptor_builds_the_real_adapter() {
+        let registry = HarnessRegistry::builtin();
+        let factory = registry
+            .resolve("opencode-v2")
+            .unwrap()
+            .factory
+            .expect("the v2 adapter has a factory");
+        let mut adapter = factory(HarnessConfig::new("opencode"));
+        assert_eq!(adapter.id().as_str(), "opencode-v2");
         assert_eq!(adapter.health().state, HealthState::Starting);
         assert!(matches!(
             adapter.sessions().unwrap_err(),

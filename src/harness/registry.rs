@@ -7,6 +7,7 @@
 use super::dsh::DshHarness;
 use super::interface::Harness;
 use super::opencode::OpenCodeV1Harness;
+use super::opencode_v2::OpenCodeV2Harness;
 use super::types::{
     ConnectionKind, HarnessCapabilities, HarnessConfig, HarnessError, HarnessId, InstanceScope,
 };
@@ -48,13 +49,7 @@ impl HarnessRegistry {
         Self {
             entries: vec![
                 opencode_descriptor(),
-                descriptor(
-                    "opencode-v2",
-                    "opencode v2",
-                    "opencode",
-                    ConnectionKind::Attached,
-                    HarnessCapabilities::OPENCODE_V2,
-                ),
+                opencode_v2_descriptor(),
                 dsh_descriptor(),
             ],
         }
@@ -121,6 +116,22 @@ fn opencode_descriptor() -> HarnessDescriptor {
 
 fn opencode_factory(config: HarnessConfig) -> Box<dyn Harness> {
     Box::new(OpenCodeV1Harness::new(config))
+}
+
+fn opencode_v2_descriptor() -> HarnessDescriptor {
+    let mut descriptor = descriptor(
+        "opencode-v2",
+        "opencode v2",
+        "opencode",
+        ConnectionKind::Attached,
+        HarnessCapabilities::OPENCODE_V2,
+    );
+    descriptor.factory = Some(opencode_v2_factory);
+    descriptor
+}
+
+fn opencode_v2_factory(config: HarnessConfig) -> Box<dyn Harness> {
+    Box::new(OpenCodeV2Harness::new(config))
 }
 
 fn dsh_descriptor() -> HarnessDescriptor {

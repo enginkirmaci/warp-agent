@@ -6,12 +6,15 @@
 //! surface and exposes the catalogs and sessions. Chat streaming, approvals,
 //! forms and the v2-only surfaces land in the following tickets.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::Command as ProcessCommand;
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_channel::{Receiver, Sender, unbounded};
+use futures_util::StreamExt;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -33,6 +36,8 @@ pub struct OpenCodeV2Harness {
     health: Mutex<HarnessHealth>,
     tx: Sender<HarnessEvent>,
     rx: Receiver<HarnessEvent>,
+    pump: Option<tokio::task::JoinHandle<()>>,
+    pump_stop: Option<Arc<AtomicBool>>,
 }
 
 impl OpenCodeV2Harness {
@@ -57,6 +62,8 @@ impl OpenCodeV2Harness {
             }),
             tx,
             rx,
+            pump: None,
+            pump_stop: None,
         }
     }
 
@@ -84,6 +91,24 @@ impl OpenCodeV2Harness {
         let detail = detail.into();
         self.set_health(HarnessHealth::unavailable(detail.clone()));
         HarnessError::Unavailable(detail)
+    }
+
+    fn start_event_pump(&mut self) {
+        if self.pump.is_some() {
+            return;
+        }
+        let Some((base, password)) = self.credentials() else {
+            return;
+        };
+        let stop = Arc::new(AtomicBool::new(false));
+        let thread_stop = stop.clone();
+        let http = self.http.clone();
+        let tx = self.tx.clone();
+        let handle = self.runtime.spawn(async move {
+            event_pump(http, base, password, tx, thread_stop).await;
+        });
+        self.pump = Some(handle);
+        self.pump_stop = Some(stop);
     }
 
     fn block_on<T>(
@@ -214,6 +239,7 @@ impl Harness for OpenCodeV2Harness {
         match self.block_on(self.request(reqwest::Method::GET, "/api/info", false, None)) {
             Ok(info) if info.get("version").is_some() => {
                 self.set_health(HarnessHealth::ready());
+                self.start_event_pump();
                 Ok(())
             }
             Ok(_) => {
@@ -228,6 +254,12 @@ impl Harness for OpenCodeV2Harness {
     }
 
     fn stop(&mut self) -> Result<(), HarnessError> {
+        if let Some(stop) = self.pump_stop.take() {
+            stop.store(true, Ordering::SeqCst);
+        }
+        if let Some(pump) = self.pump.take() {
+            pump.abort();
+        }
         self.detach();
         self.set_health(HarnessHealth::unavailable("disconnected"));
         let _ = self.tx.try_send(HarnessEvent::Disconnected {
@@ -418,16 +450,38 @@ impl Harness for OpenCodeV2Harness {
         .map(|_| ())
     }
 
-    fn send_prompt(&mut self, _session: &SessionId, _prompt: Prompt) -> Result<(), HarnessError> {
-        Err(HarnessError::Unsupported("send_prompt"))
+    fn send_prompt(&mut self, session: &SessionId, prompt: Prompt) -> Result<(), HarnessError> {
+        let mut body = json!({ "text": prompt.text });
+        if let Some(agent) = prompt.choice.agent {
+            body["agents"] = json!([agent]);
+        }
+        self.block_on(self.request(
+            reqwest::Method::POST,
+            &format!("/api/session/{}/prompt", session.as_str()),
+            false,
+            Some(body),
+        ))
+        .map(|_| ())
     }
 
-    fn interrupt(&mut self, _session: &SessionId) -> Result<(), HarnessError> {
-        Err(HarnessError::Unsupported("interrupt"))
+    fn interrupt(&mut self, session: &SessionId) -> Result<(), HarnessError> {
+        self.block_on(self.request(
+            reqwest::Method::POST,
+            &format!("/api/session/{}/interrupt", session.as_str()),
+            false,
+            None,
+        ))
+        .map(|_| ())
     }
 
-    fn compact(&mut self, _session: &SessionId) -> Result<(), HarnessError> {
-        Err(HarnessError::Unsupported("compact"))
+    fn compact(&mut self, session: &SessionId) -> Result<(), HarnessError> {
+        self.block_on(self.request(
+            reqwest::Method::POST,
+            &format!("/api/session/{}/compact", session.as_str()),
+            false,
+            Some(json!({})),
+        ))
+        .map(|_| ())
     }
 
     fn run_command(
@@ -738,6 +792,314 @@ fn path_with_query(path: &str, pairs: &[(&str, &str)]) -> String {
     format!("{}{}", url.path(), query)
 }
 
+// ---- event stream --------------------------------------------------------
+
+/// The v2 stream has no part ids: text and reasoning deltas are keyed by
+/// `(assistantMessageID, ordinal)`, tools by their assistant-scoped tool id.
+/// This state turns those deltas back into the full snapshots the app stores.
+#[derive(Default)]
+struct V2StreamState {
+    text: HashMap<(SessionId, String), String>,
+    reasoning: HashMap<(SessionId, String), String>,
+    tools: HashMap<(SessionId, String, String), ToolSnapshot>,
+}
+
+async fn event_pump(
+    http: reqwest::Client,
+    mut base: String,
+    mut password: String,
+    tx: Sender<HarnessEvent>,
+    stop: Arc<AtomicBool>,
+) {
+    let mut state = V2StreamState::default();
+    while !stop.load(Ordering::SeqCst) {
+        let request = http
+            .get(format!("{}/api/event", base.trim_end_matches('/')))
+            .basic_auth("opencode", Some(password.clone()))
+            .header("accept", "text/event-stream");
+        match request.send().await {
+            Ok(response) if response.status().is_success() => {
+                if tx.try_send(HarnessEvent::Connected).is_err() {
+                    break;
+                }
+                let mut stream = response.bytes_stream();
+                let mut buffer = String::new();
+                while let Some(chunk) = stream.next().await {
+                    if stop.load(Ordering::SeqCst) {
+                        break;
+                    }
+                    let Ok(bytes) = chunk else {
+                        break;
+                    };
+                    buffer.push_str(&String::from_utf8_lossy(&bytes).replace("\r\n", "\n"));
+                    while let Some(position) = buffer.find("\n\n") {
+                        let frame = buffer[..position].to_string();
+                        buffer.drain(..position + 2);
+                        let Some(value) = sse_data(&frame) else {
+                            continue;
+                        };
+                        if let Some(event) = translate_v2_event(&value, &mut state)
+                            && tx.try_send(event).is_err()
+                        {
+                            return;
+                        }
+                    }
+                }
+                let _ = tx.try_send(HarnessEvent::Disconnected {
+                    reason: Some("event stream ended".into()),
+                });
+            }
+            Ok(response) if response.status() == reqwest::StatusCode::UNAUTHORIZED => {
+                if let Ok((new_base, new_password)) = read_registration() {
+                    base = new_base;
+                    password = new_password;
+                }
+            }
+            Ok(_) | Err(_) => {}
+        }
+        if stop.load(Ordering::SeqCst) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
+}
+
+fn sse_data(frame: &str) -> Option<Value> {
+    let data = frame
+        .lines()
+        .filter_map(|line| line.strip_prefix("data:"))
+        .map(str::trim_start)
+        .collect::<Vec<_>>()
+        .join("\n");
+    if data.is_empty() {
+        None
+    } else {
+        serde_json::from_str(&data).ok()
+    }
+}
+
+fn translate_v2_event(value: &Value, state: &mut V2StreamState) -> Option<HarnessEvent> {
+    let kind = value
+        .get("type")
+        .and_then(Value::as_str)
+        .or_else(|| value.get("event").and_then(Value::as_str))?;
+    let data = value.get("data").unwrap_or(value);
+    match kind {
+        "server.connected" => Some(HarnessEvent::Connected),
+        "session.status" => {
+            let session = event_session(data)?;
+            let status = data
+                .get("status")
+                .and_then(|status| status.get("type"))
+                .and_then(Value::as_str)?;
+            let state = match status {
+                "idle" => SessionState::Idle,
+                "busy" => SessionState::Busy,
+                _ => SessionState::Retry,
+            };
+            Some(HarnessEvent::SessionStatus { session, state })
+        }
+        "session.idle" => Some(HarnessEvent::SessionStatus {
+            session: event_session(data)?,
+            state: SessionState::Idle,
+        }),
+        "session.text.delta" => text_part(state, data, false),
+        "session.reasoning.delta" => text_part(state, data, true),
+        "session.step.started" => step_part(data, true),
+        "session.step.ended" => step_part(data, false),
+        "session.step.failed" | "session.execution.failed" | "session.compaction.failed" => {
+            Some(HarnessEvent::Error {
+                session: event_session(data),
+                message: error_message(data),
+                retryable: data
+                    .get("error")
+                    .and_then(|error| error.get("retryAfterMs"))
+                    .is_some()
+                    || kind == "session.retry.scheduled",
+            })
+        }
+        "session.retry.scheduled" => Some(HarnessEvent::SessionStatus {
+            session: event_session(data)?,
+            state: SessionState::Retry,
+        }),
+        "session.tool.called"
+        | "session.tool.progress"
+        | "session.tool.success"
+        | "session.tool.failed" => tool_part(state, data, kind),
+        "session.created" => {
+            let info = data.get("info").unwrap_or(data);
+            let summary = session_summary(info)?;
+            Some(HarnessEvent::SessionCreated {
+                session: summary.id,
+                title: Some(summary.title),
+                parent: summary.parent,
+                agent: info
+                    .get("agent")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+            })
+        }
+        "session.deleted" => Some(HarnessEvent::SessionDeleted {
+            session: event_session(data)?,
+        }),
+        "session.renamed" => Some(HarnessEvent::SessionChanged {
+            session: event_session(data)?,
+            title: data
+                .get("title")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            parent: None,
+            agent: None,
+        }),
+        "session.agent.selected" => Some(HarnessEvent::SessionChanged {
+            session: event_session(data)?,
+            title: None,
+            parent: None,
+            agent: data
+                .get("agent")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+        }),
+        _ => None,
+    }
+}
+
+fn event_session(data: &Value) -> Option<SessionId> {
+    data.get("sessionID")
+        .and_then(Value::as_str)
+        .map(SessionId::new)
+}
+
+fn text_part(state: &mut V2StreamState, data: &Value, reasoning: bool) -> Option<HarnessEvent> {
+    let session = event_session(data)?;
+    let assistant = data.get("assistantMessageID")?.as_str()?.to_string();
+    let delta = data.get("delta")?.as_str()?;
+    let key = (session.clone(), assistant.clone());
+    let text = if reasoning {
+        state.reasoning.entry(key).or_default()
+    } else {
+        state.text.entry(key).or_default()
+    };
+    text.push_str(delta);
+    let payload = if reasoning {
+        PartPayload::Reasoning(text.clone())
+    } else {
+        PartPayload::Text(text.clone())
+    };
+    Some(HarnessEvent::PartSnapshot {
+        part: PartSnapshot {
+            id: format!(
+                "{assistant}:{}",
+                if reasoning { "reasoning" } else { "text" }
+            ),
+            session,
+            message_id: assistant,
+            payload,
+        },
+    })
+}
+
+fn step_part(data: &Value, started: bool) -> Option<HarnessEvent> {
+    let session = event_session(data)?;
+    let assistant = data.get("assistantMessageID")?.as_str()?.to_string();
+    Some(HarnessEvent::PartSnapshot {
+        part: PartSnapshot {
+            id: format!(
+                "{assistant}:{}",
+                if started { "step-start" } else { "step-finish" }
+            ),
+            session,
+            message_id: assistant,
+            payload: if started {
+                PartPayload::StepStart
+            } else {
+                PartPayload::StepFinish
+            },
+        },
+    })
+}
+
+fn tool_part(state: &mut V2StreamState, data: &Value, kind: &str) -> Option<HarnessEvent> {
+    let session = event_session(data)?;
+    let assistant = data.get("assistantMessageID")?.as_str()?.to_string();
+    let tool_id = data.get("id")?.as_str()?.to_string();
+    let key = (session.clone(), assistant.clone(), tool_id.clone());
+    let mut tool = state.tools.get(&key).cloned().unwrap_or(ToolSnapshot {
+        name: data
+            .get("name")
+            .or_else(|| data.get("tool"))
+            .and_then(Value::as_str)
+            .unwrap_or("tool")
+            .to_string(),
+        state: ToolState::Pending,
+        input: None,
+        title: None,
+        metadata: None,
+    });
+    if let Some(name) = data
+        .get("name")
+        .or_else(|| data.get("tool"))
+        .and_then(Value::as_str)
+    {
+        tool.name = name.to_string();
+    }
+    if let Some(input) = data.get("input") {
+        tool.input = Some(input.clone());
+    }
+    if let Some(metadata) = data.get("metadata") {
+        tool.metadata = Some(metadata.clone());
+    }
+    tool.state = match kind {
+        "session.tool.success" => ToolState::Completed {
+            output: tool_output(data.get("content")),
+        },
+        "session.tool.failed" => ToolState::Failed {
+            message: error_message(data),
+        },
+        _ => ToolState::Running,
+    };
+    state.tools.insert(key, tool.clone());
+    Some(HarnessEvent::PartSnapshot {
+        part: PartSnapshot {
+            id: format!("{assistant}:tool:{tool_id}"),
+            session,
+            message_id: assistant,
+            payload: PartPayload::Tool(tool),
+        },
+    })
+}
+
+fn error_message(data: &Value) -> String {
+    data.get("error")
+        .and_then(|error| {
+            error
+                .get("message")
+                .and_then(Value::as_str)
+                .or_else(|| error.as_str())
+        })
+        .or_else(|| data.get("message").and_then(Value::as_str))
+        .unwrap_or("opencode v2 reported an error")
+        .to_string()
+}
+
+fn tool_output(value: Option<&Value>) -> String {
+    match value {
+        Some(Value::Array(items)) => items
+            .iter()
+            .map(|item| {
+                item.get("text")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+                    .unwrap_or_else(|| item.to_string())
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+        Some(Value::String(text)) => text.clone(),
+        Some(other) => other.to_string(),
+        None => String::new(),
+    }
+}
+
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
@@ -925,6 +1287,10 @@ mod tests {
             return;
         }
         let path = path.split('?').next().unwrap_or("/");
+        if path == "/api/event" {
+            respond_sse(&mut stream);
+            return;
+        }
         let (status, body) = match (method.as_str(), path) {
             ("GET", "/api/info") => (
                 "200 OK",
@@ -966,6 +1332,9 @@ mod tests {
                 "200 OK",
                 r#"{"data":{"id":"s4","title":"Fork","parentID":"s1","time":{"updated":5},"location":{"directory":"/tmp/work"}}}"#,
             ),
+            ("POST", "/api/session/s1/prompt")
+            | ("POST", "/api/session/s1/interrupt")
+            | ("POST", "/api/session/s1/compact") => ("200 OK", r#"{"data":{}}"#),
             _ => ("404 Not Found", r#"{"error":"not found"}"#),
         };
         respond(&mut stream, status, body);
@@ -1014,6 +1383,28 @@ mod tests {
         );
         let _ = stream.write_all(response.as_bytes());
         let _ = stream.flush();
+    }
+
+    fn respond_sse(stream: &mut TcpStream) {
+        let _ = stream.write_all(
+            b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n",
+        );
+        let frames = [
+            json!({"type":"session.status","data":{"sessionID":"s1","status":{"type":"busy"}}}),
+            json!({"type":"session.step.started","data":{"sessionID":"s1","assistantMessageID":"m1"}}),
+            json!({"type":"session.text.delta","data":{"sessionID":"s1","assistantMessageID":"m1","ordinal":1,"delta":"Hello"}}),
+            json!({"type":"session.text.delta","data":{"sessionID":"s1","assistantMessageID":"m1","ordinal":2,"delta":" world"}}),
+            json!({"type":"session.reasoning.delta","data":{"sessionID":"s1","assistantMessageID":"m1","ordinal":1,"delta":"think"}}),
+            json!({"type":"session.tool.called","data":{"sessionID":"s1","assistantMessageID":"m1","id":"t1","name":"bash","input":{"command":"ls"},"executed":true}}),
+            json!({"type":"session.tool.success","data":{"sessionID":"s1","assistantMessageID":"m1","id":"t1","content":[{"type":"text","text":"ok"}],"metadata":{},"executed":true}}),
+            json!({"type":"session.step.ended","data":{"sessionID":"s1","assistantMessageID":"m1"}}),
+            json!({"type":"session.idle","data":{"sessionID":"s1"}}),
+        ];
+        for frame in frames {
+            let _ = write!(stream, "data: {frame}\n\n");
+            let _ = stream.flush();
+            std::thread::sleep(Duration::from_millis(5));
+        }
     }
 
     fn v2_harness(cli: &str) -> OpenCodeV2Harness {
@@ -1091,6 +1482,117 @@ mod tests {
             harness.models().unwrap_err(),
             HarnessError::Unavailable(_)
         ));
+    }
+
+    #[test]
+    fn a_prompt_streams_text_reasoning_tools_and_idle() {
+        let _lock = lock_home();
+        let xdg = XdgGuard::new("stream");
+        let server = FakeV2::start("secret");
+        xdg.write_registration(&server.url, "secret");
+        let mut harness = v2_harness(&fake_cli(xdg.dir(), &server.url, false));
+        harness.start().expect("attaches");
+        let events = harness.events();
+        let session = SessionId::new("s1");
+        harness
+            .send_prompt(
+                &session,
+                Prompt {
+                    text: "hi".into(),
+                    ..Default::default()
+                },
+            )
+            .expect("prompt is accepted");
+        harness.interrupt(&session).expect("interrupt");
+        harness.compact(&session).expect("compact");
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        let mut text = None;
+        let mut reasoning = None;
+        let mut tool = None;
+        let mut idle = false;
+        let mut steps = Vec::new();
+        while std::time::Instant::now() < deadline {
+            while let Ok(event) = events.try_recv() {
+                match event {
+                    HarnessEvent::PartSnapshot { part } => match part.payload {
+                        PartPayload::Text(value) if value.contains("Hello world") => {
+                            text = Some(value);
+                        }
+                        PartPayload::Reasoning(value) => reasoning = Some(value),
+                        PartPayload::Tool(snapshot) => {
+                            if let ToolState::Completed { output } = &snapshot.state {
+                                tool = Some(output.clone());
+                            }
+                        }
+                        PartPayload::StepStart => steps.push("start"),
+                        PartPayload::StepFinish => steps.push("finish"),
+                        _ => {}
+                    },
+                    HarnessEvent::SessionStatus {
+                        state: SessionState::Idle,
+                        ..
+                    } => idle = true,
+                    _ => {}
+                }
+            }
+            if text.is_some() && reasoning.is_some() && tool.is_some() && idle {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(text.as_deref(), Some("Hello world"));
+        assert_eq!(reasoning.as_deref(), Some("think"));
+        assert_eq!(tool.as_deref(), Some("ok"));
+        assert_eq!(steps, ["start", "finish"]);
+        assert!(idle, "session.idle settled the turn");
+    }
+
+    #[test]
+    fn v2_structured_errors_and_session_events_translate() {
+        let mut state = V2StreamState::default();
+        let error = json!({
+            "type": "session.execution.failed",
+            "data": {
+                "sessionID": "s1",
+                "error": {
+                    "type": "provider",
+                    "message": "rate limited",
+                    "retryAfterMs": 1000
+                }
+            }
+        });
+        assert_eq!(
+            translate_v2_event(&error, &mut state),
+            Some(HarnessEvent::Error {
+                session: Some(SessionId::new("s1")),
+                message: "rate limited".into(),
+                retryable: true,
+            })
+        );
+
+        let created = json!({
+            "type": "session.created",
+            "data": {
+                "info": {
+                    "id": "s2",
+                    "title": "Child",
+                    "parentID": "s1",
+                    "agent": "build",
+                    "time": { "updated": 7 },
+                    "location": { "directory": "/tmp/work" }
+                }
+            }
+        });
+        assert_eq!(
+            translate_v2_event(&created, &mut state),
+            Some(HarnessEvent::SessionCreated {
+                session: SessionId::new("s2"),
+                title: Some("Child".into()),
+                parent: Some(SessionId::new("s1")),
+                agent: Some("build".into()),
+            })
+        );
     }
 
     #[test]

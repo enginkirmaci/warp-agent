@@ -501,8 +501,14 @@ impl Harness for OpenCodeV2Harness {
         .map(|_| ())
     }
 
-    fn activate_skill(&mut self, _session: &SessionId, _skill: &str) -> Result<(), HarnessError> {
-        Err(HarnessError::Unsupported("activate_skill"))
+    fn activate_skill(&mut self, session: &SessionId, skill: &str) -> Result<(), HarnessError> {
+        self.block_on(self.request(
+            reqwest::Method::POST,
+            &format!("/api/experimental/session/{}/skill", session.as_str()),
+            false,
+            Some(json!({ "id": skill })),
+        ))
+        .map(|_| ())
     }
 
     fn permissions(&mut self, session: &SessionId) -> Result<Vec<PermissionRequest>, HarnessError> {
@@ -649,23 +655,63 @@ impl Harness for OpenCodeV2Harness {
     }
 
     fn mcp_servers(&mut self) -> Result<Vec<McpServer>, HarnessError> {
-        Err(HarnessError::Unsupported("mcp_servers"))
+        let value = self.get("/api/mcp", true)?;
+        Ok(data_array(&value).filter_map(mcp_server).collect())
     }
 
-    fn add_mcp(&mut self, _config: McpConfig) -> Result<(), HarnessError> {
-        Err(HarnessError::Unsupported("add_mcp"))
+    fn add_mcp(&mut self, config: McpConfig) -> Result<(), HarnessError> {
+        let mut body = if let Some(command) = config.command.as_deref() {
+            json!({
+                "type": "local",
+                "command": command.split_whitespace().collect::<Vec<_>>(),
+            })
+        } else if let Some(url) = config.url.as_deref() {
+            json!({ "type": "remote", "url": url })
+        } else {
+            return Err(HarnessError::Failed(
+                "an MCP server needs a command or a url".into(),
+            ));
+        };
+        if !config.env.is_empty() {
+            body["environment"] = json!(config.env);
+        }
+        self.block_on(self.request(
+            reqwest::Method::PUT,
+            &format!("/api/experimental/mcp/{}", config.name),
+            false,
+            Some(json!({ "config": body })),
+        ))
+        .map(|_| ())
     }
 
-    fn connect_mcp(&mut self, _name: &str) -> Result<(), HarnessError> {
-        Err(HarnessError::Unsupported("connect_mcp"))
+    fn connect_mcp(&mut self, name: &str) -> Result<(), HarnessError> {
+        self.block_on(self.request(
+            reqwest::Method::POST,
+            &format!("/api/experimental/mcp/{name}/connect"),
+            false,
+            None,
+        ))
+        .map(|_| ())
     }
 
-    fn disconnect_mcp(&mut self, _name: &str) -> Result<(), HarnessError> {
-        Err(HarnessError::Unsupported("disconnect_mcp"))
+    fn disconnect_mcp(&mut self, name: &str) -> Result<(), HarnessError> {
+        self.block_on(self.request(
+            reqwest::Method::POST,
+            &format!("/api/experimental/mcp/{name}/disconnect"),
+            false,
+            None,
+        ))
+        .map(|_| ())
     }
 
-    fn remove_mcp(&mut self, _name: &str) -> Result<(), HarnessError> {
-        Err(HarnessError::Unsupported("remove_mcp"))
+    fn remove_mcp(&mut self, name: &str) -> Result<(), HarnessError> {
+        self.block_on(self.request(
+            reqwest::Method::DELETE,
+            &format!("/api/experimental/mcp/{name}"),
+            false,
+            None,
+        ))
+        .map(|_| ())
     }
 
     fn events(&self) -> Receiver<HarnessEvent> {
@@ -999,6 +1045,29 @@ fn inbox_item(value: &Value) -> Option<InboxItem> {
         session,
         kind,
         delivery,
+    })
+}
+
+fn mcp_server(value: &Value) -> Option<McpServer> {
+    let name = value.get("name").and_then(Value::as_str)?;
+    let status = value
+        .get("status")
+        .and_then(|status| {
+            status
+                .as_str()
+                .or_else(|| status.get("status").and_then(Value::as_str))
+        })
+        .unwrap_or("pending");
+    let status = match status {
+        "connected" => McpStatus::Connected,
+        "disabled" => McpStatus::Disabled,
+        "failed" => McpStatus::Failed,
+        "needs_auth" => McpStatus::NeedsAuth,
+        _ => McpStatus::Pending,
+    };
+    Some(McpServer {
+        name: name.to_string(),
+        status,
     })
 }
 
@@ -1700,6 +1769,18 @@ mod tests {
             | ("DELETE", "/api/session/s1/revert")
             | ("POST", "/api/session/s1/shell")
             | ("POST", "/api/session/s1/background") => ("204 No Content", ""),
+            ("POST", "/api/experimental/session/s1/skill") => ("204 No Content", ""),
+            ("GET", "/api/mcp") => (
+                "200 OK",
+                r#"{"data":[{"name":"files","status":{"status":"connected"}},{"name":"web","status":{"status":"pending"}}]}"#,
+            ),
+            ("PUT", "/api/experimental/mcp/files")
+            | ("POST", "/api/experimental/mcp/files/connect")
+            | ("POST", "/api/experimental/mcp/files/disconnect")
+            | ("DELETE", "/api/experimental/mcp/files") => ("204 No Content", ""),
+            ("PUT", "/api/experimental/mcp/bad") => {
+                ("500 Internal Server Error", r#"{"error":"boom"}"#)
+            }
             _ => ("404 Not Found", r#"{"error":"not found"}"#),
         };
         respond(&mut stream, status, body);
@@ -2106,6 +2187,81 @@ mod tests {
             requests
                 .iter()
                 .any(|request| request.contains("POST /api/session/s1/background"))
+        );
+    }
+
+    #[test]
+    fn a_v2_skill_activation_and_mcp_management_round_trip() {
+        let _lock = lock_home();
+        let xdg = XdgGuard::new("v2-skills-mcp");
+        let server = FakeV2::start("secret");
+        xdg.write_registration(&server.url, "secret");
+        let mut harness = v2_harness(&fake_cli(xdg.dir(), &server.url, false));
+        harness.start().expect("attaches");
+        let session = SessionId::new("s1");
+
+        harness
+            .activate_skill(&session, "sk1")
+            .expect("activate skill");
+        let servers = harness.mcp_servers().expect("mcp servers");
+        assert_eq!(servers.len(), 2);
+        assert_eq!(servers[0].name, "files");
+        assert_eq!(servers[0].status, McpStatus::Connected);
+        assert_eq!(servers[1].status, McpStatus::Pending);
+
+        let mut env = std::collections::BTreeMap::new();
+        env.insert("TOKEN".to_string(), "t".to_string());
+        harness
+            .add_mcp(McpConfig {
+                name: "files".into(),
+                command: Some("npx server".into()),
+                url: None,
+                env,
+            })
+            .expect("add mcp");
+        harness.connect_mcp("files").expect("connect");
+        harness.disconnect_mcp("files").expect("disconnect");
+        harness.remove_mcp("files").expect("remove");
+
+        let error = harness
+            .add_mcp(McpConfig {
+                name: "bad".into(),
+                command: Some("npx bad".into()),
+                url: None,
+                env: Default::default(),
+            })
+            .expect_err("the fake rejects the bad MCP server");
+        assert!(matches!(
+            error,
+            HarnessError::Failed(ref detail) if detail.contains("boom")
+        ));
+
+        let requests = server.requests();
+        assert!(requests.iter().any(|request| {
+            request.contains("POST /api/experimental/session/s1/skill")
+                && request.contains("\"id\":\"sk1\"")
+        }));
+        assert!(requests.iter().any(|request| {
+            request.contains("PUT /api/experimental/mcp/files")
+                && request.contains("\"type\":\"local\"")
+                && request.contains("\"npx\"")
+                && request.contains("\"server\"")
+                && request.contains("\"TOKEN\":\"t\"")
+        }));
+        assert!(
+            requests
+                .iter()
+                .any(|request| { request.contains("POST /api/experimental/mcp/files/connect") })
+        );
+        assert!(
+            requests
+                .iter()
+                .any(|request| { request.contains("POST /api/experimental/mcp/files/disconnect") })
+        );
+        assert!(
+            requests
+                .iter()
+                .any(|request| { request.contains("DELETE /api/experimental/mcp/files") })
         );
     }
 

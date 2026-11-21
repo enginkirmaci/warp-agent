@@ -692,6 +692,10 @@ mod tests {
                                 "capabilities": {},
                             }]
                         })));
+                    } else if params.get("harness").and_then(Value::as_str)
+                        == Some("no-such-harness")
+                    {
+                        let _ = reply.send(Err("unknown: harness no-such-harness".into()));
                     } else if params.get("harness").and_then(Value::as_str) == Some("off") {
                         let _ = reply.send(Err("disabled: harness off is disabled".into()));
                     } else {
@@ -928,6 +932,38 @@ mod tests {
         assert!(!rejected["ok"].as_bool().unwrap());
         assert!(rejected["error"].as_str().unwrap().contains("disabled"));
 
+        // an unknown harness id is refused with the door's prefix
+        say(
+            &mut good,
+            json!({
+                "id": 5,
+                "cmd": cmd::HARNESS,
+                "method": "models",
+                "params": {"harness": "no-such-harness"}
+            }),
+        )
+        .await;
+        let unknown = hear(&mut good).await;
+        assert_eq!(unknown["id"], 5);
+        assert!(!unknown["ok"].as_bool().unwrap());
+        assert!(unknown["error"].as_str().unwrap().starts_with("unknown:"));
+
+        // a method the app does not dispatch answers with its own prefix
+        say(
+            &mut good,
+            json!({"id": 6, "cmd": cmd::HARNESS, "method": "no-such-method"}),
+        )
+        .await;
+        let unsupported = hear(&mut good).await;
+        assert_eq!(unsupported["id"], 6);
+        assert!(!unsupported["ok"].as_bool().unwrap());
+        assert!(
+            unsupported["error"]
+                .as_str()
+                .unwrap()
+                .starts_with("unsupported:")
+        );
+
         say(
             &mut good,
             json!({
@@ -986,6 +1022,58 @@ mod tests {
         assert_eq!(unsubscribed["unsubscribed"], true);
 
         drop(good);
+        unpublish(&door);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A method the store dispatches to the net thread answers later: the door
+    /// keeps the connection open and sends the parked reply's result.
+    #[tokio::test]
+    async fn door_harness_dispatch_waits_for_the_store_answer() {
+        let dir = scratch_dir("harness-dispatch");
+        let (event_tx, event_rx) = async_channel::unbounded::<UiEvent>();
+        let (broadcast_tx, _) = broadcast::channel::<String>(16);
+        let door = start_in(dir.clone(), event_tx, broadcast_tx).await.unwrap();
+        let (deferred_tx, mut deferred_rx) = tokio::sync::mpsc::unbounded_channel::<Reply>();
+        tokio::spawn(async move {
+            while let Ok(UiEvent::Ipc { command }) = event_rx.recv().await {
+                if let IpcCommand::Harness { method, reply, .. } = command {
+                    assert_eq!(method, "providers");
+                    let _ = deferred_tx.send(reply);
+                }
+            }
+        });
+
+        let mut client = connect(door.port).await;
+        say(&mut client, json!({"auth": door.token})).await;
+        assert!(hear(&mut client).await["ok"].as_bool().unwrap());
+
+        say(
+            &mut client,
+            json!({
+                "id": 7,
+                "cmd": cmd::HARNESS,
+                "method": "providers",
+                "params": {"harness": "opencode"}
+            }),
+        )
+        .await;
+        let reply = deferred_rx.recv().await.expect("the store parks the reply");
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), hear(&mut client))
+                .await
+                .is_err(),
+            "the door waits for the parked store reply"
+        );
+        reply
+            .send(Ok(json!({"providers": [{"id": "p1", "name": "Provider"}]})))
+            .expect("the connection is still reading");
+        let answered = hear(&mut client).await;
+        assert_eq!(answered["id"], 7);
+        assert!(answered["ok"].as_bool().unwrap());
+        assert_eq!(answered["providers"][0]["id"], "p1");
+
+        drop(client);
         unpublish(&door);
         let _ = std::fs::remove_dir_all(&dir);
     }

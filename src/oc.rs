@@ -1011,6 +1011,17 @@ pub enum NetCommand {
     },
     /// Fan a pre-serialized event frame out to every connected door client.
     IpcBroadcast { line: String },
+    /// One `harness` door call: the net thread resolves the instance for the
+    /// harness's scope and runs the call on a blocking lane. The answer rides
+    /// back as [`UiEvent::HarnessCallResult`], so the store never blocks.
+    HarnessCall {
+        call_id: u64,
+        harness: HarnessId,
+        executable: String,
+        directory: Option<std::path::PathBuf>,
+        method: String,
+        params: Value,
+    },
     /// A chat was deleted: drop any folded follow state for it.
     ForgetSession { session_id: String },
     /// Ask whether a folder is a git repository: the worktree toggle's
@@ -1309,6 +1320,12 @@ pub enum UiEvent {
     /// A door command relayed from the ipc listener; answered by the store.
     Ipc {
         command: crate::ipc::IpcCommand,
+    },
+    /// The answer to one [`NetCommand::HarnessCall`]; `call_id` names the door
+    /// reply the store parked for it.
+    HarnessCallResult {
+        call_id: u64,
+        result: Result<Value, String>,
     },
 }
 
@@ -1780,6 +1797,35 @@ async fn net_loop(
                         .forget_session(&session);
                 }));
             }
+            NetCommand::HarnessCall {
+                call_id,
+                harness,
+                executable,
+                directory,
+                method,
+                params,
+            } => {
+                let host = Arc::clone(&host);
+                let event_tx = event_tx.clone();
+                tokio::spawn(async move {
+                    let result = tokio::task::spawn_blocking(move || {
+                        harness_call(
+                            &host,
+                            &harness,
+                            &executable,
+                            directory.as_deref(),
+                            &method,
+                            &params,
+                        )
+                    })
+                    .await
+                    .map_err(|err| format!("harness call task failed: {err}"))
+                    .and_then(|result| result);
+                    let _ = event_tx
+                        .send(UiEvent::HarnessCallResult { call_id, result })
+                        .await;
+                });
+            }
             NetCommand::IpcBroadcast { line } => {
                 let _ = door_tx.send(line);
             }
@@ -1816,6 +1862,43 @@ fn instance_for(
                 Arc::clone(&entry.handle),
             )
         })
+}
+
+/// One door harness call against the host's instance for the harness's scope.
+///
+/// The call is parsed before an instance is touched: an unknown method or a
+/// missing param answers `unsupported:`/the param error and never spawns a
+/// backend. A managed instance starts on demand — the adapter's own guard
+/// makes a second start a no-op, and a workspace harness must carry its
+/// folder. The typed answer (or its door-prefixed error) rides back to the
+/// store as [`UiEvent::HarnessCallResult`].
+fn harness_call(
+    host: &Arc<Mutex<crate::harness::HarnessHost>>,
+    harness: &HarnessId,
+    executable: &str,
+    directory: Option<&std::path::Path>,
+    method: &str,
+    params: &Value,
+) -> Result<Value, String> {
+    let call = crate::harness::call::Call::parse(method, params, directory)?;
+    let handle = {
+        let mut host = host.lock().expect("harness host");
+        let Some(descriptor) = host.registry().get(harness) else {
+            return Err(crate::harness::call::unknown(harness.as_str()));
+        };
+        if descriptor.scope == crate::harness::InstanceScope::Workspace && directory.is_none() {
+            return Err(format!(
+                "unavailable: harness {harness} needs a workspace directory"
+            ));
+        }
+        host.ensure_instance(harness, executable, directory)
+            .map_err(crate::harness::call::error_string)?
+    };
+    let mut instance = handle.lock().expect("harness instance");
+    instance
+        .start()
+        .map_err(crate::harness::call::error_string)?;
+    call.execute(instance.as_mut())
 }
 
 /// Forward one adapter's typed stream to the store: connection, health and
@@ -2629,6 +2712,287 @@ mod tests {
             .expect("blocking task")
         });
         assert_eq!(value, 2);
+    }
+
+    /// Every dispatched category reaches the host's adapter and comes back as
+    /// the typed JSON result on the call's own id.
+    #[test]
+    fn the_net_thread_dispatches_the_door_harness_surface() {
+        use crate::harness::test_support::SurfaceHarness;
+        use crate::harness::{
+            ConnectionKind, HarnessCapabilities, HarnessConfig, HarnessDescriptor, HarnessRegistry,
+            InstanceScope,
+        };
+
+        const FAKE: &str = "fake";
+        fn factory(_config: HarnessConfig) -> Box<dyn crate::harness::Harness> {
+            Box::new(SurfaceHarness::new(FAKE))
+        }
+
+        let mut registry = HarnessRegistry::new();
+        registry
+            .register(HarnessDescriptor {
+                id: HarnessId::new(FAKE),
+                label: "fake",
+                default_executable: "fake",
+                connection: ConnectionKind::Managed,
+                scope: InstanceScope::App,
+                capabilities: HarnessCapabilities::NONE,
+                launch: None,
+                factory: Some(factory),
+            })
+            .expect("the fake registers");
+
+        let (command_tx, command_rx) = async_channel::unbounded();
+        let (event_tx, events) = async_channel::unbounded();
+        let (door_tx, _) = tokio::sync::broadcast::channel::<String>(8);
+        let thread = std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .expect("net runtime");
+            runtime.block_on(net_loop(registry, command_rx, event_tx, &door_tx));
+        });
+        let net = NetSender(command_tx);
+
+        let mut call_id = 0;
+        let mut call = |method: &str, params: Value| -> Result<Value, String> {
+            call_id += 1;
+            net.send(NetCommand::HarnessCall {
+                call_id,
+                harness: HarnessId::new(FAKE),
+                executable: "fake".into(),
+                directory: Some(std::path::PathBuf::from("/tmp/fake-ws")),
+                method: method.into(),
+                params,
+            });
+            let answered = wait_for(
+                &events,
+                |event| matches!(event, UiEvent::HarnessCallResult { call_id: id, .. } if *id == call_id),
+            );
+            let UiEvent::HarnessCallResult { result, .. } = answered else {
+                unreachable!()
+            };
+            result
+        };
+
+        let catalogs = [
+            ("providers", "providers"),
+            ("agents", "agents"),
+            ("commands", "commands"),
+            ("skills", "skills"),
+        ];
+        for (method, key) in catalogs {
+            let result = call(method, json!({"session": "s1"})).expect(method);
+            assert!(result.get(key).is_some(), "{method}: {result}");
+        }
+        let sessions = call("sessions", json!({})).expect("sessions");
+        assert_eq!(sessions["sessions"][0]["id"], "session-1");
+        let session = call("session", json!({"session": "s1"})).expect("session");
+        assert_eq!(session["id"], "s1");
+        let transcript = call("transcript", json!({"session": "s1"})).expect("transcript");
+        assert_eq!(transcript["messages"][0]["message"]["role"], "assistant");
+
+        let created = call(
+            "create",
+            json!({"title": "Door chat", "model": "provider-1/model-1"}),
+        )
+        .expect("create");
+        assert_eq!(created["title"], "Door chat");
+        for method in ["fork", "rename", "delete"] {
+            let params = match method {
+                "rename" => json!({"session": "s1", "title": "Renamed"}),
+                _ => json!({"session": "s1"}),
+            };
+            let result = call(method, params).expect(method);
+            if method == "fork" {
+                assert_eq!(result["id"], "s1");
+            } else {
+                assert_eq!(result, json!({"ok": true}), "{method}");
+            }
+        }
+        for method in ["interrupt", "compact", "run_command", "activate_skill"] {
+            let params = match method {
+                "run_command" => json!({"session": "s1", "command": "plan", "text": "x"}),
+                "activate_skill" => json!({"session": "s1", "skill": "review"}),
+                _ => json!({"session": "s1"}),
+            };
+            assert_eq!(
+                call(method, params).expect(method),
+                json!({"ok": true}),
+                "{method}"
+            );
+        }
+        let prompt = call(
+            "send_prompt",
+            json!({"session": "s1", "text": "hello", "model": "provider-1/model-1"}),
+        )
+        .expect("send_prompt");
+        assert_eq!(prompt, json!({"ok": true}));
+
+        let permissions = call("permissions", json!({"session": "s1"})).expect("permissions");
+        assert_eq!(permissions["permissions"][0]["action"], "bash");
+        assert_eq!(
+            call(
+                "reply_permission",
+                json!({"session": "s1", "request": "permission-1", "decision": "always"}),
+            )
+            .expect("reply_permission"),
+            json!({"ok": true})
+        );
+        let forms = call("forms", json!({"session": "s1"})).expect("forms");
+        assert_eq!(forms["forms"][0]["title"], "Proceed?");
+        assert_eq!(
+            call(
+                "reply_form",
+                json!({"session": "s1", "form": "form-1", "values": {"0": "yes"}}),
+            )
+            .expect("reply_form"),
+            json!({"ok": true})
+        );
+        let diffs = call("diff", json!({"session": "s1"})).expect("diff");
+        assert_eq!(diffs["diffs"][0]["path"], "src/main.rs");
+
+        let inbox = call("inbox", json!({"session": "s1"})).expect("inbox");
+        assert_eq!(inbox["inbox"][0]["delivery"], "queue");
+        assert_eq!(
+            call(
+                "update_inbox",
+                json!({"session": "s1", "item": "item-1", "delivery": "steer"}),
+            )
+            .expect("update_inbox"),
+            json!({"ok": true})
+        );
+        assert_eq!(
+            call("cancel_inbox", json!({"session": "s1", "item": "item-1"})).expect("cancel_inbox"),
+            json!({"ok": true})
+        );
+        for method in ["stage_revert", "commit_revert", "clear_revert"] {
+            let params = match method {
+                "stage_revert" => json!({"session": "s1", "before": "m1"}),
+                _ => json!({"session": "s1"}),
+            };
+            assert_eq!(
+                call(method, params).expect(method),
+                json!({"ok": true}),
+                "{method}"
+            );
+        }
+        for method in ["run_shell", "background_session"] {
+            let params = match method {
+                "run_shell" => json!({"session": "s1", "command": "ls"}),
+                _ => json!({"session": "s1"}),
+            };
+            assert_eq!(
+                call(method, params).expect(method),
+                json!({"ok": true}),
+                "{method}"
+            );
+        }
+        let mcp = call("mcp_list", json!({})).expect("mcp_list");
+        assert_eq!(mcp["servers"][0]["status"], "connected");
+        for (method, params) in [
+            ("mcp_add", json!({"name": "docs", "command": "docs-mcp"})),
+            ("mcp_connect", json!({"name": "docs"})),
+            ("mcp_disconnect", json!({"name": "docs"})),
+            ("mcp_remove", json!({"name": "docs"})),
+        ] {
+            assert_eq!(
+                call(method, params).expect(method),
+                json!({"ok": true}),
+                "{method}"
+            );
+        }
+        assert_eq!(
+            call("find_files", json!({"query": "main"})).expect("find_files")["files"][0],
+            "src/main.rs"
+        );
+        assert_eq!(
+            call("forget_session", json!({"session": "s1"})).expect("forget_session"),
+            json!({"ok": true})
+        );
+
+        // an unknown harness is refused before the host creates an instance
+        let unknown_call = 9999;
+        net.send(NetCommand::HarnessCall {
+            call_id: unknown_call,
+            harness: HarnessId::new("no-such-harness"),
+            executable: "fake".into(),
+            directory: None,
+            method: "providers".into(),
+            params: json!({}),
+        });
+        let refused = wait_for(
+            &events,
+            |event| matches!(event, UiEvent::HarnessCallResult { call_id, .. } if *call_id == unknown_call),
+        );
+        let UiEvent::HarnessCallResult { result, .. } = refused else {
+            unreachable!()
+        };
+        assert_eq!(result.unwrap_err(), "unknown: harness no-such-harness");
+
+        // an unknown method is refused before an adapter is touched
+        let error = call("no-such-method", json!({})).unwrap_err();
+        assert_eq!(error, "unsupported: harness method no-such-method");
+
+        drop(net);
+        thread.join().expect("the net thread stops");
+    }
+
+    /// An adapter's typed `Unsupported` keeps the door's prefix.
+    #[test]
+    fn an_unsupported_adapter_operation_keeps_the_door_prefix() {
+        use crate::harness::test_support::FakeHarness;
+        use crate::harness::{
+            ConnectionKind, HarnessCapabilities, HarnessConfig, HarnessDescriptor, HarnessRegistry,
+            InstanceScope,
+        };
+
+        const FAKE: &str = "fake";
+        fn factory(_config: HarnessConfig) -> Box<dyn crate::harness::Harness> {
+            Box::new(FakeHarness::new(FAKE))
+        }
+        let mut registry = HarnessRegistry::new();
+        registry
+            .register(HarnessDescriptor {
+                id: HarnessId::new(FAKE),
+                label: "fake",
+                default_executable: "fake",
+                connection: ConnectionKind::Managed,
+                scope: InstanceScope::App,
+                capabilities: HarnessCapabilities::NONE,
+                launch: None,
+                factory: Some(factory),
+            })
+            .expect("the fake registers");
+        let (command_tx, command_rx) = async_channel::unbounded();
+        let (event_tx, events) = async_channel::unbounded();
+        let (door_tx, _) = tokio::sync::broadcast::channel::<String>(8);
+        let thread = std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .expect("net runtime");
+            runtime.block_on(net_loop(registry, command_rx, event_tx, &door_tx));
+        });
+        let net = NetSender(command_tx);
+        net.send(NetCommand::HarnessCall {
+            call_id: 1,
+            harness: HarnessId::new(FAKE),
+            executable: "fake".into(),
+            directory: None,
+            method: "agents".into(),
+            params: json!({}),
+        });
+        let answered = wait_for(&events, |event| {
+            matches!(event, UiEvent::HarnessCallResult { call_id: 1, .. })
+        });
+        let UiEvent::HarnessCallResult { result, .. } = answered else {
+            unreachable!()
+        };
+        assert_eq!(result.unwrap_err(), "unsupported: harness operation agents");
+        drop(net);
+        thread.join().expect("the net thread stops");
     }
 
     #[test]

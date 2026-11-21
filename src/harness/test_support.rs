@@ -278,3 +278,389 @@ impl_fake_harness! {
     disconnect_mcp(name: &str) -> ();
     remove_mcp(name: &str) -> ();
 }
+
+/// A harness whose whole trait surface answers with canned typed values and
+/// records what it received. The door dispatch tests drive it to prove one
+/// mapping per category without a network or a child process.
+pub struct SurfaceHarness {
+    id: HarnessId,
+    rx: Receiver<HarnessEvent>,
+    /// Every trait method this fake was asked for, in call order.
+    pub calls: Arc<std::sync::Mutex<Vec<String>>>,
+    /// Every prompt the fake accepted, in order.
+    pub prompts: Arc<std::sync::Mutex<Vec<Prompt>>>,
+    /// Every session spec the fake created, in order.
+    pub new_sessions: Arc<std::sync::Mutex<Vec<NewSession>>>,
+    /// Every slash command the fake ran, in order.
+    pub commands_run: Arc<std::sync::Mutex<Vec<CommandRun>>>,
+}
+
+impl SurfaceHarness {
+    pub fn new(id: &str) -> Self {
+        // the fake never emits: its dispatch answers are the typed results
+        let (_tx, rx) = unbounded();
+        Self {
+            id: HarnessId::new(id),
+            rx,
+            calls: Arc::default(),
+            prompts: Arc::default(),
+            new_sessions: Arc::default(),
+            commands_run: Arc::default(),
+        }
+    }
+
+    /// The last prompt this fake accepted.
+    pub fn last_prompt(&self) -> Option<Prompt> {
+        self.prompts
+            .lock()
+            .expect("recorded prompts")
+            .last()
+            .cloned()
+    }
+
+    /// The last session spec this fake created.
+    pub fn last_new_session(&self) -> Option<NewSession> {
+        self.new_sessions
+            .lock()
+            .expect("recorded session specs")
+            .last()
+            .cloned()
+    }
+
+    fn record(&self, call: impl Into<String>) {
+        self.calls.lock().expect("recorded calls").push(call.into());
+    }
+
+    fn summary(&self, id: &str) -> SessionSummary {
+        SessionSummary {
+            id: SessionId::new(id),
+            title: "Session".into(),
+            parent: None,
+            directory: None,
+            updated_ms: 10,
+            created_ms: 5,
+        }
+    }
+}
+
+impl Harness for SurfaceHarness {
+    fn id(&self) -> HarnessId {
+        self.id.clone()
+    }
+
+    fn health(&self) -> HarnessHealth {
+        HarnessHealth::ready()
+    }
+
+    fn start(&mut self) -> Result<(), HarnessError> {
+        self.record("start");
+        Ok(())
+    }
+
+    fn stop(&mut self) -> Result<(), HarnessError> {
+        self.record("stop");
+        Ok(())
+    }
+
+    fn events(&self) -> Receiver<HarnessEvent> {
+        self.rx.clone()
+    }
+
+    fn providers(&mut self) -> Result<Vec<Provider>, HarnessError> {
+        self.record("providers");
+        Ok(vec![Provider {
+            id: "provider-1".into(),
+            name: "Provider One".into(),
+        }])
+    }
+
+    fn models(&mut self) -> Result<Vec<Model>, HarnessError> {
+        self.record("models");
+        Ok(vec![Model {
+            key: "provider-1/model-1".into(),
+            provider: "provider-1".into(),
+            variants: vec!["low".into(), "high".into()],
+            context_limit: 1000,
+        }])
+    }
+
+    fn agents(&mut self) -> Result<Vec<Agent>, HarnessError> {
+        self.record("agents");
+        Ok(vec![Agent {
+            name: "build".into(),
+            mode: "primary".into(),
+            hidden: false,
+        }])
+    }
+
+    fn commands(&mut self, session: Option<&SessionId>) -> Result<Vec<Command>, HarnessError> {
+        self.record(format!("commands:{}", session.is_some()));
+        Ok(vec![Command {
+            name: "plan".into(),
+            description: "draft a plan".into(),
+        }])
+    }
+
+    fn skills(&mut self, session: Option<&SessionId>) -> Result<Vec<Skill>, HarnessError> {
+        self.record(format!("skills:{}", session.is_some()));
+        Ok(vec![Skill {
+            id: "review".into(),
+            name: "Review".into(),
+            description: "review a change".into(),
+        }])
+    }
+
+    fn sessions(&mut self) -> Result<Vec<SessionSummary>, HarnessError> {
+        self.record("sessions");
+        Ok(vec![self.summary("session-1")])
+    }
+
+    fn session(&mut self, session: &SessionId) -> Result<SessionSummary, HarnessError> {
+        self.record("session");
+        Ok(self.summary(session.as_str()))
+    }
+
+    fn transcript(&mut self, session: &SessionId) -> Result<Vec<HistoryMessage>, HarnessError> {
+        self.record("transcript");
+        let message = MessageSnapshot {
+            id: "message-1".into(),
+            session: session.clone(),
+            role: MessageRole::Assistant,
+            created_ms: 5,
+            completed_ms: Some(9),
+            provider: Some("provider-1".into()),
+            model: Some("model-1".into()),
+            error: None,
+            tokens: None,
+            cost_micros: None,
+        };
+        Ok(vec![HistoryMessage {
+            message,
+            parts: vec![HistoryPart {
+                id: "part-1".into(),
+                payload: PartPayload::Text("hello".into()),
+            }],
+        }])
+    }
+
+    fn create_session(&mut self, spec: NewSession) -> Result<SessionSummary, HarnessError> {
+        self.record("create_session");
+        let mut summary = self.summary("session-1");
+        if let Some(title) = spec.title.clone() {
+            summary.title = title;
+        }
+        summary.directory = spec.directory.clone();
+        self.new_sessions
+            .lock()
+            .expect("recorded session specs")
+            .push(spec);
+        Ok(summary)
+    }
+
+    fn fork_session(
+        &mut self,
+        session: &SessionId,
+        before: Option<&str>,
+    ) -> Result<SessionSummary, HarnessError> {
+        self.record(format!("fork_session:{}", before.unwrap_or_default()));
+        Ok(self.summary(session.as_str()))
+    }
+
+    fn rename_session(&mut self, session: &SessionId, title: &str) -> Result<(), HarnessError> {
+        self.record(format!("rename_session:{}:{title}", session.as_str()));
+        Ok(())
+    }
+
+    fn delete_session(&mut self, session: &SessionId) -> Result<(), HarnessError> {
+        self.record(format!("delete_session:{}", session.as_str()));
+        Ok(())
+    }
+
+    fn send_prompt(&mut self, session: &SessionId, prompt: Prompt) -> Result<(), HarnessError> {
+        self.record(format!("send_prompt:{}", session.as_str()));
+        self.prompts.lock().expect("recorded prompts").push(prompt);
+        Ok(())
+    }
+
+    fn interrupt(&mut self, session: &SessionId) -> Result<(), HarnessError> {
+        self.record(format!("interrupt:{}", session.as_str()));
+        Ok(())
+    }
+
+    fn compact(&mut self, session: &SessionId) -> Result<(), HarnessError> {
+        self.record(format!("compact:{}", session.as_str()));
+        Ok(())
+    }
+
+    fn run_command(
+        &mut self,
+        session: &SessionId,
+        command: CommandRun,
+    ) -> Result<(), HarnessError> {
+        self.record(format!("run_command:{}", session.as_str()));
+        self.commands_run
+            .lock()
+            .expect("recorded commands")
+            .push(command);
+        Ok(())
+    }
+
+    fn activate_skill(&mut self, session: &SessionId, skill: &str) -> Result<(), HarnessError> {
+        self.record(format!("activate_skill:{}:{skill}", session.as_str()));
+        Ok(())
+    }
+
+    fn permissions(&mut self, session: &SessionId) -> Result<Vec<PermissionRequest>, HarnessError> {
+        self.record("permissions");
+        Ok(vec![PermissionRequest {
+            id: "permission-1".into(),
+            session: session.clone(),
+            action: "bash".into(),
+            resources: vec!["ls -la".into()],
+            message: None,
+            diff: None,
+        }])
+    }
+
+    fn reply_permission(
+        &mut self,
+        session: &SessionId,
+        request: &str,
+        decision: PermissionDecision,
+    ) -> Result<(), HarnessError> {
+        self.record(format!(
+            "reply_permission:{}:{request}:{decision:?}",
+            session.as_str()
+        ));
+        Ok(())
+    }
+
+    fn forms(&mut self, session: &SessionId) -> Result<Vec<FormRequest>, HarnessError> {
+        self.record("forms");
+        Ok(vec![FormRequest {
+            id: "form-1".into(),
+            session: session.clone(),
+            title: "Proceed?".into(),
+            fields: vec![FormField {
+                id: "0".into(),
+                title: "Continue?".into(),
+                kind: FormFieldKind::Text,
+                required: true,
+                options: Vec::new(),
+            }],
+        }])
+    }
+
+    fn reply_form(
+        &mut self,
+        session: &SessionId,
+        form: &str,
+        answer: FormAnswer,
+    ) -> Result<(), HarnessError> {
+        self.record(format!(
+            "reply_form:{}:{form}:{}",
+            session.as_str(),
+            answer.values.len()
+        ));
+        Ok(())
+    }
+
+    fn diff(&mut self, session: &SessionId) -> Result<Vec<FileDiff>, HarnessError> {
+        self.record(format!("diff:{}", session.as_str()));
+        Ok(vec![FileDiff {
+            path: "src/main.rs".into(),
+            patch: "@@ -1 +1 @@".into(),
+        }])
+    }
+
+    fn find_files(&mut self, query: &str) -> Result<Vec<String>, HarnessError> {
+        self.record(format!("find_files:{query}"));
+        Ok(vec!["src/main.rs".into()])
+    }
+
+    fn forget_session(&mut self, session: &SessionId) -> Result<(), HarnessError> {
+        self.record(format!("forget_session:{}", session.as_str()));
+        Ok(())
+    }
+
+    fn inbox(&mut self, session: &SessionId) -> Result<Vec<InboxItem>, HarnessError> {
+        self.record("inbox");
+        Ok(vec![InboxItem {
+            id: "item-1".into(),
+            session: session.clone(),
+            kind: InboxKind::User,
+            delivery: InboxDelivery::Queue,
+        }])
+    }
+
+    fn update_inbox(
+        &mut self,
+        session: &SessionId,
+        item: &str,
+        delivery: InboxDelivery,
+    ) -> Result<(), HarnessError> {
+        self.record(format!(
+            "update_inbox:{}:{item}:{delivery:?}",
+            session.as_str()
+        ));
+        Ok(())
+    }
+
+    fn cancel_inbox(&mut self, session: &SessionId, item: &str) -> Result<(), HarnessError> {
+        self.record(format!("cancel_inbox:{}:{item}", session.as_str()));
+        Ok(())
+    }
+
+    fn stage_revert(&mut self, session: &SessionId, before: &str) -> Result<(), HarnessError> {
+        self.record(format!("stage_revert:{}:{before}", session.as_str()));
+        Ok(())
+    }
+
+    fn commit_revert(&mut self, session: &SessionId) -> Result<(), HarnessError> {
+        self.record(format!("commit_revert:{}", session.as_str()));
+        Ok(())
+    }
+
+    fn clear_revert(&mut self, session: &SessionId) -> Result<(), HarnessError> {
+        self.record(format!("clear_revert:{}", session.as_str()));
+        Ok(())
+    }
+
+    fn run_shell(&mut self, session: &SessionId, command: &str) -> Result<(), HarnessError> {
+        self.record(format!("run_shell:{}:{command}", session.as_str()));
+        Ok(())
+    }
+
+    fn background_session(&mut self, session: &SessionId) -> Result<(), HarnessError> {
+        self.record(format!("background_session:{}", session.as_str()));
+        Ok(())
+    }
+
+    fn mcp_servers(&mut self) -> Result<Vec<McpServer>, HarnessError> {
+        self.record("mcp_servers");
+        Ok(vec![McpServer {
+            name: "docs".into(),
+            status: McpStatus::Connected,
+        }])
+    }
+
+    fn add_mcp(&mut self, config: McpConfig) -> Result<(), HarnessError> {
+        self.record(format!("add_mcp:{}", config.name));
+        Ok(())
+    }
+
+    fn connect_mcp(&mut self, name: &str) -> Result<(), HarnessError> {
+        self.record(format!("connect_mcp:{name}"));
+        Ok(())
+    }
+
+    fn disconnect_mcp(&mut self, name: &str) -> Result<(), HarnessError> {
+        self.record(format!("disconnect_mcp:{name}"));
+        Ok(())
+    }
+
+    fn remove_mcp(&mut self, name: &str) -> Result<(), HarnessError> {
+        self.record(format!("remove_mcp:{name}"));
+        Ok(())
+    }
+}

@@ -7,15 +7,28 @@
 
 use gpui::Context;
 use serde_json::{Value, json};
+use std::time::Duration;
 
 use super::{Store, normalize_dir};
 use crate::harness::{
-    FormFieldKind, HarnessCapabilities, HarnessEvent, HarnessId, HarnessRegistry, MessageRole,
-    PartPayload, SessionId, SessionState, ToolState,
+    FormFieldKind, HarnessCapabilities, HarnessEvent, HarnessHealth, HarnessId, HarnessRegistry,
+    MessageRole, PartPayload, SessionId, SessionState, ToolState,
 };
 use crate::ipc::{DoorModel, IpcCommand, Reply};
 use crate::oc::{ApiRequest, NetCommand};
 use crate::paths::AppPaths;
+
+/// How long the store keeps a door harness reply parked on the net thread.
+/// The door's own client timeout is 60 s; this only sweeps a reply a client
+/// can no longer receive (a wedged or vanished net thread).
+const HARNESS_CALL_TIMEOUT: Duration = Duration::from_secs(65);
+
+/// One door `harness` request's store-side answer: ready now, or parked under
+/// a call id until the net thread (or a server-start fact) answers it.
+enum HarnessAnswer {
+    Ready(Result<Value, String>),
+    Pending(u64),
+}
 
 /// One door-run: a prompt DevTools wants executed and answered. Bound to a
 /// draft tile key until the session exists, then to the session id.
@@ -82,9 +95,12 @@ impl Store {
                 method,
                 params,
                 reply,
-            } => {
-                let _ = reply.send(self.ipc_harness_request(&method, &params));
-            }
+            } => match self.ipc_harness_request(&method, &params, cx) {
+                HarnessAnswer::Ready(result) => {
+                    let _ = reply.send(result);
+                }
+                HarnessAnswer::Pending(call_id) => self.ipc_harness_park(call_id, reply, cx),
+            },
             IpcCommand::Status { reply } => {
                 let _ = reply.send(Ok(json!({
                     "workspaces": self.ipc_status_workspaces(),
@@ -146,35 +162,51 @@ impl Store {
         harnesses
     }
 
-    fn ipc_harness_request(&mut self, method: &str, params: &Value) -> Result<Value, String> {
-        let harness = params.get("harness").and_then(Value::as_str);
-        let require_enabled = |id: &str| -> Result<(), String> {
-            if !HarnessRegistry::builtin().resolve(id).is_ok() {
-                return Err(format!("unknown: harness {id}"));
-            }
-            if !self.settings.harness_enabled(id) {
-                return Err(format!("disabled: harness {id} is disabled"));
-            }
-            Ok(())
-        };
-        match method {
-            "metadata" | "list-harnesses" => Ok(json!({
+    /// One door `harness` request. The cached answers (metadata, models,
+    /// sessions, session) stay fast and local; everything else is parked on
+    /// the net thread, and `health`/`start`/`stop` go through the app's own
+    /// lifecycle so the door cannot split the store's state from the runtime.
+    fn ipc_harness_request(
+        &mut self,
+        method: &str,
+        params: &Value,
+        cx: &mut Context<Self>,
+    ) -> HarnessAnswer {
+        let raw = method.trim();
+        let method = raw.replace('-', "_");
+        // The namespace's whole method set: an unknown one is refused before
+        // a harness id is even read, because a typo must not start a backend.
+        let known = matches!(
+            method.as_str(),
+            "metadata"
+                | "list_harnesses"
+                | "status"
+                | "models"
+                | "sessions"
+                | "session"
+                | "health"
+                | "start"
+                | "stop"
+        ) || crate::harness::call::known(&method);
+        if !known {
+            return HarnessAnswer::Ready(Err(format!("unsupported: harness method {raw}")));
+        }
+        match method.as_str() {
+            "metadata" | "list_harnesses" => HarnessAnswer::Ready(Ok(json!({
                 "harnesses": self.ipc_harness_metadata(),
-            })),
-            "status" => Ok(json!({
+            }))),
+            "status" => HarnessAnswer::Ready(Ok(json!({
                 "harnesses": self.ipc_harness_metadata(),
-            })),
+            }))),
             "models" => {
-                let id = harness.ok_or_else(|| "harness is required".to_string())?;
-                require_enabled(id)?;
-                let Some(kind) = HarnessId::from_wire(id) else {
-                    return Err(format!(
-                        "unavailable: harness {id} has no model catalog yet"
-                    ));
+                let harness = match self.ipc_harness_target(params) {
+                    Ok(harness) => harness,
+                    Err(error) => return HarnessAnswer::Ready(Err(error)),
                 };
-                Ok(self.models_payload(Some(kind)))
+                HarnessAnswer::Ready(Ok(self.models_payload(Some(harness))))
             }
             "sessions" => {
+                let harness = params.get("harness").and_then(Value::as_str);
                 let mut sessions = Vec::new();
                 for tile in &self.open_tiles {
                     let Some(session) = tile.session_id.as_ref() else {
@@ -192,26 +224,288 @@ impl Store {
                         "running": self.running_by_session.contains(session),
                     }));
                 }
-                Ok(json!({ "sessions": sessions }))
+                HarnessAnswer::Ready(Ok(json!({ "sessions": sessions })))
             }
             "session" => {
-                let session = params
-                    .get("session")
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| "session is required".to_string())?;
-                let tile = self.tile_for_session(session);
-                match tile {
-                    Some(tile) => Ok(json!({
+                let Some(session) = params.get("session").and_then(Value::as_str) else {
+                    return HarnessAnswer::Ready(Err("session is required".into()));
+                };
+                match self.tile_for_session(session) {
+                    Some(tile) => HarnessAnswer::Ready(Ok(json!({
                         "id": session,
                         "title": self.title_for(session),
                         "harness": tile.harness.as_str(),
                         "running": self.running_by_session.contains(session),
-                    })),
-                    None => Err(format!("not-found: session {session}")),
+                    }))),
+                    None => HarnessAnswer::Ready(Err(format!("not-found: session {session}"))),
                 }
             }
-            other => Err(format!("unsupported: harness method {other}")),
+            "health" => {
+                let harness = match self.ipc_harness_target(params) {
+                    Ok(harness) => harness,
+                    Err(error) => return HarnessAnswer::Ready(Err(error)),
+                };
+                HarnessAnswer::Ready(Ok(self.ipc_harness_health(&harness, params)))
+            }
+            "start" => {
+                let harness = match self.ipc_harness_target(params) {
+                    Ok(harness) => harness,
+                    Err(error) => return HarnessAnswer::Ready(Err(error)),
+                };
+                self.ipc_harness_start(harness, params, cx)
+            }
+            "stop" => {
+                let harness = match self.ipc_harness_target(params) {
+                    Ok(harness) => harness,
+                    Err(error) => return HarnessAnswer::Ready(Err(error)),
+                };
+                HarnessAnswer::Ready(self.ipc_harness_stop(&harness, params))
+            }
+            _ => self.ipc_harness_dispatch(&method, params),
         }
+    }
+
+    /// Resolve the harness a door method names, refusing an unknown id or a
+    /// disabled harness before any adapter is touched.
+    fn ipc_harness_target(&self, params: &Value) -> Result<HarnessId, String> {
+        let id = params
+            .get("harness")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+            .ok_or_else(|| "harness is required".to_string())?;
+        let harness = HarnessId::from_wire(id).ok_or_else(|| crate::harness::call::unknown(id))?;
+        if !self.harness_enabled(&harness) {
+            return Err(crate::harness::call::disabled(id));
+        }
+        Ok(harness)
+    }
+
+    /// The instance scope a door method names: an explicit `directory`, the
+    /// session's own workspace when it has one, else the selected workspace
+    /// for a per-workspace harness.
+    fn ipc_harness_directory(&self, harness: &HarnessId, params: &Value) -> Option<String> {
+        if let Some(directory) = params
+            .get("directory")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|directory| !directory.is_empty())
+        {
+            return Some(normalize_dir(directory));
+        }
+        if let Some(session) = params.get("session").and_then(Value::as_str)
+            && let Some(folder) = self.effective_workspace_path(session)
+        {
+            return Some(folder);
+        }
+        if crate::harness::workspace_scoped(harness) {
+            return self.selected_workspace.clone();
+        }
+        None
+    }
+
+    /// The store's runtime for a managed harness, when it has one.
+    fn ipc_harness_runtime(
+        &self,
+        harness: &HarnessId,
+        params: &Value,
+    ) -> Option<&super::WorkspaceRuntime> {
+        if crate::harness::shared_server(harness) {
+            return self.runtimes.get(harness.as_str());
+        }
+        let directory = self.ipc_harness_directory(harness, params)?;
+        self.runtimes.get(&directory)
+    }
+
+    /// The typed health for a harness: the attached adapter's own state, or
+    /// the managed server's latest health poll.
+    fn ipc_harness_health(&self, harness: &HarnessId, params: &Value) -> Value {
+        let health = if crate::harness::attached(harness) {
+            match self.attached.get(harness) {
+                Some(adapter) => adapter.health(),
+                None => match self.attached_status.get(harness) {
+                    Some(detail) => HarnessHealth::unavailable(detail.clone()),
+                    None => HarnessHealth::unavailable("not attached"),
+                },
+            }
+        } else if let Some(runtime) = self.ipc_harness_runtime(harness, params) {
+            match runtime.healthy {
+                Some(true) => HarnessHealth::ready(),
+                Some(false) => HarnessHealth::unavailable("health check failed"),
+                None => HarnessHealth::starting("waiting for the first health check"),
+            }
+        } else {
+            HarnessHealth::unavailable("not running")
+        };
+        crate::harness::call::health_json(&health)
+    }
+
+    /// Start a harness through the app's own lifecycle: the attached adapter
+    /// attaches, a managed server starts on its net key, and the reply is
+    /// parked until `ServerStarted` lands.
+    fn ipc_harness_start(
+        &mut self,
+        harness: HarnessId,
+        params: &Value,
+        cx: &mut Context<Self>,
+    ) -> HarnessAnswer {
+        if crate::harness::attached(&harness) {
+            self.ensure_attached(&harness, cx);
+            return match self.attached.get(&harness) {
+                Some(_) => HarnessAnswer::Ready(Ok(json!({ "ok": true }))),
+                None => {
+                    let detail = self
+                        .attached_status
+                        .get(&harness)
+                        .cloned()
+                        .unwrap_or_else(|| format!("{} did not attach", harness.label()));
+                    HarnessAnswer::Ready(Err(format!("unavailable: {detail}")))
+                }
+            };
+        }
+        let key = if crate::harness::shared_server(&harness) {
+            self.shared_key()
+        } else {
+            let Some(directory) = self.ipc_harness_directory(&harness, params) else {
+                return HarnessAnswer::Ready(Err(format!(
+                    "unavailable: harness {harness} needs a workspace directory"
+                )));
+            };
+            if !self
+                .workspaces
+                .iter()
+                .any(|workspace| workspace.folder_path() == directory)
+            {
+                return HarnessAnswer::Ready(Err(format!(
+                    "unavailable: workspace {directory} is not open"
+                )));
+            }
+            directory
+        };
+        if self.runtimes.contains_key(&key) {
+            return HarnessAnswer::Ready(Ok(json!({ "ok": true })));
+        }
+        let call_id = self.ipc_harness_call_id();
+        self.ipc_harness_start_calls
+            .push((harness.clone(), call_id));
+        if crate::harness::shared_server(&harness) {
+            self.ensure_shared_server(cx);
+        } else {
+            self.start_workspace(&key, cx);
+        }
+        HarnessAnswer::Pending(call_id)
+    }
+
+    /// Stop a harness through the app's own lifecycle: detach an attached
+    /// adapter, stop a managed server and drop its runtime bookkeeping.
+    fn ipc_harness_stop(&mut self, harness: &HarnessId, params: &Value) -> Result<Value, String> {
+        self.fail_harness_start_calls(harness, "the harness was stopped");
+        if crate::harness::attached(harness) {
+            if let Some(mut adapter) = self.attached.remove(harness) {
+                let _ = adapter.stop();
+            }
+            self.set_attached_status(harness, "disconnected");
+            return Ok(json!({ "ok": true }));
+        }
+        let key = if crate::harness::shared_server(harness) {
+            self.shared_key()
+        } else {
+            self.ipc_harness_directory(harness, params).ok_or_else(|| {
+                format!("unavailable: harness {harness} needs a workspace directory")
+            })?
+        };
+        if self.runtimes.contains_key(&key) {
+            self.net.send(NetCommand::StopServer {
+                ws_key: key.clone(),
+            });
+            self.teardown_runtime(&key);
+        }
+        Ok(json!({ "ok": true }))
+    }
+
+    /// Dispatch one app-level trait call through the net thread's host.
+    fn ipc_harness_dispatch(&mut self, method: &str, params: &Value) -> HarnessAnswer {
+        let harness = match self.ipc_harness_target(params) {
+            Ok(harness) => harness,
+            Err(error) => return HarnessAnswer::Ready(Err(error)),
+        };
+        let directory = self.ipc_harness_directory(&harness, params);
+        let executable = self.settings.harness_executable(harness.as_str());
+        let call_id = self.ipc_harness_call_id();
+        self.net.send(NetCommand::HarnessCall {
+            call_id,
+            harness,
+            executable,
+            directory: directory.map(std::path::PathBuf::from),
+            method: method.to_string(),
+            params: params.clone(),
+        });
+        HarnessAnswer::Pending(call_id)
+    }
+
+    /// Park a door reply until its net-thread answer lands, and sweep it if
+    /// the answer never does.
+    fn ipc_harness_park(&mut self, call_id: u64, reply: Reply, cx: &mut Context<Self>) {
+        self.ipc_harness_calls.insert(call_id, reply);
+        cx.spawn(async move |store, cx| {
+            cx.background_executor().timer(HARNESS_CALL_TIMEOUT).await;
+            let _ = store.update(cx, |store, _cx| store.ipc_harness_timeout(call_id));
+        })
+        .detach();
+    }
+
+    /// One net-thread answer for a parked door call.
+    pub(super) fn ipc_harness_result(&mut self, call_id: u64, result: Result<Value, String>) {
+        if let Some(reply) = self.ipc_harness_calls.remove(&call_id) {
+            let _ = reply.send(result);
+        }
+    }
+
+    fn ipc_harness_timeout(&mut self, call_id: u64) {
+        if let Some(reply) = self.ipc_harness_calls.remove(&call_id) {
+            let _ = reply.send(Err("timed out".into()));
+        }
+    }
+
+    /// Answers the door `harness start` calls parked on one server start.
+    pub(super) fn ipc_harness_started(&mut self, ws_key: &str, error: Option<String>) {
+        let harness = if self.is_shared_key(ws_key) {
+            crate::harness::shared_server_id()
+        } else {
+            crate::harness::harness_for_key(ws_key)
+        };
+        let Some(harness) = harness else {
+            return;
+        };
+        let (answered, waiting): (Vec<_>, Vec<_>) =
+            std::mem::take(&mut self.ipc_harness_start_calls)
+                .into_iter()
+                .partition(|(id, _)| id == &harness);
+        self.ipc_harness_start_calls = waiting;
+        for (_, call_id) in answered {
+            let result = match &error {
+                Some(error) => Err(format!("unavailable: server failed to start: {error}")),
+                None => Ok(json!({ "ok": true })),
+            };
+            self.ipc_harness_result(call_id, result);
+        }
+    }
+
+    /// Fails a harness's parked start calls when the harness stops first.
+    fn fail_harness_start_calls(&mut self, harness: &HarnessId, detail: &str) {
+        let (failed, waiting): (Vec<_>, Vec<_>) = std::mem::take(&mut self.ipc_harness_start_calls)
+            .into_iter()
+            .partition(|(id, _)| id == harness);
+        self.ipc_harness_start_calls = waiting;
+        for (_, call_id) in failed {
+            self.ipc_harness_result(call_id, Err(format!("unavailable: {detail}")));
+        }
+    }
+
+    fn ipc_harness_call_id(&mut self) -> u64 {
+        let call_id = self.next_ipc_harness_call;
+        self.next_ipc_harness_call = self.next_ipc_harness_call.wrapping_add(1).max(1);
+        call_id
     }
 
     /// Broadcasts one typed event to door subscribers. The connection filters
@@ -957,6 +1251,14 @@ mod tests {
     use super::*;
     use crate::oc::ModelInfo;
 
+    /// The ready half of a door answer; a parked answer panics.
+    fn ready(answer: HarnessAnswer) -> Result<Value, String> {
+        match answer {
+            HarnessAnswer::Ready(result) => result,
+            HarnessAnswer::Pending(call_id) => panic!("unexpected parked call {call_id}"),
+        }
+    }
+
     #[test]
     fn models_payload_scopes_the_catalog_and_keeps_harnesses() {
         let infos = vec![
@@ -1010,10 +1312,8 @@ mod tests {
         let _lock = crate::store::test_support::lock_home();
         let _home = crate::store::test_support::HomeGuard::new();
         let store = cx.update(Store::for_probe);
-        let metadata = store.update(cx, |store, _| {
-            store
-                .ipc_harness_request("metadata", &json!({}))
-                .expect("metadata")
+        let metadata = store.update(cx, |store, cx| {
+            ready(store.ipc_harness_request("metadata", &json!({}), cx)).expect("metadata")
         });
         let harnesses = metadata["harnesses"].as_array().expect("harnesses");
         let ids: Vec<&str> = harnesses
@@ -1030,19 +1330,296 @@ mod tests {
                 .set_harness_enabled("dsh", false, cx)
                 .expect("opencode stays enabled");
         });
-        let metadata = store.update(cx, |store, _| {
-            store
-                .ipc_harness_request("metadata", &json!({}))
-                .expect("metadata")
+        let metadata = store.update(cx, |store, cx| {
+            ready(store.ipc_harness_request("metadata", &json!({}), cx)).expect("metadata")
         });
         assert_eq!(metadata["harnesses"].as_array().unwrap().len(), 1);
-        let error = store.update(cx, |store, _| {
-            store.ipc_harness_request("models", &json!({"harness": "dsh"}))
+        let error = store.update(cx, |store, cx| {
+            ready(store.ipc_harness_request("models", &json!({"harness": "dsh"}), cx))
         });
         assert!(matches!(error, Err(ref detail) if detail.contains("disabled")));
-        let error = store.update(cx, |store, _| {
-            store.ipc_harness_request("no-such-method", &json!({}))
+        let error = store.update(cx, |store, cx| {
+            ready(store.ipc_harness_request("no-such-method", &json!({}), cx))
         });
         assert!(matches!(error, Err(ref detail) if detail.contains("unsupported")));
+    }
+
+    /// A door `harness` call for a method this ticket dispatches to the net
+    /// thread leaves the reply parked under a call id; the result event lands
+    /// it on the wire.
+    #[gpui_kit::gpui::test]
+    fn a_dispatched_method_parks_the_reply_until_the_net_thread_answers(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let _lock = crate::store::test_support::lock_home();
+        let _home = crate::store::test_support::HomeGuard::new();
+        let store = cx.update(Store::for_probe);
+        let (reply, mut received) = tokio::sync::oneshot::channel();
+        store.update(cx, |store, cx| {
+            store.handle_ipc(
+                IpcCommand::Harness {
+                    method: "permissions".into(),
+                    params: json!({"harness": "opencode", "session": "s1"}),
+                    reply,
+                },
+                cx,
+            );
+        });
+        let call_id = store.update(cx, |store, _| {
+            let call_id = *store
+                .ipc_harness_calls
+                .keys()
+                .next()
+                .expect("a parked call");
+            store.ipc_harness_result(call_id, Ok(json!({"permissions": []})));
+            call_id
+        });
+        assert!(call_id > 0);
+        assert_eq!(
+            received.try_recv().expect("the reply fires").unwrap()["permissions"],
+            json!([])
+        );
+    }
+
+    /// A net thread that never answers must not leave a door reply parked.
+    #[gpui_kit::gpui::test]
+    fn a_parked_harness_reply_times_out_instead_of_hanging(cx: &mut gpui::TestAppContext) {
+        let _lock = crate::store::test_support::lock_home();
+        let _home = crate::store::test_support::HomeGuard::new();
+        let store = cx.update(Store::for_probe);
+        let (reply, mut received) = tokio::sync::oneshot::channel();
+        store.update(cx, |store, cx| {
+            store.handle_ipc(
+                IpcCommand::Harness {
+                    method: "diff".into(),
+                    params: json!({"harness": "opencode", "session": "s1"}),
+                    reply,
+                },
+                cx,
+            );
+        });
+        store.update(cx, |store, _| {
+            let call_id = *store
+                .ipc_harness_calls
+                .keys()
+                .next()
+                .expect("a parked call");
+            store.ipc_harness_timeout(call_id);
+            assert!(store.ipc_harness_calls.is_empty());
+        });
+        assert_eq!(
+            received.try_recv().expect("the reply fires").unwrap_err(),
+            "timed out"
+        );
+    }
+
+    /// Unknown ids and disabled harnesses are refused store-side, before any
+    /// adapter or net thread is touched.
+    #[gpui_kit::gpui::test]
+    fn unknown_and_disabled_harnesses_are_refused_before_dispatch(cx: &mut gpui::TestAppContext) {
+        let _lock = crate::store::test_support::lock_home();
+        let _home = crate::store::test_support::HomeGuard::new();
+        let store = cx.update(Store::for_probe);
+        let error = store.update(cx, |store, cx| {
+            ready(store.ipc_harness_request(
+                "permissions",
+                &json!({"harness": "no-such-harness", "session": "s1"}),
+                cx,
+            ))
+            .unwrap_err()
+        });
+        assert_eq!(error, "unknown: harness no-such-harness");
+        store.update(cx, |store, cx| {
+            store
+                .set_harness_enabled("dsh", false, cx)
+                .expect("dsh off");
+        });
+        let error = store.update(cx, |store, cx| {
+            ready(store.ipc_harness_request(
+                "permissions",
+                &json!({"harness": "dsh", "session": "s1"}),
+                cx,
+            ))
+            .unwrap_err()
+        });
+        assert_eq!(error, "disabled: harness dsh is disabled");
+    }
+
+    /// The dispatched call carries the harness, its instance folder, the
+    /// method and the untouched params to the net thread.
+    #[gpui_kit::gpui::test]
+    fn a_dispatch_names_the_harness_folder_method_and_params(cx: &mut gpui::TestAppContext) {
+        let _lock = crate::store::test_support::lock_home();
+        let _home = crate::store::test_support::HomeGuard::new();
+        let (store, net) = cx.update(Store::for_probe_with_net);
+        let answer = store.update(cx, |store, cx| {
+            store.ipc_harness_request(
+                "send_prompt",
+                &json!({
+                    "harness": "opencode",
+                    "directory": "/tmp/door-ws",
+                    "session": "s1",
+                    "text": "hello",
+                }),
+                cx,
+            )
+        });
+        assert!(matches!(answer, HarnessAnswer::Pending(_)));
+        let command = std::iter::from_fn(|| net.try_recv().ok())
+            .find_map(|command| match command {
+                command @ NetCommand::HarnessCall { .. } => Some(command),
+                _ => None,
+            })
+            .expect("a harness call on the wire");
+        let NetCommand::HarnessCall {
+            call_id,
+            harness,
+            method,
+            directory,
+            params,
+            ..
+        } = command
+        else {
+            panic!("expected a harness call");
+        };
+        assert!(call_id > 0);
+        assert_eq!(harness.as_str(), "opencode");
+        assert_eq!(method, "send_prompt");
+        assert_eq!(
+            directory.as_deref(),
+            Some(std::path::Path::new("/tmp/door-ws"))
+        );
+        assert_eq!(params["session"], "s1");
+        assert_eq!(params["text"], "hello");
+    }
+
+    /// `harness start` parks on the app's own server-start bookkeeping and
+    /// answers when the runner reports the boot.
+    #[gpui_kit::gpui::test]
+    fn a_start_answers_when_the_server_started_fact_lands(cx: &mut gpui::TestAppContext) {
+        let _lock = crate::store::test_support::lock_home();
+        let home = crate::store::test_support::HomeGuard::new();
+        let folder = home.home.join("door-workspace");
+        std::fs::create_dir_all(&folder).expect("workspace");
+        let folder = folder.to_string_lossy().to_string();
+        let store = cx.update(Store::for_probe);
+        store.update(cx, |store, cx| {
+            store.add_workspace(&folder, cx);
+        });
+        let (reply, mut received) = tokio::sync::oneshot::channel();
+        store.update(cx, |store, cx| {
+            store.handle_ipc(
+                IpcCommand::Harness {
+                    method: "start".into(),
+                    params: json!({"harness": "opencode", "directory": folder}),
+                    reply,
+                },
+                cx,
+            );
+            assert!(store.ipc_harness_start_calls.len() == 1);
+        });
+        store.update(cx, |store, cx| {
+            store.on_net_event(
+                crate::oc::UiEvent::ServerStarted {
+                    ws_key: folder.clone(),
+                    result: Ok(()),
+                },
+                cx,
+            );
+        });
+        assert_eq!(
+            received.try_recv().expect("the reply fires").unwrap(),
+            json!({"ok": true})
+        );
+    }
+
+    /// Health reads the attached adapter's own state and the managed server's
+    /// latest health poll, without starting anything.
+    #[gpui_kit::gpui::test]
+    fn health_reports_the_adapter_or_the_runtime_state(cx: &mut gpui::TestAppContext) {
+        let _lock = crate::store::test_support::lock_home();
+        let _home = crate::store::test_support::HomeGuard::new();
+        let store = cx.update(Store::for_probe);
+        let health = store.update(cx, |store, cx| {
+            ready(store.ipc_harness_request("health", &json!({"harness": "dsh"}), cx))
+                .expect("health")
+        });
+        assert_eq!(health["state"], "unavailable");
+        assert_eq!(health["detail"], "not running");
+
+        store.update(cx, |store, _| {
+            store.runtimes.insert(
+                "dsh".into(),
+                crate::store::WorkspaceRuntime {
+                    stream_status: crate::oc::StreamStatus::Connected,
+                    healthy: Some(true),
+                },
+            );
+        });
+        let health = store.update(cx, |store, cx| {
+            ready(store.ipc_harness_request("health", &json!({"harness": "dsh"}), cx))
+                .expect("health")
+        });
+        assert_eq!(health["state"], "ready");
+
+        // an attached harness answers from its adapter, not from a runtime
+        store.update(cx, |store, cx| {
+            store
+                .set_harness_enabled("opencode-v2", true, cx)
+                .expect("opencode-v2 on");
+        });
+        store.update(cx, |store, _| {
+            store.attached.insert(
+                HarnessId::new("opencode-v2"),
+                Box::new(crate::harness::test_support::FakeHarness::new(
+                    "opencode-v2",
+                )),
+            );
+        });
+        let health = store.update(cx, |store, cx| {
+            ready(store.ipc_harness_request("health", &json!({"harness": "opencode-v2"}), cx))
+                .expect("health")
+        });
+        assert_eq!(health["state"], "ready");
+    }
+
+    /// Stopping detaches an attached adapter and tears a managed runtime down
+    /// through the same bookkeeping the app uses.
+    #[gpui_kit::gpui::test]
+    fn stop_detaches_attached_and_tears_managed_down(cx: &mut gpui::TestAppContext) {
+        let _lock = crate::store::test_support::lock_home();
+        let _home = crate::store::test_support::HomeGuard::new();
+        let store = cx.update(Store::for_probe);
+        store.update(cx, |store, cx| {
+            store
+                .set_harness_enabled("opencode-v2", true, cx)
+                .expect("opencode-v2 on");
+        });
+        store.update(cx, |store, _| {
+            store.attached.insert(
+                HarnessId::new("opencode-v2"),
+                Box::new(crate::harness::test_support::FakeHarness::new(
+                    "opencode-v2",
+                )),
+            );
+            store.runtimes.insert(
+                "dsh".into(),
+                crate::store::WorkspaceRuntime {
+                    stream_status: crate::oc::StreamStatus::Connected,
+                    healthy: Some(true),
+                },
+            );
+        });
+        for harness in ["opencode-v2", "dsh"] {
+            let result = store.update(cx, |store, cx| {
+                ready(store.ipc_harness_request("stop", &json!({"harness": harness}), cx))
+                    .expect("stop")
+            });
+            assert_eq!(result, json!({"ok": true}));
+        }
+        store.read_with(cx, |store, _| {
+            assert!(!store.attached.contains_key(&HarnessId::new("opencode-v2")));
+            assert!(!store.runtimes.contains_key("dsh"));
+        });
     }
 }

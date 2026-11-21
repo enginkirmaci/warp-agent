@@ -7,6 +7,7 @@
 //! consumes their typed event streams.
 
 pub(crate) mod bridge;
+pub(crate) mod call;
 mod dsh;
 mod host;
 mod interface;

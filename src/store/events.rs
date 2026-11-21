@@ -93,6 +93,8 @@ impl Store {
             }
             UiEvent::ServerStarted { ws_key, result } => match result {
                 Ok(()) => {
+                    // a door `harness start` parked on this boot answers here
+                    self.ipc_harness_started(&ws_key, None);
                     if self.is_shared_key(&ws_key) {
                         self.on_shared_server_started(cx);
                         return;
@@ -189,6 +191,7 @@ impl Store {
                     self.repaint(cx);
                 }
                 Err(err) => {
+                    self.ipc_harness_started(&ws_key, Some(format!("{err:#}")));
                     self.commands_loading.remove(&ws_key);
                     let name = self
                         .workspaces
@@ -292,6 +295,9 @@ impl Store {
                 event,
             } => self.on_harness_event(&harness, directory.as_deref(), event, cx),
             UiEvent::Ipc { command } => self.handle_ipc(command, cx),
+            UiEvent::HarnessCallResult { call_id, result } => {
+                self.ipc_harness_result(call_id, result);
+            }
             UiEvent::StreamStatus { ws_key, status } => {
                 // transitions only — except Reconnecting, where every drop
                 // rewrites the single combined note with its climbing count

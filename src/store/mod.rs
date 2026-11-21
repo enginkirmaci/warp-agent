@@ -449,6 +449,14 @@ pub struct Store {
     /// not a single slot: a second client (or the settings refresh while the
     /// page's first load is still in flight) must not drop the first reply.
     ipc_models_waiters: Vec<(Option<HarnessId>, crate::ipc::Reply)>,
+    /// Door `harness` calls parked on a net-thread answer, keyed by call id;
+    /// a timeout task sweeps one that the net thread never answers.
+    ipc_harness_calls: std::collections::BTreeMap<u64, crate::ipc::Reply>,
+    /// Door `harness start` calls parked on a ServerStarted fact:
+    /// `(harness, call id in ipc_harness_calls)`.
+    ipc_harness_start_calls: Vec<(HarnessId, u64)>,
+    /// The next door harness call id.
+    next_ipc_harness_call: u64,
     /// reused checkout dummy for `with_tile` — hot stream events would
     /// otherwise build a throwaway ChatTile each
     tile_placeholder: Option<ChatTile>,
@@ -621,6 +629,9 @@ impl Store {
             hidden_sessions: HashSet::new(),
             deleted_sessions: ui.deleted_sessions.iter().cloned().collect(),
             ipc_models_waiters: Vec::new(),
+            ipc_harness_calls: std::collections::BTreeMap::new(),
+            ipc_harness_start_calls: Vec::new(),
+            next_ipc_harness_call: 1,
             commands: HashMap::new(),
             commands_loading: HashSet::new(),
             pending_command_tiles: HashSet::new(),
@@ -748,6 +759,16 @@ impl Store {
     pub fn for_probe(cx: &mut App) -> Entity<Self> {
         let (tx, _rx) = async_channel::unbounded();
         Self::new(cx, crate::oc::NetSender(tx))
+    }
+
+    /// The same dead store, with its net channel handed to the test: a probe
+    /// that must read the commands a door call puts on the wire.
+    #[doc(hidden)]
+    pub fn for_probe_with_net(
+        cx: &mut App,
+    ) -> (Entity<Self>, async_channel::Receiver<crate::oc::NetCommand>) {
+        let (tx, rx) = async_channel::unbounded();
+        (Self::new(cx, crate::oc::NetSender(tx)), rx)
     }
 
     // ---- seeds / persistence ----

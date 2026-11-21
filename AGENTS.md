@@ -242,8 +242,13 @@ cargo build -p warp-agent
 
 - The packaged Windows exe uses `windows_subsystem = "windows"`; debug builds
   keep the console.
-- On Linux, `libc` sets `PR_SET_PDEATHSIG` for the spawned `serve`/`dsh`
-  children. If you add a long-lived child, give it the same treatment.
+- Managed `serve`/`dsh` children are spawned from transient blocking workers,
+  so Linux `PR_SET_PDEATHSIG` must not be used: it fires when the *parent
+  thread* exits and killed every child ~20 s after launch. The app owns the
+  child through `kill_on_drop`/`StopServer`, and `oc::reap_stale_children()`
+  sweeps exact managed shapes orphaned by a SIGKILL/SIGTERM on startup. If you
+  add a long-lived child, give it the same normal-quit cleanup and add its
+  argv shape to that sweep.
 - `composer` key overrides are bound after `gpui_kit::init` (inside the
   bootstrap) with `Some("Input")` and `Some("Composer > Input")` contexts. Do
   not make them global.

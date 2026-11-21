@@ -692,6 +692,23 @@ mod tests {
     }
 
     #[test]
+    fn opencode_v2_is_a_first_class_harness_id() {
+        assert_eq!(
+            HarnessKind::from_wire("opencode-v2"),
+            Some(HarnessKind::OpenCodeV2)
+        );
+        assert_eq!(HarnessKind::OpenCodeV2.label(), "opencode-v2");
+        assert_eq!(HarnessKind::OpenCodeV2.option_label(), "opencode v2");
+        assert_eq!(HarnessKind::ALL.len(), 3);
+
+        let mut settings = AppSettings::default();
+        assert!(!settings.harness_enabled("opencode-v2"));
+        settings.harnesses.get_mut("opencode-v2").unwrap().enabled = true;
+        settings.default_harness = HarnessKind::OpenCodeV2;
+        assert_eq!(settings.default_harness_kind(), HarnessKind::OpenCodeV2);
+    }
+
+    #[test]
     fn the_old_settings_file_keeps_its_values_under_new_keys() {
         let dir = scratch("settings");
         let path = dir.join("settings.json");

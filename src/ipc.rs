@@ -6,6 +6,7 @@
 
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
@@ -29,6 +30,15 @@ pub fn read_endpoint() -> Option<(u16, String)> {
 /// fields, Err the error string. Dropping it without sending reads as
 /// "cancelled" on the client.
 pub type Reply = oneshot::Sender<Result<Value, String>>;
+
+/// One connection's filtered harness-event stream.
+#[derive(Clone, Debug)]
+struct Subscription {
+    id: String,
+    harness: Option<String>,
+    session: Option<String>,
+    run: Option<u64>,
+}
 
 /// The per-chat model knobs a door create/run carries. Grouped so the store
 /// side stays under the argument-count lint and the three fields move
@@ -77,6 +87,12 @@ pub enum IpcCommand {
         /// Ask the backend for a fresh list instead of answering from the
         /// in-memory catalog. The settings refresh button sets it.
         refresh: bool,
+        reply: Reply,
+    },
+    /// One app-level harness method through the door's single namespace.
+    Harness {
+        method: String,
+        params: Value,
         reply: Reply,
     },
     Status {
@@ -168,6 +184,7 @@ async fn handle_conn(
     let _ = stream.set_nodelay(true);
     let (read, write) = stream.into_split();
     let (lines_tx, lines_rx) = tokio::sync::mpsc::channel::<String>(64);
+    let subscriptions = Arc::new(Mutex::new(Vec::<Subscription>::new()));
     tokio::spawn(write_pump(write, lines_rx));
     let mut reader = BufReader::new(read);
 
@@ -196,13 +213,40 @@ async fn handle_conn(
             outgoing = events.recv() => {
                 match outgoing {
                     Ok(line) => {
-                        if lines_tx.send(line).await.is_err() {
+                        match harness_event_frames(&line, &subscriptions) {
+                            None => {
+                                if lines_tx.send(line).await.is_err() {
+                                    return;
+                                }
+                            }
+                            Some(frames) => {
+                                for frame in frames {
+                                    if lines_tx.send(frame).await.is_err() {
+                                        return;
+                                    }
+                                }
+                            }
+                        }
+                        continue;
+                    }
+                    Err(broadcast::error::RecvError::Lagged(_)) => {
+                        let overflow = json!({
+                            "event": "subscribe-overflow",
+                            "error": "event stream lagged; resubscribe",
+                        });
+                        if lines_tx.send(overflow.to_string()).await.is_err() {
                             return;
                         }
                         continue;
                     }
-                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
-                    Err(broadcast::error::RecvError::Closed) => return,
+                    Err(broadcast::error::RecvError::Closed) => {
+                        let closed = json!({
+                            "event": "subscribe-closed",
+                            "reason": "app shutting down",
+                        });
+                        let _ = lines_tx.send(closed.to_string()).await;
+                        return;
+                    }
                 }
             }
             incoming = read_line(&mut reader) => match incoming {
@@ -231,6 +275,7 @@ async fn handle_conn(
             id,
             event_tx.clone(),
             lines_tx.clone(),
+            subscriptions.clone(),
         ));
     }
 }
@@ -268,11 +313,54 @@ fn parse_harness(request: &Value) -> Result<Option<HarnessKind>, String> {
     }
 }
 
+/// Filters one broadcast line for a connection's harness subscriptions. `None`
+/// means the line is not a harness event and goes out unchanged; `Some(frames)`
+/// replaces it with one copy per matching subscription (empty = drop it).
+fn harness_event_frames(
+    line: &str,
+    subscriptions: &Mutex<Vec<Subscription>>,
+) -> Option<Vec<String>> {
+    let value: Value = serde_json::from_str(line).ok()?;
+    if value.get("event").and_then(Value::as_str) != Some("harness-event") {
+        return None;
+    }
+    let subscriptions = subscriptions.lock().ok()?;
+    let mut frames = Vec::new();
+    for subscription in subscriptions.iter() {
+        let matches = |expected: Option<&str>, actual: Option<&str>| match expected {
+            Some(expected) => actual == Some(expected),
+            None => true,
+        };
+        if !matches(
+            subscription.harness.as_deref(),
+            value.get("harness").and_then(Value::as_str),
+        ) {
+            continue;
+        }
+        if !matches(
+            subscription.session.as_deref(),
+            value.get("session").and_then(Value::as_str),
+        ) {
+            continue;
+        }
+        if let Some(run) = subscription.run
+            && value.get("run").and_then(Value::as_u64) != Some(run)
+        {
+            continue;
+        }
+        let mut frame = value.clone();
+        frame["subscription"] = json!(subscription.id);
+        frames.push(frame.to_string());
+    }
+    Some(frames)
+}
+
 async fn serve_request(
     request: Value,
     id: u64,
     event_tx: async_channel::Sender<UiEvent>,
     lines: tokio::sync::mpsc::Sender<String>,
+    subscriptions: Arc<Mutex<Vec<Subscription>>>,
 ) {
     let cmd = request
         .get("cmd")
@@ -290,6 +378,42 @@ async fn serve_request(
         (!value.trim().is_empty()).then_some(value)
     };
     let (reply_tx, reply_rx) = oneshot::channel();
+
+    if cmd == cmd::SUBSCRIBE || cmd == cmd::UNSUBSCRIBE {
+        let subscription = request
+            .get("subscription")
+            .and_then(|value| {
+                value
+                    .as_str()
+                    .map(str::to_string)
+                    .or_else(|| value.as_u64().map(|number| number.to_string()))
+            })
+            .unwrap_or_else(|| id.to_string());
+        if cmd == cmd::UNSUBSCRIBE {
+            if let Ok(mut subscriptions) = subscriptions.lock() {
+                subscriptions.retain(|entry| entry.id != subscription);
+            }
+            let _ = reply(
+                &lines,
+                id,
+                Ok(json!({"subscription": subscription, "unsubscribed": true})),
+            )
+            .await;
+            return;
+        }
+        let entry = Subscription {
+            id: subscription.clone(),
+            harness: field("harness"),
+            session: field("session"),
+            run: request.get("run").and_then(Value::as_u64),
+        };
+        if let Ok(mut subscriptions) = subscriptions.lock() {
+            subscriptions.retain(|entry| entry.id != subscription);
+            subscriptions.push(entry);
+        }
+        let _ = reply(&lines, id, Ok(json!({"subscription": subscription}))).await;
+        return;
+    }
 
     let command = match cmd.as_str() {
         cmd::PING => {
@@ -394,6 +518,24 @@ async fn serve_request(
             })
         }
         cmd::STATUS => Some(IpcCommand::Status { reply: reply_tx }),
+        cmd::HARNESS => match field("method") {
+            Some(method) if !method.trim().is_empty() => {
+                let params = request.get("params").cloned().unwrap_or_else(|| json!({}));
+                if !params.is_object() {
+                    let _ = reply(&lines, id, Err("params must be an object".into())).await;
+                    return;
+                }
+                Some(IpcCommand::Harness {
+                    method,
+                    params,
+                    reply: reply_tx,
+                })
+            }
+            _ => {
+                let _ = reply(&lines, id, Err("method is required".into())).await;
+                return;
+            }
+        },
         other => {
             let _ = reply(&lines, id, Err(format!("unknown command: {other}"))).await;
             return;
@@ -534,6 +676,27 @@ mod tests {
                         "harness": harness.map(|harness| harness.label()),
                         "refresh": refresh,
                     })));
+                }
+                IpcCommand::Harness {
+                    method,
+                    params,
+                    reply,
+                } => {
+                    if method == "metadata" {
+                        let _ = reply.send(Ok(json!({
+                            "harnesses": [{
+                                "id": "opencode",
+                                "label": "opencode",
+                                "enabled": true,
+                                "available": true,
+                                "capabilities": {},
+                            }]
+                        })));
+                    } else if params.get("harness").and_then(Value::as_str) == Some("off") {
+                        let _ = reply.send(Err("disabled: harness off is disabled".into()));
+                    } else {
+                        let _ = reply.send(Err(format!("unsupported: harness {method}")));
+                    }
                 }
                 _ => {}
             }
@@ -724,6 +887,105 @@ mod tests {
         assert_eq!(flags_rx.recv().await, Some(false));
 
         drop(client);
+        unpublish(&door);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn door_harness_namespace_and_subscribe_filter() {
+        let dir = scratch_dir("harness-subscribe");
+        let (event_tx, event_rx) = async_channel::unbounded::<UiEvent>();
+        let (broadcast_tx, _) = broadcast::channel::<String>(16);
+        let door = start_in(dir.clone(), event_tx, broadcast_tx.clone())
+            .await
+            .unwrap();
+        tokio::spawn(fake_store(event_rx));
+
+        let mut good = connect(door.port).await;
+        say(&mut good, json!({"auth": door.token})).await;
+        assert!(hear(&mut good).await["ok"].as_bool().unwrap());
+
+        say(
+            &mut good,
+            json!({"id": 1, "cmd": cmd::HARNESS, "method": "metadata"}),
+        )
+        .await;
+        let metadata = hear(&mut good).await;
+        assert!(metadata["ok"].as_bool().unwrap());
+        assert_eq!(metadata["harnesses"][0]["id"], "opencode");
+
+        say(
+            &mut good,
+            json!({
+                "id": 2,
+                "cmd": cmd::HARNESS,
+                "method": "models",
+                "params": {"harness": "off"}
+            }),
+        )
+        .await;
+        let rejected = hear(&mut good).await;
+        assert!(!rejected["ok"].as_bool().unwrap());
+        assert!(rejected["error"].as_str().unwrap().contains("disabled"));
+
+        say(
+            &mut good,
+            json!({
+                "id": 3,
+                "cmd": cmd::SUBSCRIBE,
+                "subscription": "sub-1",
+                "harness": "opencode"
+            }),
+        )
+        .await;
+        let subscribed = hear(&mut good).await;
+        assert_eq!(subscribed["subscription"], "sub-1");
+
+        broadcast_tx
+            .send(
+                json!({
+                    "event": "harness-event",
+                    "harness": "opencode",
+                    "session": "sess-1",
+                    "type": "session-status",
+                    "data": {"state": "busy"}
+                })
+                .to_string(),
+            )
+            .unwrap();
+        let pushed = hear(&mut good).await;
+        assert_eq!(pushed["event"], "harness-event");
+        assert_eq!(pushed["subscription"], "sub-1");
+        assert_eq!(pushed["session"], "sess-1");
+
+        broadcast_tx
+            .send(
+                json!({
+                    "event": "harness-event",
+                    "harness": "dsh",
+                    "session": "sess-2",
+                    "type": "session-status",
+                    "data": {"state": "busy"}
+                })
+                .to_string(),
+            )
+            .unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), hear(&mut good))
+                .await
+                .is_err(),
+            "a non-matching harness event is filtered out"
+        );
+
+        say(
+            &mut good,
+            json!({"id": 4, "cmd": cmd::UNSUBSCRIBE, "subscription": "sub-1"}),
+        )
+        .await;
+        let unsubscribed = hear(&mut good).await;
+        assert_eq!(unsubscribed["unsubscribed"], true);
+
+        drop(good);
         unpublish(&door);
         let _ = std::fs::remove_dir_all(&dir);
     }

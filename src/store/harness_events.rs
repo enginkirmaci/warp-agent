@@ -37,6 +37,7 @@ impl Store {
                 "typed harness events are off".into(),
             ));
         }
+        self.ipc_broadcast_harness_event(harness, &event);
         match event {
             // The host owns connection and health state during the expand
             // phase; the old stream-status path still reports them to the UI.

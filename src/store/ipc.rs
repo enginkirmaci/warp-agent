@@ -9,6 +9,10 @@ use gpui::Context;
 use serde_json::{Value, json};
 
 use super::{Store, normalize_dir};
+use crate::harness::{
+    FormFieldKind, HarnessCapabilities, HarnessEvent, HarnessId, HarnessRegistry, MessageRole,
+    PartPayload, SessionId, SessionState, ToolState,
+};
 use crate::ipc::{DoorModel, IpcCommand, Reply};
 use crate::oc::{ApiRequest, DSH_SERVER_KEY, NetCommand};
 use crate::paths::AppPaths;
@@ -75,10 +79,147 @@ impl Store {
                 refresh,
                 reply,
             } => self.ipc_models(harness, refresh, reply, cx),
+            IpcCommand::Harness {
+                method,
+                params,
+                reply,
+            } => {
+                let _ = reply.send(self.ipc_harness_request(&method, &params));
+            }
             IpcCommand::Status { reply } => {
-                let _ = reply.send(Ok(json!({"workspaces": self.ipc_status_workspaces()})));
+                let _ = reply.send(Ok(json!({
+                    "workspaces": self.ipc_status_workspaces(),
+                    "harnesses": self.ipc_harness_metadata(),
+                })));
             }
         }
+    }
+
+    fn ipc_harness_metadata(&self) -> Vec<Value> {
+        let mut harnesses = Vec::new();
+        for descriptor in HarnessRegistry::builtin().iter() {
+            let id = descriptor.id.as_str();
+            if !self.settings.harness_enabled(id) {
+                continue;
+            }
+            let (state, available) = match id {
+                "opencode" => (
+                    if self
+                        .runtimes
+                        .keys()
+                        .any(|key| key.as_str() != DSH_SERVER_KEY)
+                    {
+                        "ready"
+                    } else {
+                        "stopped"
+                    },
+                    true,
+                ),
+                "dsh" => (
+                    if self.runtimes.contains_key(DSH_SERVER_KEY) {
+                        "ready"
+                    } else {
+                        "stopped"
+                    },
+                    true,
+                ),
+                // the host does not own the v2 instance until the store
+                // wiring ticket; the door reports it as not yet available
+                "opencode-v2" => ("unavailable", false),
+                _ => ("stopped", false),
+            };
+            let connection = match descriptor.connection {
+                crate::harness::ConnectionKind::Managed => "managed",
+                crate::harness::ConnectionKind::Attached => "attached",
+            };
+            harnesses.push(json!({
+                "id": id,
+                "label": descriptor.label,
+                "connection": connection,
+                "enabled": true,
+                "available": available,
+                "state": state,
+                "executable": self.settings.harness_executable(id),
+                "capabilities": harness_capabilities(&descriptor.capabilities),
+            }));
+        }
+        harnesses
+    }
+
+    fn ipc_harness_request(&mut self, method: &str, params: &Value) -> Result<Value, String> {
+        let harness = params.get("harness").and_then(Value::as_str);
+        let require_enabled = |id: &str| -> Result<(), String> {
+            if !HarnessRegistry::builtin().resolve(id).is_ok() {
+                return Err(format!("unknown: harness {id}"));
+            }
+            if !self.settings.harness_enabled(id) {
+                return Err(format!("disabled: harness {id} is disabled"));
+            }
+            Ok(())
+        };
+        match method {
+            "metadata" | "list-harnesses" => Ok(json!({
+                "harnesses": self.ipc_harness_metadata(),
+            })),
+            "status" => Ok(json!({
+                "harnesses": self.ipc_harness_metadata(),
+            })),
+            "models" => {
+                let id = harness.ok_or_else(|| "harness is required".to_string())?;
+                require_enabled(id)?;
+                let Some(kind) = HarnessKind::from_wire(id) else {
+                    return Err(format!(
+                        "unavailable: harness {id} has no model catalog yet"
+                    ));
+                };
+                Ok(self.models_payload(Some(kind)))
+            }
+            "sessions" => {
+                let mut sessions = Vec::new();
+                for tile in &self.open_tiles {
+                    let Some(session) = tile.session_id.as_ref() else {
+                        continue;
+                    };
+                    if let Some(id) = harness
+                        && id != tile.harness.label()
+                    {
+                        continue;
+                    }
+                    sessions.push(json!({
+                        "id": session,
+                        "title": self.title_for(session),
+                        "harness": tile.harness.label(),
+                        "running": self.running_by_session.contains(session),
+                    }));
+                }
+                Ok(json!({ "sessions": sessions }))
+            }
+            "session" => {
+                let session = params
+                    .get("session")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| "session is required".to_string())?;
+                let tile = self.tile_for_session(session);
+                match tile {
+                    Some(tile) => Ok(json!({
+                        "id": session,
+                        "title": self.title_for(session),
+                        "harness": tile.harness.label(),
+                        "running": self.running_by_session.contains(session),
+                    })),
+                    None => Err(format!("not-found: session {session}")),
+                }
+            }
+            other => Err(format!("unsupported: harness method {other}")),
+        }
+    }
+
+    /// Broadcasts one typed event to door subscribers. The connection filters
+    /// on the top-level harness/session/run keys before it forwards a frame.
+    pub(super) fn ipc_broadcast_harness_event(&self, harness: &HarnessId, event: &HarnessEvent) {
+        self.net.send(NetCommand::IpcBroadcast {
+            line: harness_event_wire(harness, event).to_string(),
+        });
     }
 
     /// Opens a workspace from the door or a launch arg: adds it when
@@ -483,6 +624,252 @@ impl Store {
 /// The wire shape of one `models` answer: the released flat `models` key list
 /// plus the harness-qualified `catalog` (variants included) and the harness
 /// options. Kept separate from [`Store`] so the contract is unit-testable.
+fn harness_event_wire(harness: &HarnessId, event: &HarnessEvent) -> Value {
+    let mut frame = json!({"event": "harness-event", "harness": harness.as_str()});
+    let (kind, session, data) = match event {
+        HarnessEvent::Connected => ("connected", None, json!({})),
+        HarnessEvent::Disconnected { reason } => {
+            ("disconnected", None, json!({ "reason": reason }))
+        }
+        HarnessEvent::Health(health) => (
+            "health",
+            None,
+            json!({
+                "state": match health.state {
+                    crate::harness::HealthState::Starting => "starting",
+                    crate::harness::HealthState::Ready => "ready",
+                    crate::harness::HealthState::Unavailable => "unavailable",
+                },
+                "detail": health.detail,
+            }),
+        ),
+        HarnessEvent::SessionCreated {
+            session,
+            title,
+            parent,
+            agent,
+        } => (
+            "session-created",
+            Some(session.as_str()),
+            json!({
+                "title": title,
+                "parent": parent.as_ref().map(SessionId::as_str),
+                "agent": agent,
+            }),
+        ),
+        HarnessEvent::SessionChanged {
+            session,
+            title,
+            parent,
+            agent,
+        } => (
+            "session-changed",
+            Some(session.as_str()),
+            json!({
+                "title": title,
+                "parent": parent.as_ref().map(SessionId::as_str),
+                "agent": agent,
+            }),
+        ),
+        HarnessEvent::SessionDeleted { session } => {
+            ("session-deleted", Some(session.as_str()), json!({}))
+        }
+        HarnessEvent::SessionStatus { session, state } => (
+            "session-status",
+            Some(session.as_str()),
+            json!({
+                "state": match state {
+                    SessionState::Idle => "idle",
+                    SessionState::Busy => "busy",
+                    SessionState::Retry => "retry",
+                },
+            }),
+        ),
+        HarnessEvent::MessageSnapshot { message } => (
+            "message",
+            Some(message.session.as_str()),
+            json!({
+                "id": message.id,
+                "role": match message.role {
+                    MessageRole::User => "user",
+                    MessageRole::Assistant => "assistant",
+                },
+            }),
+        ),
+        HarnessEvent::PartSnapshot { part } => (
+            "part",
+            Some(part.session.as_str()),
+            json!({
+                "id": part.id,
+                "message_id": part.message_id,
+                "payload": part_payload_wire(&part.payload),
+            }),
+        ),
+        HarnessEvent::PartRemoved { session, part_id } => (
+            "part-removed",
+            Some(session.as_str()),
+            json!({"id": part_id}),
+        ),
+        HarnessEvent::PermissionAsked { request } => (
+            "permission-asked",
+            Some(request.session.as_str()),
+            json!({
+                "id": request.id,
+                "action": request.action,
+                "resources": request.resources,
+                "message": request.message,
+                "diff": request.diff,
+            }),
+        ),
+        HarnessEvent::PermissionReplied {
+            session,
+            request,
+            decision,
+        } => (
+            "permission-replied",
+            session.as_ref().map(SessionId::as_str),
+            json!({
+                "id": request,
+                "decision": match decision {
+                    crate::harness::PermissionDecision::Once => "once",
+                    crate::harness::PermissionDecision::Always => "always",
+                    crate::harness::PermissionDecision::Reject => "reject",
+                },
+            }),
+        ),
+        HarnessEvent::QuestionAsked { request } => (
+            "question-asked",
+            Some(request.session.as_str()),
+            json!({
+                "id": request.id,
+                "title": request.title,
+                "fields": request.fields.iter().map(|field| json!({
+                    "id": field.id,
+                    "title": field.title,
+                    "kind": form_field_kind_wire(field.kind),
+                    "required": field.required,
+                    "options": field.options,
+                })).collect::<Vec<_>>(),
+            }),
+        ),
+        HarnessEvent::QuestionResolved {
+            session,
+            request,
+            summary,
+        } => (
+            "question-resolved",
+            session.as_ref().map(SessionId::as_str),
+            json!({"id": request, "summary": summary}),
+        ),
+        HarnessEvent::CommandOutput { session, result } => (
+            "command-output",
+            Some(session.as_str()),
+            match result {
+                Ok(output) => json!({"ok": true, "text": output}),
+                Err(error) => json!({"ok": false, "error": error}),
+            },
+        ),
+        HarnessEvent::ModelsLoaded { models } => {
+            ("models-loaded", None, json!({"count": models.len()}))
+        }
+        HarnessEvent::AgentsLoaded { agents } => {
+            ("agents-loaded", None, json!({"count": agents.len()}))
+        }
+        HarnessEvent::CommandsLoaded {
+            directory,
+            commands,
+        } => (
+            "commands-loaded",
+            None,
+            json!({
+                "directory": directory.as_ref().map(|path| path.to_string_lossy()),
+                "count": commands.len(),
+            }),
+        ),
+        HarnessEvent::SkillsLoaded { directory, skills } => (
+            "skills-loaded",
+            None,
+            json!({
+                "directory": directory.as_ref().map(|path| path.to_string_lossy()),
+                "count": skills.len(),
+            }),
+        ),
+        HarnessEvent::Error {
+            session,
+            message,
+            retryable,
+        } => (
+            "error",
+            session.as_ref().map(SessionId::as_str),
+            json!({"message": message, "retryable": retryable}),
+        ),
+    };
+    frame["type"] = json!(kind);
+    if let Some(session) = session {
+        frame["session"] = json!(session);
+    }
+    frame["data"] = data;
+    frame
+}
+
+fn part_payload_wire(payload: &PartPayload) -> Value {
+    match payload {
+        PartPayload::Text(text) => json!({"kind": "text", "text": text}),
+        PartPayload::Reasoning(text) => json!({"kind": "reasoning", "text": text}),
+        PartPayload::Tool(tool) => json!({
+            "kind": "tool",
+            "name": tool.name,
+            "state": match &tool.state {
+                ToolState::Pending => json!({"kind": "pending"}),
+                ToolState::Running => json!({"kind": "running"}),
+                ToolState::Completed { output } => json!({"kind": "completed", "output": output}),
+                ToolState::Failed { message } => json!({"kind": "failed", "message": message}),
+            },
+            "input": tool.input,
+            "title": tool.title,
+            "metadata": tool.metadata,
+        }),
+        PartPayload::StepStart => json!({"kind": "step-start"}),
+        PartPayload::StepFinish => json!({"kind": "step-finish"}),
+        PartPayload::File(file) => {
+            json!({"kind": "file", "url": file.url, "filename": file.filename})
+        }
+    }
+}
+
+fn form_field_kind_wire(kind: FormFieldKind) -> &'static str {
+    match kind {
+        FormFieldKind::Text => "text",
+        FormFieldKind::Number => "number",
+        FormFieldKind::Integer => "integer",
+        FormFieldKind::Boolean => "boolean",
+        FormFieldKind::Multiselect => "multiselect",
+        FormFieldKind::External => "external",
+    }
+}
+
+fn harness_capabilities(capabilities: &HarnessCapabilities) -> Value {
+    json!({
+        "commands": capabilities.commands,
+        "skills": capabilities.skills,
+        "skill_activation": capabilities.skill_activation,
+        "forms": capabilities.forms,
+        "questions": capabilities.questions,
+        "permissions": capabilities.permissions,
+        "diffs": capabilities.diffs,
+        "subagents": capabilities.subagents,
+        "inbox": capabilities.inbox,
+        "revert": capabilities.revert,
+        "shell": capabilities.shell,
+        "background_sessions": capabilities.background_sessions,
+        "mcp_read": capabilities.mcp_read,
+        "mcp_management": capabilities.mcp_management,
+        "compaction": capabilities.compaction,
+        "fork": capabilities.fork,
+        "multi_location": capabilities.multi_location,
+    })
+}
+
 fn models_payload(
     infos: &[crate::oc::ModelInfo],
     harness: Option<HarnessKind>,
@@ -577,5 +964,46 @@ mod tests {
         assert_eq!(resolve_workspace("general").unwrap(), tasks);
         assert_eq!(resolve_workspace("").unwrap(), tasks);
         assert!(resolve_workspace("/no/such/folder/for-warp-agent").is_err());
+    }
+
+    #[gpui_kit::gpui::test]
+    fn harness_metadata_is_enabled_only_and_carries_capabilities(cx: &mut gpui::TestAppContext) {
+        let _lock = crate::store::test_support::lock_home();
+        let _home = crate::store::test_support::HomeGuard::new();
+        let store = cx.update(Store::for_probe);
+        let metadata = store.update(cx, |store, _| {
+            store
+                .ipc_harness_request("metadata", &json!({}))
+                .expect("metadata")
+        });
+        let harnesses = metadata["harnesses"].as_array().expect("harnesses");
+        let ids: Vec<&str> = harnesses
+            .iter()
+            .filter_map(|harness| harness["id"].as_str())
+            .collect();
+        assert_eq!(ids, ["opencode", "dsh"]);
+        assert_eq!(harnesses[0]["available"], true);
+        assert_eq!(harnesses[0]["capabilities"]["commands"], true);
+        assert_eq!(harnesses[0]["capabilities"]["forms"], false);
+
+        store.update(cx, |store, cx| {
+            store
+                .set_harness_enabled("dsh", false, cx)
+                .expect("opencode stays enabled");
+        });
+        let metadata = store.update(cx, |store, _| {
+            store
+                .ipc_harness_request("metadata", &json!({}))
+                .expect("metadata")
+        });
+        assert_eq!(metadata["harnesses"].as_array().unwrap().len(), 1);
+        let error = store.update(cx, |store, _| {
+            store.ipc_harness_request("models", &json!({"harness": "dsh"}))
+        });
+        assert!(matches!(error, Err(ref detail) if detail.contains("disabled")));
+        let error = store.update(cx, |store, _| {
+            store.ipc_harness_request("no-such-method", &json!({}))
+        });
+        assert!(matches!(error, Err(ref detail) if detail.contains("unsupported")));
     }
 }

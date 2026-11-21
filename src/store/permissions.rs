@@ -470,6 +470,42 @@ impl Store {
         let (Some(answers), Some(session_id)) = (answers, session_id) else {
             return;
         };
+        let summary = answers
+            .iter()
+            .map(|answer| {
+                if answer.is_empty() {
+                    "(empty)".to_string()
+                } else {
+                    answer.join(", ")
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" · ");
+        if self.session_is_attached(&session_id) {
+            // an attached adapter lives in the store, not the net worker;
+            // sending this through NetCommand::Request would be dropped for
+            // want of an instance and the card would stay on "sending …"
+            let harness = self.session_harness(&session_id);
+            let result = self
+                .attached
+                .get_mut(&harness)
+                .ok_or_else(|| format!("{} is not attached", crate::harness::label(&harness)))
+                .and_then(|adapter| {
+                    adapter
+                        .reply_form(
+                            &crate::harness::SessionId::new(session_id),
+                            question_id,
+                            crate::harness::bridge::form_answer_for_ids(&field_ids, answers),
+                        )
+                        .map_err(|err| format!("{err:#}"))
+                });
+            match result {
+                Ok(()) => self.resolve_question(question_id, &summary),
+                Err(err) => self.resolve_question(question_id, &format!("reply failed: {err}")),
+            }
+            self.repaint(cx);
+            return;
+        }
         let Some(ws_key) = self.net_key_for_session(&session_id) else {
             self.resolve_question(question_id, "server unavailable");
             return;

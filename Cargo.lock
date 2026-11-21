@@ -8070,7 +8070,7 @@ dependencies = [
 
 [[package]]
 name = "warp-agent"
-version = "0.1.35"
+version = "0.1.36"
 dependencies = [
  "anyhow",
  "async-channel",

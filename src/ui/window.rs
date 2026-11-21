@@ -3628,6 +3628,17 @@ impl WarpWindow {
                     let store = store.clone();
                     let toggle_id = id.clone();
                     let armed = self.harness_disable_arm.as_deref() == Some(id.as_str());
+                    let attached_state = if crate::harness::attached(&descriptor.id) {
+                        Some(
+                            store
+                                .read(cx)
+                                .attached_status(&descriptor.id)
+                                .cloned()
+                                .unwrap_or_else(|| "stopped".into()),
+                        )
+                    } else {
+                        None
+                    };
                     let label = if armed {
                         format!("Confirm disable {id_label}")
                     } else {
@@ -3636,7 +3647,9 @@ impl WarpWindow {
                     let description = if armed {
                         "A turn is running — click again to stop it and disable the harness"
                     } else {
-                        "Only enabled harnesses appear in the composer and the door"
+                        attached_state
+                            .as_deref()
+                            .unwrap_or("Only enabled harnesses appear in the composer and the door")
                     };
                     rows.push(kit::switch_row_with_desc(
                         SharedString::from(format!("set-{id}-enabled")),

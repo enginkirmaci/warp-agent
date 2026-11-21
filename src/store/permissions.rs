@@ -475,6 +475,7 @@ impl Store {
         self.net.send(NetCommand::Request {
             ws_key,
             request: ApiRequest::ReplyQuestion {
+                session_id,
                 request_id: question_id.to_string(),
                 answers,
             },
@@ -506,6 +507,7 @@ impl Store {
         self.net.send(NetCommand::Request {
             ws_key,
             request: ApiRequest::RejectQuestion {
+                session_id,
                 request_id: question_id.to_string(),
             },
         });

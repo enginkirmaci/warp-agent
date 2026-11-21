@@ -645,9 +645,13 @@ fn harness_event_wire(harness: &HarnessId, event: &HarnessEvent) -> Value {
     let mut frame = json!({"event": "harness-event", "harness": harness.as_str()});
     let (kind, session, data) = match event {
         HarnessEvent::Connected => ("connected", None, json!({})),
+        HarnessEvent::Reconnecting { attempt } => {
+            ("reconnecting", None, json!({ "attempt": attempt }))
+        }
         HarnessEvent::Disconnected { reason } => {
             ("disconnected", None, json!({ "reason": reason }))
         }
+        HarnessEvent::Exited => ("exited", None, json!({})),
         HarnessEvent::Health(health) => (
             "health",
             None,
@@ -726,6 +730,20 @@ fn harness_event_wire(harness: &HarnessId, event: &HarnessEvent) -> Value {
             "part-removed",
             Some(session.as_str()),
             json!({"id": part_id}),
+        ),
+        HarnessEvent::Todos { session, todos } => (
+            "todos",
+            Some(session.as_str()),
+            json!({
+                "todos": todos
+                    .iter()
+                    .map(|todo| json!({
+                        "content": todo.content,
+                        "status": todo.status,
+                        "priority": todo.priority,
+                    }))
+                    .collect::<Vec<_>>(),
+            }),
         ),
         HarnessEvent::PermissionAsked { request } => (
             "permission-asked",

@@ -1,4 +1,4 @@
-//! opencode server + REST/SSE client + the network thread.
+//! opencode server + REST/SSE protocol client + the network thread.
 //!
 //! All network work happens on a dedicated thread running its own tokio
 //! runtime; the GPUI UI talks to it through two async channels (NetCommand in,
@@ -6,9 +6,9 @@
 //! POST is fire-and-forget, assistant output arrives as message.part.updated
 //! events whose "part" carries the full text-so-far each time.
 //!
-//! A second harness, DeepSeek Harness (`dsh web`), rides the same thread: its
-//! client and event translation live in [`crate::dsh`], keyed by the harness
-//! id the registry gives its app-wide instance.
+//! The protocol pieces here are the opencode v1 adapter's transport; the
+//! thread itself routes every managed harness through the adapter registry
+//! (`crate::harness`) and forwards the adapters' typed event streams.
 
 use anyhow::{Context as _, Result, anyhow};
 use serde::{Deserialize, Serialize};
@@ -17,7 +17,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use crate::harness::{HarnessId, LaunchSpec, Readiness};
+use crate::harness::{HarnessHandle, HarnessId, LaunchSpec, Readiness};
 
 pub const ASK_CONFIG: &str = r#"{"$schema":"https://opencode.ai/config.json","permission":{"edit":"ask","bash":"ask","webfetch":"ask"}}"#;
 
@@ -35,8 +35,6 @@ pub const RECONNECT_RESET_AFTER: Duration = Duration::from_secs(60);
 /// Give up reconnecting after this many consecutive failed tries; a
 /// connection that stayed up for [`RECONNECT_RESET_AFTER`] restarts the count.
 pub(crate) const RECONNECT_MAX_ATTEMPTS: u32 = 10;
-/// /global/health poll period feeding the health gauge.
-const HEALTH_POLL_INTERVAL: Duration = Duration::from_secs(10);
 
 // ---- data types ----------------------------------------------------------
 
@@ -117,8 +115,8 @@ pub struct QuestionRequestInfo {
 
 pub struct ServerProcess {
     pub base_url: String,
-    /// dsh only: the launch token printed on stdout. opencode servers have no
-    /// equivalent (None).
+    /// The launch credential a managed child prints on stdout, when the
+    /// descriptor's readiness waits for one (None for a server with none).
     pub token: Option<String>,
     /// behind Arc+Mutex so the health poll can watch for an early exit while
     /// the workspace map on the net thread keeps the owning handle; None for
@@ -593,6 +591,9 @@ impl ApiClient {
         error_for_status(resp).await.map(|_| ())
     }
 
+    /// The server's pending question asks. The adapter's tracked set can miss
+    /// asks that arrived while its event stream was down, so a pull is
+    /// authoritative when it answers.
     pub async fn get_questions(&self) -> Result<Vec<QuestionRequestInfo>> {
         let resp = self
             .rest
@@ -1033,20 +1034,20 @@ pub enum NetCommand {
 
 pub enum ApiRequest {
     ListSessions,
-    /// dsh: one workspace folder's sessions, filtered by cwd from the shared
-    /// server's list. The reply carries the folder as ws_key so the store
-    /// applies it like that workspace's own list.
+    /// One workspace folder's sessions on an app-wide instance, filtered by
+    /// the session's own cwd. The reply carries the folder as ws_key so the
+    /// store applies it like that workspace's own list.
     ListSessionsIn {
         folder: String,
     },
-    /// dsh: create a session owned by `folder` (dsh sessions carry their own
-    /// cwd). The reply carries the folder as ws_key.
+    /// Create a session owned by `folder` on an app-wide instance (its
+    /// sessions carry their own cwd). The reply carries the folder as ws_key.
     CreateSessionIn {
         folder: String,
         title: String,
     },
-    /// dsh: the fork flow — an empty session whose composer is seeded with
-    /// `context` (the dsh server has no parts-append endpoint either).
+    /// The fork flow on an app-wide instance — an empty session whose composer
+    /// is seeded with `context` (there is no parts-append endpoint).
     CreateForkSessionIn {
         folder: String,
         title: String,
@@ -1085,36 +1086,40 @@ pub enum ApiRequest {
     GetQuestions {
         for_session: String,
     },
+    /// Answer one pending question/form; the card knows its session.
     ReplyQuestion {
+        session_id: String,
         request_id: String,
         answers: Vec<Vec<String>>,
     },
+    /// Dismiss one pending question/form.
     RejectQuestion {
+        session_id: String,
         request_id: String,
     },
     /// The workspace's slash commands and skills (GET /command).
     ListCommands,
-    /// dsh: the agent-scoped command + skill catalog (commands/list +
-    /// skills/list). Commands are the builtin actions (`compact`, `plan`, …);
-    /// skills are the workspace instructions. Both need a session id.
+    /// The agent-scoped command + skill catalog. Commands are the builtin
+    /// actions (`compact`, `plan`, …); skills are the workspace instructions.
+    /// Some harnesses need the session id for the catalog's agent scope.
     ListAgentCommands {
         session_id: Option<String>,
     },
-    /// dsh: open a session for a draft's slash menu. Unlike
+    /// Open a session for a draft's slash menu. Unlike
     /// [`ApiRequest::CreateSessionIn`] this carries no prompt: the first real
     /// send reuses the session.
     CreateCommandSession {
         tile_key: String,
         folder: String,
     },
-    /// dsh: run one listed command through commands/execute. Commands are
-    /// log-only; they never become a model message.
+    /// Run one listed command through the harness's command route. Commands
+    /// are log-only; they never become a model message.
     ExecuteCommand {
         session_id: String,
         line: String,
     },
-    /// opencode: compact one session through POST /session/{id}/summarize.
-    /// `model` is the tile's "provider/model"; the endpoint needs both halves.
+    /// Compact one session through the harness's own compaction route. `model`
+    /// is the tile's "provider/model"; opencode's endpoint needs both halves.
     CompactSession {
         session_id: String,
         model: String,
@@ -1185,6 +1190,14 @@ pub enum UiEvent {
     Event {
         ws_key: String,
         event: Value,
+    },
+    /// One typed harness event from a managed adapter. The store ingests it
+    /// through the same typed seam the attached adapter uses; `directory` is
+    /// the per-workspace instance's folder, absent for an app-wide harness.
+    HarnessEvent {
+        harness: HarnessId,
+        directory: Option<String>,
+        event: crate::harness::HarnessEvent,
     },
     StreamStatus {
         ws_key: String,
@@ -1299,14 +1312,20 @@ pub enum UiEvent {
     },
 }
 
-struct WorkspaceNet {
+// ---- the net thread -------------------------------------------------------
+//
+// Every managed harness runs through its adapter. The net thread asks the
+// registry factory for an instance (through the host), starts it and forwards
+// the adapter's typed event stream to the store; requests are dispatched to
+// the same instance. The thread itself owns no protocol.
+
+/// One running managed harness: the adapter behind it and the task forwarding
+/// its typed events to the store.
+struct RunningHarness {
     harness: HarnessId,
-    process: Option<ServerProcess>,
-    api: ApiClient,
-    /// The shared app-wide server's web client; its event pump feeds
-    /// UiEvents that are already opencode-shaped.
-    shared: Option<crate::dsh::DshHandle>,
-    event_stop: Option<async_channel::Sender<()>>,
+    scope: Option<std::path::PathBuf>,
+    handle: HarnessHandle,
+    pump: tokio::task::JoinHandle<()>,
 }
 
 /// Cloneable handle the UI uses to talk to the net thread.
@@ -1326,6 +1345,19 @@ pub fn spawn_net_thread() -> (
     NetSender,
     async_channel::Receiver<UiEvent>,
 ) {
+    spawn_net_thread_with(crate::harness::HarnessRegistry::builtin())
+}
+
+/// The same thread over an explicit registry: the seam a test drives with the
+/// fake adapter instead of a real harness.
+#[doc(hidden)]
+pub fn spawn_net_thread_with(
+    registry: crate::harness::HarnessRegistry,
+) -> (
+    std::thread::JoinHandle<()>,
+    NetSender,
+    async_channel::Receiver<UiEvent>,
+) {
     let (command_tx, command_rx) = async_channel::unbounded::<NetCommand>();
     let (event_tx, event_rx) = async_channel::unbounded::<UiEvent>();
     let handle = std::thread::Builder::new()
@@ -1335,23 +1367,17 @@ pub fn spawn_net_thread() -> (
                 .enable_all()
                 .build()
                 .expect("tokio runtime");
-            rt.block_on(net_main(command_rx, event_tx));
+            rt.block_on(net_main(registry, command_rx, event_tx));
         })
         .expect("net thread");
     (handle, NetSender(command_tx), event_rx)
 }
 
 async fn net_main(
+    registry: crate::harness::HarnessRegistry,
     command_rx: async_channel::Receiver<NetCommand>,
     event_tx: async_channel::Sender<UiEvent>,
 ) {
-    // Server boots run in their own tasks (audit B3), so the map is shared
-    // with them; a boot in flight is tracked separately so a duplicate start
-    // request does not spawn a second child, and a stop can cancel it.
-    let workspaces: Arc<Mutex<HashMap<String, WorkspaceNet>>> =
-        Arc::new(Mutex::new(HashMap::new()));
-    let starting: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
-    let start_cancelled: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
     // the DevTools door rides this runtime; a bind failure logs and the app
     // keeps working — the door is an integration, not a dependency
     let (door_tx, _) = tokio::sync::broadcast::channel::<String>(64);
@@ -1362,6 +1388,30 @@ async fn net_main(
             None
         }
     };
+    net_loop(registry, command_rx, event_tx, &door_tx).await;
+    if let Some(door) = &door {
+        crate::ipc::unpublish(door);
+    }
+}
+
+/// The command loop, without the door: the seam the net tests drive directly.
+async fn net_loop(
+    registry: crate::harness::HarnessRegistry,
+    command_rx: async_channel::Receiver<NetCommand>,
+    event_tx: async_channel::Sender<UiEvent>,
+    door_tx: &tokio::sync::broadcast::Sender<String>,
+) {
+    // Instances are created through the registry and owned by the host; the
+    // map below tracks which net keys have a live adapter and event pump.
+    let host = Arc::new(Mutex::new(crate::harness::HarnessHost::new(
+        registry.clone(),
+    )));
+    let instances: Arc<Mutex<HashMap<String, RunningHarness>>> =
+        Arc::new(Mutex::new(HashMap::new()));
+    // a boot in flight is tracked separately so a duplicate start request does
+    // not spawn a second child, and a stop can cancel it
+    let starting: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
+    let start_cancelled: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
     while let Ok(command) = command_rx.recv().await {
         match command {
             NetCommand::StartServer {
@@ -1370,11 +1420,9 @@ async fn net_main(
                 executable,
                 folder,
             } => {
-                // A boot can take 25–40 s; awaiting it here froze every other
-                // command behind it, and StopServer could not even cancel it
-                // (audit B3). Spawn it and keep the lane free.
-                let running = workspaces.lock().expect("workspaces").contains_key(&ws_key);
-                if running {
+                // A boot can take 25–40 s; awaiting it here would freeze every
+                // other command behind it. Spawn it and keep the lane free.
+                if instances.lock().expect("instances").contains_key(&ws_key) {
                     continue;
                 }
                 let claimed = {
@@ -1398,37 +1446,74 @@ async fn net_main(
                 if !claimed {
                     continue;
                 }
-                let workspaces = Arc::clone(&workspaces);
+                let host = Arc::clone(&host);
+                let instances = Arc::clone(&instances);
                 let starting = Arc::clone(&starting);
                 let cancelled = Arc::clone(&start_cancelled);
                 let event_tx = event_tx.clone();
+                let workspace_scoped = registry.get(&harness).is_some_and(|descriptor| {
+                    descriptor.scope == crate::harness::InstanceScope::Workspace
+                });
                 tokio::spawn(async move {
-                    let result =
-                        start_workspace(&ws_key, &harness, &executable, &folder, &event_tx).await;
+                    // the descriptor's scope decides whether this is a
+                    // per-workspace instance or the one app-wide singleton
+                    let directory = if workspace_scoped {
+                        Some(std::path::PathBuf::from(&folder))
+                    } else {
+                        None
+                    };
+                    let scope = directory.clone();
+                    let start_host = Arc::clone(&host);
+                    let start_harness = harness.clone();
+                    let start_directory = directory.clone();
+                    let started = tokio::task::spawn_blocking(move || -> Result<HarnessHandle> {
+                        let handle = start_host
+                            .lock()
+                            .expect("harness host")
+                            .ensure_instance(
+                                &start_harness,
+                                &executable,
+                                start_directory.as_deref(),
+                            )
+                            .map_err(|err| anyhow!("{err}"))?;
+                        handle
+                            .lock()
+                            .expect("harness instance")
+                            .start()
+                            .map_err(|err| anyhow!("{err}"))?;
+                        Ok(handle)
+                    })
+                    .await;
+                    let result = match started {
+                        Ok(result) => result,
+                        Err(err) => Err(anyhow!("harness start task failed: {err}")),
+                    };
                     starting.lock().expect("starting").remove(&ws_key);
                     // a stop that landed while booting wins: tear the child
                     // down and stay silent (StopServer already announced)
-                    if cancelled
+                    let cancelled = cancelled
                         .lock()
                         .expect("start cancellation")
-                        .remove(&ws_key)
-                    {
-                        if let Ok(mut workspace) = result {
-                            if let Some(stop) = workspace.event_stop.take() {
-                                stop.close();
-                            }
-                            if let Some(process) = workspace.process.as_mut() {
-                                process.stop();
-                            }
-                        }
-                        return;
-                    }
+                        .remove(&ws_key);
                     match result {
-                        Ok(workspace) => {
-                            workspaces
-                                .lock()
-                                .expect("workspaces")
-                                .insert(ws_key.clone(), workspace);
+                        Ok(handle) if !cancelled => {
+                            let events = handle.lock().expect("harness instance").events();
+                            let pump = tokio::spawn(forward_events(
+                                events,
+                                ws_key.clone(),
+                                harness.clone(),
+                                directory.clone(),
+                                event_tx.clone(),
+                            ));
+                            instances.lock().expect("instances").insert(
+                                ws_key.clone(),
+                                RunningHarness {
+                                    harness,
+                                    scope,
+                                    handle,
+                                    pump,
+                                },
+                            );
                             let _ = event_tx
                                 .send(UiEvent::ServerStarted {
                                     ws_key,
@@ -1436,11 +1521,37 @@ async fn net_main(
                                 })
                                 .await;
                         }
+                        Ok(handle) => {
+                            // cancelled mid-boot: undo the instance entirely so
+                            // its runtime and child cannot linger
+                            let removed = host
+                                .lock()
+                                .expect("harness host")
+                                .remove_instance_at(&harness, scope.as_deref());
+                            let handle = removed.unwrap_or(handle);
+                            let _ = tokio::task::spawn_blocking(move || {
+                                let mut instance = handle.lock().expect("harness instance");
+                                let _ = instance.stop();
+                            })
+                            .await;
+                        }
                         Err(err) => {
+                            // a failed boot leaves no half-started instance
+                            let failed = host
+                                .lock()
+                                .expect("harness host")
+                                .remove_instance_at(&harness, scope.as_deref());
+                            if let Some(handle) = failed {
+                                let _ = tokio::task::spawn_blocking(move || {
+                                    let mut instance = handle.lock().expect("harness instance");
+                                    let _ = instance.stop();
+                                })
+                                .await;
+                            }
                             let _ = event_tx
                                 .send(UiEvent::ServerStarted {
                                     ws_key,
-                                    result: Err(anyhow!("{err}")),
+                                    result: Err(err),
                                 })
                                 .await;
                         }
@@ -1454,16 +1565,22 @@ async fn net_main(
                     .lock()
                     .expect("start cancellation")
                     .insert(ws_key.clone());
-                let workspace = workspaces.lock().expect("workspaces").remove(&ws_key);
-                if let Some(mut ws) = workspace {
-                    // close (not a single token): every task selecting on this
-                    // channel — event pump and health poll — wakes and exits
-                    if let Some(stop) = ws.event_stop.take() {
-                        stop.close();
-                    }
-                    if let Some(process) = ws.process.as_mut() {
-                        process.stop();
-                    }
+                let entry = instances.lock().expect("instances").remove(&ws_key);
+                if let Some(entry) = entry {
+                    entry.pump.abort();
+                    // take the instance out of the host so its runtime and
+                    // child are freed instead of lingering per stopped key
+                    let removed = host
+                        .lock()
+                        .expect("harness host")
+                        .remove_instance_at(&entry.harness, entry.scope.as_deref());
+                    let handle = removed.unwrap_or(entry.handle);
+                    // a stop kills a child; never hold the command lane on a
+                    // request that still owns the instance
+                    drop(tokio::task::spawn_blocking(move || {
+                        let mut instance = handle.lock().expect("harness instance");
+                        let _ = instance.stop();
+                    }));
                 }
                 let _ = event_tx.send(UiEvent::ServerStopped).await;
             }
@@ -1543,38 +1660,43 @@ async fn net_main(
                 });
             }
             NetCommand::Request { ws_key, request } => {
-                // clone the runner out of the map before any await: the lock
-                // must never be held across a request
-                let target = {
-                    let workspaces = workspaces.lock().expect("workspaces");
-                    workspaces
-                        .get(&ws_key)
-                        .map(|ws| (ws.harness.clone(), ws.api.clone(), ws.shared.clone()))
-                };
-                let Some((harness, client, shared)) = target else {
+                let target = instance_for(&instances, &ws_key);
+                let Some((harness, directory, handle)) = target else {
                     continue;
                 };
+                let app_scope = registry.get(&harness).is_some_and(|descriptor| {
+                    descriptor.scope == crate::harness::InstanceScope::App
+                });
                 let event_tx = event_tx.clone();
-                if crate::harness::attached(&harness) {
-                    let event = UiEvent::Log {
-                        ws_key: ws_key.clone(),
-                        line: format!("{harness} requests go through its harness adapter"),
-                    };
-                    let _ = event_tx.send(event).await;
-                } else if crate::harness::shared_server(&harness) {
-                    let Some(handle) = shared else {
-                        continue;
-                    };
-                    tokio::spawn(async move {
-                        let event = crate::dsh::run_request(&handle, ws_key, request).await;
-                        let _ = event_tx.send(event).await;
-                    });
-                } else {
-                    tokio::spawn(async move {
-                        let event = run_request(&client, ws_key, request).await;
-                        let _ = event_tx.send(event).await;
-                    });
-                }
+                let ws_key = ws_key.clone();
+                tokio::spawn(async move {
+                    let target_ws = ws_key.clone();
+                    let result = tokio::task::spawn_blocking(move || {
+                        dispatch_request(
+                            &handle,
+                            &harness,
+                            directory.as_deref(),
+                            app_scope,
+                            &target_ws,
+                            request,
+                        )
+                    })
+                    .await;
+                    match result {
+                        Ok(Some(event)) => {
+                            let _ = event_tx.send(event).await;
+                        }
+                        Ok(None) => {}
+                        Err(err) => {
+                            let _ = event_tx
+                                .send(UiEvent::Log {
+                                    ws_key,
+                                    line: format!("harness request failed: {err}"),
+                                })
+                                .await;
+                        }
+                    }
+                });
             }
             NetCommand::SendMessage {
                 ws_key,
@@ -1586,13 +1708,8 @@ async fn net_main(
                 attachments,
                 command,
             } => {
-                let target = {
-                    let workspaces = workspaces.lock().expect("workspaces");
-                    workspaces
-                        .get(&ws_key)
-                        .map(|ws| (ws.harness.clone(), ws.api.clone(), ws.shared.clone()))
-                };
-                let Some((harness, client, shared)) = target else {
+                let target = instance_for(&instances, &ws_key);
+                let Some((_, _, handle)) = target else {
                     // don't drop silently — the tile would sit "running" forever
                     let _ = event_tx
                         .send(UiEvent::MessageSendFailed {
@@ -1603,585 +1720,484 @@ async fn net_main(
                     continue;
                 };
                 let event_tx = event_tx.clone();
-                if crate::harness::attached(&harness) {
-                    let _ = event_tx
-                        .send(UiEvent::MessageSendFailed {
-                            session_id: session_id.clone(),
-                            error: format!("{harness} sends through its harness adapter"),
-                        })
-                        .await;
-                } else if crate::harness::shared_server(&harness) {
-                    let Some(handle) = shared else {
-                        let _ = event_tx
-                            .send(UiEvent::MessageSendFailed {
-                                session_id: session_id.clone(),
-                                error: "this chat's workspace server is not running".into(),
-                            })
-                            .await;
-                        continue;
-                    };
-                    tokio::spawn(async move {
-                        // slash text goes out verbatim: the shared server
-                        // expands it itself
-                        let result = crate::dsh::send_message(
-                            &handle,
-                            &session_id,
-                            &text,
-                            model.as_deref(),
-                            variant.as_deref(),
-                            agent.as_deref(),
-                            &attachments,
-                        )
-                        .await;
-                        if let Err(err) = result {
-                            let _ = event_tx
-                                .send(UiEvent::MessageSendFailed {
-                                    session_id,
-                                    error: format!("{err:#}"),
-                                })
-                                .await;
-                        }
-                    });
-                } else {
-                    tokio::spawn(async move {
-                        send_with_blips(
-                            &client,
-                            session_id,
-                            text,
+                tokio::spawn(async move {
+                    let prompt = crate::harness::Prompt {
+                        text,
+                        choice: crate::harness::ModelChoice {
                             model,
-                            variant,
                             agent,
-                            attachments,
-                            command,
-                            &event_tx,
-                        )
-                        .await;
-                    });
-                }
+                            variant,
+                        },
+                        background: false,
+                        attachments: attachments
+                            .into_iter()
+                            .map(|(filename, mime, bytes)| crate::harness::Attachment {
+                                filename,
+                                mime,
+                                bytes,
+                            })
+                            .collect(),
+                        command: command
+                            .map(|(name, text)| crate::harness::CommandRun { name, text }),
+                    };
+                    let session = crate::harness::SessionId::new(session_id.clone());
+                    let result = tokio::task::spawn_blocking(move || {
+                        handle
+                            .lock()
+                            .expect("harness instance")
+                            .send_prompt(&session, prompt)
+                    })
+                    .await;
+                    let error = match result {
+                        Ok(Ok(())) => None,
+                        Ok(Err(err)) => Some(err.to_string()),
+                        Err(err) => Some(format!("harness send task failed: {err}")),
+                    };
+                    if let Some(error) = error {
+                        let _ = event_tx
+                            .send(UiEvent::MessageSendFailed { session_id, error })
+                            .await;
+                    }
+                });
             }
             NetCommand::ForgetSession { session_id } => {
-                let handle = {
-                    let workspaces = workspaces.lock().expect("workspaces");
-                    workspaces
-                        .values()
-                        .find(|ws| crate::harness::shared_server(&ws.harness))
-                        .and_then(|ws| ws.shared.clone())
+                let Some(shared) = crate::harness::shared_server_id() else {
+                    continue;
                 };
-                if let Some(handle) = handle {
-                    handle.forget_session(&session_id);
-                }
+                let handle = instances
+                    .lock()
+                    .expect("instances")
+                    .get(shared.as_str())
+                    .map(|entry| Arc::clone(&entry.handle));
+                let Some(handle) = handle else {
+                    continue;
+                };
+                let session = crate::harness::SessionId::new(session_id);
+                drop(tokio::task::spawn_blocking(move || {
+                    let _ = handle
+                        .lock()
+                        .expect("harness instance")
+                        .forget_session(&session);
+                }));
             }
             NetCommand::IpcBroadcast { line } => {
                 let _ = door_tx.send(line);
             }
         }
     }
-    // shutdown: stop every spawned server and its pump
-    let remaining: Vec<WorkspaceNet> = workspaces
+    // shutdown: stop every spawned adapter and its pump
+    let remaining: Vec<RunningHarness> = instances
         .lock()
-        .expect("workspaces")
+        .expect("instances")
         .drain()
-        .map(|(_, workspace)| workspace)
+        .map(|(_, entry)| entry)
         .collect();
-    for mut workspace in remaining {
-        if let Some(stop) = workspace.event_stop.take() {
-            stop.close();
-        }
-        if let Some(process) = workspace.process.as_mut() {
-            process.stop();
-        }
+    for entry in remaining {
+        entry.pump.abort();
+        let mut instance = entry.handle.lock().expect("harness instance");
+        let _ = instance.stop();
     }
-    if let Some(door) = &door {
-        crate::ipc::unpublish(door);
-    }
+    let _ = host.lock().expect("harness host").shutdown();
 }
 
-async fn start_workspace(
+/// The running harness a net key names, with what a request needs to reach it.
+fn instance_for(
+    instances: &Arc<Mutex<HashMap<String, RunningHarness>>>,
     ws_key: &str,
-    harness: &HarnessId,
-    executable: &str,
-    folder: &str,
-    event_tx: &async_channel::Sender<UiEvent>,
-) -> Result<WorkspaceNet> {
-    let Some(spec) = crate::harness::registry()
-        .get(harness)
-        .and_then(|descriptor| descriptor.launch)
-    else {
-        return Err(anyhow!("{harness} is not a managed server"));
-    };
-    let port = find_free_port()?;
-    let log_tx = event_tx.clone();
-    let key = ws_key.to_string();
-    let process = ServerProcess::start(
-        spec,
-        executable,
-        folder,
-        port,
-        Box::new(move |line| {
-            // sync closure: send_blocking; unbounded channel so it never blocks
-            let _ = log_tx.send_blocking(UiEvent::Log {
-                ws_key: key.clone(),
-                line,
-            });
-        }),
-    )
-    .await?;
-    let base_url = process.base_url.clone();
-    let api = ApiClient::new(&base_url);
+) -> Option<(HarnessId, Option<std::path::PathBuf>, HarnessHandle)> {
+    instances
+        .lock()
+        .expect("instances")
+        .get(ws_key)
+        .map(|entry| {
+            (
+                entry.harness.clone(),
+                entry.scope.clone(),
+                Arc::clone(&entry.handle),
+            )
+        })
+}
 
-    if crate::harness::shared_server(harness) {
-        let token = process
-            .token
-            .clone()
-            .ok_or_else(|| anyhow!("dsh web started without a launch token"))?;
-        let (stop_tx, stop_rx) = async_channel::bounded::<()>(1);
-        let (frame_tx, frame_rx) = async_channel::bounded::<String>(64);
-        let handle = crate::dsh::DshHandle::new(&base_url, &token, frame_tx);
-        let pump_tx = event_tx.clone();
-        let pump_key = ws_key.to_string();
-        let pump_handle = handle.clone();
-        let pump_stop = stop_rx.clone();
-        tokio::spawn(async move {
-            crate::dsh::run_pump(pump_handle, pump_key, pump_tx, pump_stop, frame_rx).await;
-        });
-        // liveness: the child process plus the HTTP server answering at all
-        // (any status — the trust fence's 401 included); the WS connection
-        // state itself drives StreamStatus
-        let poll_tx = event_tx.clone();
-        let poll_key = ws_key.to_string();
-        let poll_handle = handle.clone();
-        let poll_probe = Arc::clone(&process.child);
-        tokio::spawn(async move {
-            loop {
-                if child_exited(&poll_probe) {
-                    tracing::warn!("[{poll_key}] dsh web exited — reporting crash");
-                    let _ = poll_tx
-                        .send(UiEvent::ServerCrashed {
-                            ws_key: poll_key.clone(),
-                        })
-                        .await;
-                    return;
-                }
-                let healthy = tokio::select! {
-                    _ = stop_rx.recv() => return,
-                    healthy = poll_handle.alive() => healthy,
-                };
-                let _ = poll_tx
-                    .send(UiEvent::HealthChanged {
-                        ws_key: poll_key.clone(),
-                        healthy: Some(healthy),
-                    })
-                    .await;
-                tokio::select! {
-                    _ = stop_rx.recv() => return,
-                    _ = tokio::time::sleep(HEALTH_POLL_INTERVAL) => {}
-                }
-            }
-        });
-        return Ok(WorkspaceNet {
-            harness: harness.clone(),
-            process: Some(process),
-            api,
-            shared: Some(handle),
-            event_stop: Some(stop_tx),
-        });
-    }
-
-    // event pump + health poll; both select on the same stop channel, closed
-    // by StopServer to cancel them together
-    let (stop_tx, stop_rx) = async_channel::bounded::<()>(1);
-    let pump_tx = event_tx.clone();
-    let pump_key = ws_key.to_string();
-    let pump_client = ApiClient::new(&base_url);
-    let was_connected = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let pump_stop = stop_rx.clone(); // the health poll below keeps the original
-    tokio::spawn(async move {
-        use std::sync::atomic::Ordering;
-        let stop_rx = pump_stop;
-        let mut attempts = 0u32;
-        let mut delay = RECONNECT_INITIAL;
-        loop {
-            // per-attempt cancel channel: shutdown goes through stop_rx (the
-            // select below drops the whole future, closing the SSE response);
-            // this one only satisfies stream_events' own select for the pass
-            let (cancel_tx, cancel_rx) = async_channel::bounded::<()>(1);
-            let started = std::time::Instant::now();
-            let on_event = {
-                let pump_tx = pump_tx.clone();
-                let pump_key = pump_key.clone();
-                move |event: Value| {
-                    // sync callback: send_blocking; unbounded channel so it never blocks
-                    let _ = pump_tx.send_blocking(UiEvent::Event {
-                        ws_key: pump_key.clone(),
-                        event,
-                    });
-                }
-            };
-            let on_attached = {
-                let pump_tx = pump_tx.clone();
-                let pump_key = pump_key.clone();
-                let was_connected = was_connected.clone();
-                move || {
-                    was_connected.store(true, Ordering::Release);
-                    let _ = pump_tx.send_blocking(UiEvent::StreamStatus {
-                        ws_key: pump_key.clone(),
-                        status: StreamStatus::Connected,
-                    });
-                }
-            };
-            tokio::select! {
-                _ = stop_rx.recv() => return,
-                result = pump_client.stream_events(on_event, on_attached, cancel_rx) => {
-                    drop(cancel_tx);
-                    if let Err(err) = result {
-                        tracing::warn!("[{pump_key}] event stream dropped: {err:#}");
-                    } else {
-                        tracing::info!("[{pump_key}] event stream ended");
-                    }
-                }
-            }
-            // a connection that lasted a while restarts the ladder and the
-            // attempt count; a fast drop continues both, so flapping servers
-            // pace themselves out and eventually give up
-            if started.elapsed() >= RECONNECT_RESET_AFTER {
-                attempts = 0;
-                delay = RECONNECT_INITIAL;
-            }
-            attempts += 1;
-            if attempts >= RECONNECT_MAX_ATTEMPTS {
-                tracing::error!(
-                    "[{pump_key}] event stream still down after {RECONNECT_MAX_ATTEMPTS} attempts — giving up"
-                );
-                let _ = pump_tx.send_blocking(UiEvent::StreamStatus {
-                    ws_key: pump_key.clone(),
-                    status: StreamStatus::Failed,
-                });
-                return;
-            }
-            // one Reconnecting per drop — retries inside the gate below stay quiet
-            if was_connected.swap(false, Ordering::AcqRel) {
-                let _ = pump_tx.send_blocking(UiEvent::StreamStatus {
-                    ws_key: pump_key.clone(),
-                    status: StreamStatus::Reconnecting { attempt: attempts },
-                });
-            }
-            // paced wait + health gate: the sleep is the pacing mechanism, the
-            // health probe only keeps a still-down server from churning SSE
-            // handshakes at every tick. Every failure doubles the wait —
-            // a failed probe while the server is down, and a failed attach
-            // once it answers again — unlike doubling on probes alone, which
-            // kept a health-but-not-SSE server retrying once a second forever.
-            loop {
-                tokio::select! {
-                    _ = stop_rx.recv() => return,
-                    _ = tokio::time::sleep(delay) => {}
-                }
-                let healthy = tokio::select! {
-                    _ = stop_rx.recv() => return,
-                    healthy = is_healthy(&pump_client.stream_http, &pump_client.base_url) => healthy,
-                };
-                if healthy {
-                    break;
-                }
-                tracing::debug!("[{pump_key}] server still down, next retry in {delay:?}");
-                delay = (delay * 2).min(RECONNECT_MAX);
-            }
-            delay = (delay * 2).min(RECONNECT_MAX);
-        }
-    });
-
-    // server health poll: /global/health every 10 s feeds the gauge's
-    // "connected but degraded" color; the store dedupes unchanged answers.
-    // Each tick first checks the spawned child: an exited serve can never
-    // come back on its own, so the store gets a ServerCrashed to restart it
-    let poll_tx = event_tx.clone();
-    let poll_key = ws_key.to_string();
-    let poll_client = ApiClient::new(&base_url);
-    let poll_probe = Arc::clone(&process.child);
-    tokio::spawn(async move {
-        loop {
-            if child_exited(&poll_probe) {
-                tracing::warn!("[{poll_key}] serve process exited — reporting crash");
-                let _ = poll_tx
-                    .send(UiEvent::ServerCrashed {
-                        ws_key: poll_key.clone(),
-                    })
-                    .await;
-                return;
-            }
-            let healthy = tokio::select! {
-                _ = stop_rx.recv() => return,
-                healthy = is_healthy(&poll_client.stream_http, &poll_client.base_url) => healthy,
-            };
-            let _ = poll_tx
-                .send(UiEvent::HealthChanged {
-                    ws_key: poll_key.clone(),
-                    healthy: Some(healthy),
+/// Forward one adapter's typed stream to the store: connection, health and
+/// process-exit facts become their app-level notifications, everything else
+/// travels as the typed event the store ingests.
+async fn forward_events(
+    events: async_channel::Receiver<crate::harness::HarnessEvent>,
+    ws_key: String,
+    harness: HarnessId,
+    directory: Option<std::path::PathBuf>,
+    event_tx: async_channel::Sender<UiEvent>,
+) {
+    while let Ok(event) = events.recv().await {
+        // the store's "connected to the event stream" note keys off this
+        // app-level frame, not the typed connection fact
+        if matches!(&event, crate::harness::HarnessEvent::Connected) {
+            let _ = event_tx
+                .send(UiEvent::Event {
+                    ws_key: ws_key.clone(),
+                    event: json!({ "type": "server.connected" }),
                 })
                 .await;
-            tokio::select! {
-                _ = stop_rx.recv() => return,
-                _ = tokio::time::sleep(HEALTH_POLL_INTERVAL) => {}
-            }
         }
-    });
-
-    Ok(WorkspaceNet {
-        harness: harness.clone(),
-        process: Some(process),
-        api,
-        shared: None,
-        event_stop: Some(stop_tx),
-    })
-}
-
-/// opencode send with the quiet connect-blip retry (a failure in the connect
-/// phase never reached the server, so a re-POST cannot double-send).
-#[expect(
-    clippy::too_many_arguments,
-    reason = "single private caller already holds these pieces; a param struct would just re-pack them"
-)]
-async fn send_with_blips(
-    client: &ApiClient,
-    session_id: String,
-    text: String,
-    model: Option<String>,
-    variant: Option<String>,
-    agent: Option<String>,
-    attachments: Vec<(String, String, std::sync::Arc<Vec<u8>>)>,
-    command: Option<(String, String)>,
-    event_tx: &async_channel::Sender<UiEvent>,
-) {
-    let mut blips = 0u32;
-    let result = loop {
-        let attempt = match &command {
-            Some((name, args)) => {
-                client
-                    .send_command(
-                        &session_id,
-                        name,
-                        args,
-                        model.as_deref(),
-                        variant.as_deref(),
-                        agent.as_deref(),
-                        &attachments,
-                    )
-                    .await
-            }
-            None => {
-                client
-                    .send_message(
-                        &session_id,
-                        &text,
-                        model.as_deref(),
-                        variant.as_deref(),
-                        agent.as_deref(),
-                        &attachments,
-                    )
-                    .await
-            }
+        let out = match event {
+            crate::harness::HarnessEvent::Connected => UiEvent::StreamStatus {
+                ws_key: ws_key.clone(),
+                status: StreamStatus::Connected,
+            },
+            crate::harness::HarnessEvent::Reconnecting { attempt } => UiEvent::StreamStatus {
+                ws_key: ws_key.clone(),
+                status: StreamStatus::Reconnecting { attempt },
+            },
+            crate::harness::HarnessEvent::Disconnected { .. } => UiEvent::StreamStatus {
+                ws_key: ws_key.clone(),
+                status: StreamStatus::Failed,
+            },
+            crate::harness::HarnessEvent::Exited => UiEvent::ServerCrashed {
+                ws_key: ws_key.clone(),
+            },
+            crate::harness::HarnessEvent::Health(health) => UiEvent::HealthChanged {
+                ws_key: ws_key.clone(),
+                healthy: Some(health.state == crate::harness::HealthState::Ready),
+            },
+            event => UiEvent::HarnessEvent {
+                harness: harness.clone(),
+                directory: directory
+                    .as_ref()
+                    .map(|directory| directory.to_string_lossy().into_owned()),
+                event,
+            },
         };
-        match attempt {
-            Ok(()) => break Ok(()),
-            Err(err) if blips < 2 && is_connect_blip(&err) => {
-                blips += 1;
-                tracing::warn!("send to {session_id} could not connect, retry {blips}/2: {err:#}");
-                tokio::time::sleep(Duration::from_millis(1500 * blips as u64)).await;
-            }
-            Err(err) => break Err(err),
+        if event_tx.send(out).await.is_err() {
+            return;
         }
-    };
-    if let Err(err) = result {
-        let _ = event_tx
-            .send(UiEvent::MessageSendFailed {
-                session_id,
-                error: format!("{err:#}"),
-            })
-            .await;
     }
 }
 
-/// True when a request failed in the connect phase (nothing was sent, the
-/// server was unreachable) — a re-POST cannot double-send.
-fn is_connect_blip(err: &anyhow::Error) -> bool {
-    err.chain()
-        .filter_map(|cause| cause.downcast_ref::<reqwest::Error>())
-        .any(|e| e.is_connect())
-}
+/// One control request, dispatched to the instance the net key names.
+///
+/// The answers keep the store's existing app-level shape; a request whose
+/// result arrives later on the adapter's event stream (a command, say) answers
+/// with `None`.
+fn dispatch_request(
+    handle: &HarnessHandle,
+    harness: &HarnessId,
+    directory: Option<&std::path::Path>,
+    app_scope: bool,
+    ws_key: &str,
+    request: ApiRequest,
+) -> Option<UiEvent> {
+    use crate::harness::{ModelChoice, NewSession, SessionId, bridge};
 
-async fn run_request(client: &ApiClient, ws_key: String, request: ApiRequest) -> UiEvent {
+    let mut instance = handle.lock().expect("harness instance");
     match request {
-        ApiRequest::ListSessions => UiEvent::SessionsLoaded {
-            ws_key,
-            shared: false,
-            result: client.list_sessions().await,
-        },
-        // dsh-only requests never reach the opencode runner (net_main routes
-        // by workspace kind); answering with a list would prune the workspace's
-        // real dsh chats, so log the misrouting instead
-        ApiRequest::ListSessionsIn { folder } => UiEvent::Log {
-            ws_key,
-            line: format!("dsh session list for {folder} misrouted to an opencode runner"),
-        },
-        ApiRequest::CreateSessionIn { folder, .. } => UiEvent::SessionCreated {
-            ws_key: folder,
-            result: Err(anyhow!("dsh request routed to an opencode server")),
-        },
-        ApiRequest::CreateForkSessionIn { folder, .. } => UiEvent::ForkSessionCreated {
-            ws_key: folder,
-            context: String::new(),
-            result: Err(anyhow!("dsh request routed to an opencode server")),
-        },
-        ApiRequest::ListModels => UiEvent::ModelsLoaded {
-            harness: workspace_harness_id(),
-            result: client.get_models().await,
-        },
-        ApiRequest::ListAgents => UiEvent::AgentsLoaded {
-            result: client.get_agents().await,
-        },
-        ApiRequest::GetMessages { session_id } => UiEvent::MessagesLoaded {
-            ws_key,
-            session_id: session_id.clone(),
-            result: client.get_messages(&session_id).await,
-        },
-        ApiRequest::CreateSession { title } => UiEvent::SessionCreated {
-            ws_key,
-            result: client.create_session(&title).await,
-        },
-        ApiRequest::CreateForkSession { title, context } => UiEvent::ForkSessionCreated {
-            ws_key,
+        ApiRequest::ListSessions => Some(UiEvent::SessionsLoaded {
+            ws_key: ws_key.to_string(),
+            shared: app_scope,
+            result: typed(instance.sessions())
+                .map(|sessions| sessions.into_iter().map(bridge::session_info).collect()),
+        }),
+        ApiRequest::ListSessionsIn { folder } => {
+            let result = typed(instance.sessions()).map(|sessions| {
+                sessions
+                    .into_iter()
+                    .filter(|summary| {
+                        summary.directory.as_ref().is_some_and(|directory| {
+                            directory.to_string_lossy().as_ref() == folder.as_str()
+                        })
+                    })
+                    .map(bridge::session_info)
+                    .collect()
+            });
+            Some(UiEvent::SessionsLoaded {
+                ws_key: folder,
+                shared: true,
+                result,
+            })
+        }
+        ApiRequest::CreateSessionIn { folder, title } => {
+            let result = typed(instance.create_session(NewSession {
+                title: Some(title),
+                parent: None,
+                directory: Some(std::path::PathBuf::from(&folder)),
+                choice: ModelChoice::default(),
+            }))
+            .map(bridge::session_info);
+            Some(UiEvent::SessionCreated {
+                ws_key: folder,
+                result,
+            })
+        }
+        ApiRequest::CreateForkSessionIn {
+            folder,
+            title,
             context,
-            result: client.create_session(&title).await,
-        },
+        } => {
+            let result = typed(instance.create_session(NewSession {
+                title: Some(title),
+                parent: None,
+                directory: Some(std::path::PathBuf::from(&folder)),
+                choice: ModelChoice::default(),
+            }))
+            .map(bridge::session_info);
+            Some(UiEvent::ForkSessionCreated {
+                ws_key: folder,
+                context,
+                result,
+            })
+        }
+        ApiRequest::ListModels => Some(UiEvent::ModelsLoaded {
+            harness: harness.clone(),
+            result: typed(instance.models()).map(|models| bridge::model_infos(harness, models)),
+        }),
+        ApiRequest::ListAgents => Some(UiEvent::AgentsLoaded {
+            result: typed(instance.agents()).map(bridge::agent_infos),
+        }),
+        ApiRequest::GetMessages { session_id } => {
+            let result = typed(instance.transcript(&SessionId::new(session_id.clone())))
+                .map(bridge::stored_messages);
+            Some(UiEvent::MessagesLoaded {
+                ws_key: ws_key.to_string(),
+                session_id,
+                result,
+            })
+        }
+        ApiRequest::CreateSession { title } => {
+            let result = typed(instance.create_session(NewSession {
+                title: Some(title),
+                parent: None,
+                directory: directory.map(std::path::Path::to_path_buf),
+                choice: ModelChoice::default(),
+            }))
+            .map(bridge::session_info);
+            Some(UiEvent::SessionCreated {
+                ws_key: ws_key.to_string(),
+                result,
+            })
+        }
+        ApiRequest::CreateForkSession { title, context } => {
+            let result = typed(instance.create_session(NewSession {
+                title: Some(title),
+                parent: None,
+                directory: directory.map(std::path::Path::to_path_buf),
+                choice: ModelChoice::default(),
+            }))
+            .map(bridge::session_info);
+            Some(UiEvent::ForkSessionCreated {
+                ws_key: ws_key.to_string(),
+                context,
+                result,
+            })
+        }
         ApiRequest::RenameSession { session_id, title } => {
-            let result = client.rename_session(&session_id, &title).await;
-            UiEvent::SessionRenamed { session_id, result }
+            let result = typed(
+                instance.rename_session(&SessionId::new(session_id.clone()), &title),
+            )
+            .map(|()| SessionInfo {
+                id: session_id.clone(),
+                title: title.clone(),
+                updated_ms: now_ms(),
+                created_ms: 0,
+                parent_id: None,
+            });
+            Some(UiEvent::SessionRenamed { session_id, result })
         }
-        ApiRequest::DeleteSession { session_id } => {
-            let result = client.delete_session(&session_id).await;
-            UiEvent::SessionDeleted { session_id, result }
-        }
-        ApiRequest::Abort { session_id } => {
-            let result = client.abort(&session_id).await;
-            UiEvent::Aborted { session_id, result }
-        }
+        ApiRequest::DeleteSession { session_id } => Some(UiEvent::SessionDeleted {
+            session_id: session_id.clone(),
+            result: typed(instance.delete_session(&SessionId::new(session_id))),
+        }),
+        ApiRequest::Abort { session_id } => Some(UiEvent::Aborted {
+            session_id: session_id.clone(),
+            result: typed(instance.interrupt(&SessionId::new(session_id))),
+        }),
         ApiRequest::RespondPermission {
             session_id,
             permission_id,
             response,
         } => {
-            let result = client
-                .respond_permission(&session_id, &permission_id, &response)
-                .await;
-            UiEvent::PermissionReplied {
+            let decision = match response.as_str() {
+                "always" => crate::harness::PermissionDecision::Always,
+                "reject" => crate::harness::PermissionDecision::Reject,
+                _ => crate::harness::PermissionDecision::Once,
+            };
+            let result = typed(instance.reply_permission(
+                &SessionId::new(session_id),
+                &permission_id,
+                decision,
+            ));
+            Some(UiEvent::PermissionReplied {
                 permission_id,
                 response,
                 is_auto: false,
                 result,
-            }
+            })
         }
-        ApiRequest::GetQuestions { for_session } => UiEvent::QuestionsPulled {
-            for_session,
-            result: client.get_questions().await,
-        },
+        ApiRequest::GetQuestions { for_session } => Some(UiEvent::QuestionsPulled {
+            for_session: for_session.clone(),
+            result: typed(instance.forms(&SessionId::new(for_session)))
+                .map(bridge::question_requests),
+        }),
         ApiRequest::ReplyQuestion {
+            session_id,
             request_id,
             answers,
         } => {
             let summary = answers
                 .iter()
-                .map(|a| {
-                    if a.is_empty() {
+                .map(|answer| {
+                    if answer.is_empty() {
                         "(empty)".to_string()
                     } else {
-                        a.join(", ")
+                        answer.join(", ")
                     }
                 })
                 .collect::<Vec<_>>()
                 .join(" · ");
-            let result = client.reply_question(&request_id, &answers).await;
-            UiEvent::QuestionReplied {
+            let result = typed(instance.reply_form(
+                &SessionId::new(session_id),
+                &request_id,
+                bridge::form_answer(answers),
+            ));
+            Some(UiEvent::QuestionReplied {
                 request_id,
                 summary,
                 result,
-            }
+            })
         }
-        ApiRequest::RejectQuestion { request_id } => {
-            let result = client.reject_question(&request_id).await;
-            UiEvent::QuestionReplied {
+        ApiRequest::RejectQuestion {
+            session_id,
+            request_id,
+        } => {
+            let result = typed(instance.reply_form(
+                &SessionId::new(session_id),
+                &request_id,
+                crate::harness::FormAnswer::default(),
+            ));
+            Some(UiEvent::QuestionReplied {
                 request_id,
                 summary: "dismissed".into(),
                 result,
+            })
+        }
+        ApiRequest::ListCommands => Some(UiEvent::CommandsLoaded {
+            ws_key: ws_key.to_string(),
+            result: command_catalog(&mut **instance, None),
+        }),
+        ApiRequest::ListAgentCommands { session_id } => {
+            let session = session_id.map(SessionId::new);
+            Some(UiEvent::CommandsLoaded {
+                ws_key: ws_key.to_string(),
+                result: command_catalog(&mut **instance, session.as_ref()),
+            })
+        }
+        ApiRequest::CreateCommandSession { tile_key, folder } => {
+            let result = typed(instance.create_session(NewSession {
+                title: Some("New chat".into()),
+                parent: None,
+                directory: Some(std::path::PathBuf::from(&folder)),
+                choice: ModelChoice::default(),
+            }))
+            .map(bridge::session_info);
+            Some(UiEvent::CommandSessionCreated {
+                tile_key,
+                ws_key: folder,
+                result,
+            })
+        }
+        ApiRequest::ExecuteCommand { session_id, line } => {
+            let result = typed(
+                instance.run_command(&SessionId::new(session_id.clone()), command_run(&line)),
+            );
+            match result {
+                // the adapter reports the command's answer on its stream
+                Ok(()) => None,
+                Err(err) => Some(UiEvent::CommandExecuted {
+                    session_id,
+                    result: Err(err),
+                }),
             }
         }
-        ApiRequest::ListCommands => UiEvent::CommandsLoaded {
-            ws_key,
-            result: client.get_commands().await,
-        },
-        ApiRequest::CompactSession { session_id, model } => {
-            let result = client.compact_session(&session_id, &model).await;
-            UiEvent::SessionCompacted { session_id, result }
-        }
-        // dsh-only requests never route to an opencode workspace; answer the
-        // list ones so a misroute cannot leave the menu loading forever
-        ApiRequest::ListAgentCommands { .. } => UiEvent::CommandsLoaded {
-            ws_key,
-            result: Ok(Vec::new()),
-        },
-        ApiRequest::CreateCommandSession { .. } | ApiRequest::ExecuteCommand { .. } => {
-            UiEvent::Log {
-                ws_key,
-                line: "dsh-only request hit the opencode runner".into(),
-            }
-        }
-        ApiRequest::FindFiles { query } => UiEvent::FilesFound {
-            ws_key,
+        ApiRequest::CompactSession { session_id, .. } => Some(UiEvent::SessionCompacted {
+            session_id: session_id.clone(),
+            result: typed(instance.compact(&SessionId::new(session_id))),
+        }),
+        ApiRequest::FindFiles { query } => Some(UiEvent::FilesFound {
+            ws_key: ws_key.to_string(),
             query: query.clone(),
-            result: client.find_files(&query).await,
-        },
-        ApiRequest::ListMcpNames => UiEvent::McpNamesLoaded {
-            ws_key,
-            result: client.get_config().await.map(|v| mcp_names(&v)),
-        },
+            result: typed(instance.find_files(&query)),
+        }),
+        ApiRequest::ListMcpNames => Some(match instance.mcp_servers() {
+            Ok(servers) => UiEvent::McpNamesLoaded {
+                ws_key: ws_key.to_string(),
+                result: Ok(servers.into_iter().map(|server| server.name).collect()),
+            },
+            Err(err) => UiEvent::Log {
+                ws_key: ws_key.to_string(),
+                line: format!("mcp: {err}"),
+            },
+        }),
         ApiRequest::McpConnect { name } => {
-            let line = match client.mcp_connect(&name).await {
+            let line = match instance.connect_mcp(&name) {
                 Ok(()) => format!("mcp: connect {name}"),
-                Err(err) => format!("mcp: connect {name} failed: {err:#}"),
+                Err(err) => format!("mcp: connect {name} failed: {err}"),
             };
-            UiEvent::Log { ws_key, line }
+            Some(UiEvent::Log {
+                ws_key: ws_key.to_string(),
+                line,
+            })
         }
         ApiRequest::McpDisconnect { name } => {
-            let line = match client.mcp_disconnect(&name).await {
+            let line = match instance.disconnect_mcp(&name) {
                 Ok(()) => format!("mcp: disconnect {name}"),
-                Err(err) => format!("mcp: disconnect {name} failed: {err:#}"),
+                Err(err) => format!("mcp: disconnect {name} failed: {err}"),
             };
-            UiEvent::Log { ws_key, line }
+            Some(UiEvent::Log {
+                ws_key: ws_key.to_string(),
+                line,
+            })
         }
     }
 }
 
-/// The `mcp` section's server names from a merged /config answer, in stable
-/// name order. Non-object entries are not servers and are skipped.
-fn mcp_names(config: &Value) -> Vec<String> {
-    let mut names: Vec<String> = config
-        .get("mcp")
-        .and_then(Value::as_object)
-        .map(|mcp| {
-            mcp.iter()
-                .filter(|(_, entry)| entry.is_object())
-                .map(|(name, _)| name.clone())
-                .collect()
-        })
-        .unwrap_or_default();
-    names.sort();
-    names
+/// An adapter failure as the store's app-level result.
+fn typed<T>(result: Result<T, crate::harness::HarnessError>) -> Result<T> {
+    result.map_err(|err| anyhow!("{err}"))
+}
+
+fn command_catalog(
+    instance: &mut dyn crate::harness::Harness,
+    session: Option<&crate::harness::SessionId>,
+) -> Result<Vec<CommandInfo>> {
+    let commands = instance.commands(session).map_err(|err| anyhow!("{err}"))?;
+    let skills = instance.skills(session).map_err(|err| anyhow!("{err}"))?;
+    Ok(crate::harness::bridge::command_infos(commands, skills))
+}
+
+/// The `(name, args)` a slash line names; `line` arrives with its `/`.
+fn command_run(line: &str) -> crate::harness::CommandRun {
+    let trimmed = line.trim().trim_start_matches('/');
+    match trimmed.split_once(char::is_whitespace) {
+        Some((name, args)) => crate::harness::CommandRun {
+            name: name.to_string(),
+            text: args.trim().to_string(),
+        },
+        None => crate::harness::CommandRun {
+            name: trimmed.to_string(),
+            text: String::new(),
+        },
+    }
+}
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis() as i64)
+        .unwrap_or(0)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::store::decode_base64;
-    use serde_json::json;
 
     #[test]
     fn base64_roundtrips_rfc4648_vectors() {
@@ -2205,26 +2221,436 @@ mod tests {
         assert_eq!(decode_base64("not*base64"), None);
     }
 
-    #[test]
-    fn mcp_names_parses_section_and_skips_non_objects() {
-        let config = json!({
-            "mcp": {
-                "wiki": { "type": "remote", "url": "http://x" },
-                "broken": "not a server",
-                "tools": { "type": "local", "command": ["npx"] }
-            },
-            "agent": {}
-        });
-        assert_eq!(
-            mcp_names(&config),
-            vec!["tools".to_string(), "wiki".to_string()]
-        );
+    fn fake_handle(id: &str, fake: crate::harness::test_support::FakeHarness) -> HarnessHandle {
+        let _ = id;
+        Arc::new(Mutex::new(Box::new(fake)))
+    }
+
+    fn a_summary(id: &str, title: &str, folder: Option<&str>) -> crate::harness::SessionSummary {
+        crate::harness::SessionSummary {
+            id: crate::harness::SessionId::new(id),
+            title: title.to_string(),
+            parent: None,
+            directory: folder.map(std::path::PathBuf::from),
+            updated_ms: 7,
+            created_ms: 3,
+        }
     }
 
     #[test]
-    fn mcp_names_handles_missing_and_empty_sections() {
-        assert!(mcp_names(&json!({ "agent": {} })).is_empty());
-        assert!(mcp_names(&json!({ "mcp": {} })).is_empty());
-        assert!(mcp_names(&json!({ "mcp": "garbage" })).is_empty());
+    fn a_session_list_request_is_answered_from_the_adapter() {
+        use crate::harness::test_support::FakeHarness;
+
+        let handle = fake_handle(
+            "opencode",
+            FakeHarness::with_sessions("opencode", vec![a_summary("s1", "Chat", Some("/tmp/ws"))]),
+        );
+        let event = dispatch_request(
+            &handle,
+            &HarnessId::new("opencode"),
+            Some(std::path::Path::new("/tmp/ws")),
+            false,
+            "/tmp/ws",
+            ApiRequest::ListSessions,
+        )
+        .expect("a sessions answer");
+        let UiEvent::SessionsLoaded {
+            ws_key,
+            shared,
+            result,
+        } = event
+        else {
+            panic!("expected a sessions answer");
+        };
+        assert_eq!(ws_key, "/tmp/ws");
+        assert!(!shared);
+        let sessions = result.expect("the adapter lists sessions");
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].id, "s1");
+        assert_eq!(sessions[0].updated_ms, 7);
+        assert_eq!(sessions[0].created_ms, 3);
+    }
+
+    #[test]
+    fn a_folder_list_filters_an_app_wide_instance() {
+        use crate::harness::test_support::FakeHarness;
+
+        let handle = fake_handle(
+            "dsh",
+            FakeHarness::with_sessions(
+                "dsh",
+                vec![
+                    a_summary("mine", "Mine", Some("/tmp/ws")),
+                    a_summary("other", "Other", Some("/tmp/other")),
+                ],
+            ),
+        );
+        let event = dispatch_request(
+            &handle,
+            &HarnessId::new("dsh"),
+            None,
+            true,
+            "dsh",
+            ApiRequest::ListSessionsIn {
+                folder: "/tmp/ws".into(),
+            },
+        )
+        .expect("a sessions answer");
+        let UiEvent::SessionsLoaded {
+            ws_key,
+            shared,
+            result,
+        } = event
+        else {
+            panic!("expected a sessions answer");
+        };
+        assert_eq!(ws_key, "/tmp/ws");
+        assert!(shared, "an app-wide instance's folder list is shared");
+        let sessions = result.expect("the adapter lists sessions");
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].id, "mine");
+    }
+
+    #[test]
+    fn a_create_request_carries_the_folder_and_title() {
+        use crate::harness::test_support::FakeHarness;
+
+        let handle = fake_handle(
+            "dsh",
+            FakeHarness::with_created_session("dsh", a_summary("s1", "New chat", None)),
+        );
+        let event = dispatch_request(
+            &handle,
+            &HarnessId::new("dsh"),
+            None,
+            true,
+            "dsh",
+            ApiRequest::CreateSessionIn {
+                folder: "/tmp/ws".into(),
+                title: "New chat".into(),
+            },
+        )
+        .expect("a create answer");
+        let UiEvent::SessionCreated { ws_key, result } = event else {
+            panic!("expected a create answer");
+        };
+        assert_eq!(ws_key, "/tmp/ws");
+        let info = result.expect("the adapter creates the session");
+        assert_eq!(info.id, "s1");
+        assert_eq!(info.title, "New chat");
+    }
+
+    #[test]
+    fn a_command_catalog_merges_commands_and_skills() {
+        use crate::harness::test_support::FakeHarness;
+
+        let handle = fake_handle(
+            "opencode",
+            FakeHarness::with_commands(
+                "opencode",
+                vec![crate::harness::Command {
+                    name: "Plan".into(),
+                    description: "draft a plan".into(),
+                }],
+                vec![crate::harness::Skill {
+                    id: "review".into(),
+                    name: "Review".into(),
+                    description: "review a change".into(),
+                }],
+            ),
+        );
+        let event = dispatch_request(
+            &handle,
+            &HarnessId::new("opencode"),
+            Some(std::path::Path::new("/tmp/ws")),
+            false,
+            "/tmp/ws",
+            ApiRequest::ListCommands,
+        )
+        .expect("a catalog answer");
+        let UiEvent::CommandsLoaded { ws_key, result } = event else {
+            panic!("expected a catalog answer");
+        };
+        assert_eq!(ws_key, "/tmp/ws");
+        let commands = result.expect("the adapter lists commands");
+        assert_eq!(commands.len(), 2);
+        assert_eq!(commands[0].name_lower, "plan");
+        assert_eq!(commands[0].source, "command");
+        assert_eq!(commands[1].name_lower, "review");
+        assert_eq!(commands[1].source, "skill");
+    }
+
+    #[test]
+    fn an_execute_command_dispatches_and_waits_for_the_event() {
+        use crate::harness::test_support::FakeHarness;
+
+        let fake = FakeHarness::new("dsh");
+        let recorded = Arc::clone(&fake.commands_run);
+        let handle = fake_handle("dsh", fake);
+        let event = dispatch_request(
+            &handle,
+            &HarnessId::new("dsh"),
+            None,
+            true,
+            "dsh",
+            ApiRequest::ExecuteCommand {
+                session_id: "s1".into(),
+                line: "/plan the migration".into(),
+            },
+        );
+        assert!(event.is_none(), "the command answers on the event stream");
+        let recorded = recorded.lock().expect("recorded commands").clone();
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(recorded[0].name, "plan");
+        assert_eq!(recorded[0].text, "the migration");
+    }
+
+    #[test]
+    fn the_event_forwarder_maps_facts_and_tags_data_events() {
+        use crate::harness::{HarnessEvent, PartPayload, PartSnapshot, SessionId};
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("forwarder runtime");
+        runtime.block_on(async {
+            let (events_tx, events_rx) = async_channel::unbounded();
+            let (event_tx, event_rx) = async_channel::unbounded();
+            let task = tokio::spawn(forward_events(
+                events_rx,
+                "dsh".into(),
+                HarnessId::new("dsh"),
+                None,
+                event_tx,
+            ));
+            let _ = events_tx.send(HarnessEvent::Connected).await;
+            let _ = events_tx.send(HarnessEvent::Exited).await;
+            let _ = events_tx
+                .send(HarnessEvent::PartSnapshot {
+                    part: PartSnapshot {
+                        id: "p1".into(),
+                        session: SessionId::new("s1"),
+                        message_id: "m1".into(),
+                        payload: PartPayload::Text("hi".into()),
+                    },
+                })
+                .await;
+            let _ = events_tx
+                .send(HarnessEvent::Reconnecting { attempt: 2 })
+                .await;
+            drop(events_tx);
+            task.await.expect("the forwarder ends with its stream");
+
+            let mut frames = Vec::new();
+            while let Ok(event) = event_rx.try_recv() {
+                frames.push(event);
+            }
+            assert_eq!(frames.len(), 5);
+            assert!(matches!(&frames[0], UiEvent::Event { event, .. }
+                if event.get("type").and_then(Value::as_str) == Some("server.connected")));
+            assert!(matches!(
+                &frames[1],
+                UiEvent::StreamStatus {
+                    status: StreamStatus::Connected,
+                    ..
+                }
+            ));
+            assert!(matches!(&frames[2], UiEvent::ServerCrashed { .. }));
+            let UiEvent::HarnessEvent {
+                harness,
+                directory,
+                event: HarnessEvent::PartSnapshot { part },
+            } = &frames[3]
+            else {
+                panic!("a data event is forwarded tagged with its harness");
+            };
+            assert_eq!(harness.as_str(), "dsh");
+            assert!(directory.is_none());
+            assert_eq!(part.id, "p1");
+            assert!(matches!(
+                &frames[4],
+                UiEvent::StreamStatus {
+                    status: StreamStatus::Reconnecting { attempt: 2 },
+                    ..
+                }
+            ));
+        });
+    }
+
+    fn wait_for(
+        events: &async_channel::Receiver<UiEvent>,
+        matcher: impl Fn(&UiEvent) -> bool,
+    ) -> UiEvent {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            match events.try_recv() {
+                Ok(event) => {
+                    if matcher(&event) {
+                        return event;
+                    }
+                }
+                Err(async_channel::TryRecvError::Empty) => {
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "timed out waiting for a net event"
+                    );
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Err(async_channel::TryRecvError::Closed) => panic!("the net thread ended"),
+            }
+        }
+    }
+
+    #[test]
+    fn the_net_thread_routes_a_harness_through_its_adapter() {
+        use crate::harness::test_support::FakeHarness;
+        use crate::harness::{
+            ConnectionKind, HarnessCapabilities, HarnessConfig, HarnessDescriptor, HarnessEvent,
+            HarnessRegistry, InstanceScope,
+        };
+
+        const FAKE: &str = "fake";
+        fn factory(_config: HarnessConfig) -> Box<dyn crate::harness::Harness> {
+            Box::new(
+                FakeHarness::with_sessions(
+                    FAKE,
+                    vec![a_summary("s1", "Fake chat", Some("/tmp/fake-ws"))],
+                )
+                .scripted(vec![HarnessEvent::SessionCreated {
+                    session: crate::harness::SessionId::new("s1"),
+                    title: Some("Fake chat".into()),
+                    parent: None,
+                    agent: None,
+                }]),
+            )
+        }
+
+        let mut registry = HarnessRegistry::new();
+        registry
+            .register(HarnessDescriptor {
+                id: HarnessId::new(FAKE),
+                label: "fake",
+                default_executable: "fake",
+                connection: ConnectionKind::Managed,
+                scope: InstanceScope::App,
+                capabilities: HarnessCapabilities::NONE,
+                launch: None,
+                factory: Some(factory),
+            })
+            .expect("the fake registers");
+
+        let (command_tx, command_rx) = async_channel::unbounded();
+        let (event_tx, events) = async_channel::unbounded();
+        let (door_tx, _) = tokio::sync::broadcast::channel::<String>(8);
+        let thread = std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .expect("net runtime");
+            runtime.block_on(net_loop(registry, command_rx, event_tx, &door_tx));
+        });
+        let net = NetSender(command_tx);
+
+        net.send(NetCommand::StartServer {
+            ws_key: FAKE.into(),
+            harness: HarnessId::new(FAKE),
+            executable: "fake".into(),
+            folder: ".".into(),
+        });
+        wait_for(&events, |event| {
+            matches!(event, UiEvent::ServerStarted { result: Ok(()), .. })
+        });
+
+        net.send(NetCommand::Request {
+            ws_key: FAKE.into(),
+            request: ApiRequest::ListSessions,
+        });
+        let answered = wait_for(&events, |event| {
+            matches!(event, UiEvent::SessionsLoaded { result: Ok(_), .. })
+        });
+        let UiEvent::SessionsLoaded { result, .. } = answered else {
+            unreachable!()
+        };
+        assert_eq!(result.expect("the adapter lists sessions").len(), 1);
+
+        net.send(NetCommand::SendMessage {
+            ws_key: FAKE.into(),
+            session_id: "s1".into(),
+            text: "hello".into(),
+            model: None,
+            variant: None,
+            agent: None,
+            attachments: Vec::new(),
+            command: None,
+        });
+        let forwarded = wait_for(&events, |event| {
+            matches!(
+                event,
+                UiEvent::HarnessEvent {
+                    event: HarnessEvent::SessionCreated { .. },
+                    ..
+                }
+            )
+        });
+        let UiEvent::HarnessEvent { harness, event, .. } = forwarded else {
+            unreachable!()
+        };
+        assert_eq!(harness.as_str(), FAKE);
+        assert!(
+            matches!(event, HarnessEvent::SessionCreated { session, .. } if session.as_str() == "s1")
+        );
+
+        net.send(NetCommand::StopServer {
+            ws_key: FAKE.into(),
+        });
+        wait_for(&events, |event| matches!(event, UiEvent::ServerStopped));
+        drop(net);
+        thread.join().expect("the net thread stops");
+    }
+
+    #[test]
+    fn a_blocking_task_can_drive_an_adapter_runtime() {
+        let net = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .expect("net runtime");
+        let value = net.block_on(async {
+            tokio::task::spawn_blocking(|| {
+                let adapter = tokio::runtime::Builder::new_multi_thread()
+                    .enable_all()
+                    .build()
+                    .expect("adapter runtime");
+                adapter.block_on(async {
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                    2
+                })
+            })
+            .await
+            .expect("blocking task")
+        });
+        assert_eq!(value, 2);
+    }
+
+    #[test]
+    fn a_slash_line_splits_into_a_command_run() {
+        let bare = command_run("/compact");
+        assert_eq!(bare.name, "compact");
+        assert!(bare.text.is_empty());
+
+        let with_args = command_run("/plan  the migration ");
+        assert_eq!(with_args.name, "plan");
+        assert_eq!(with_args.text, "the migration");
+
+        let no_slash = command_run("compact");
+        assert_eq!(no_slash.name, "compact");
+    }
+
+    #[test]
+    fn a_typed_failure_keeps_its_message() {
+        let err = typed::<()>(Err(crate::harness::HarnessError::Unavailable(
+            "opencode is not running".into(),
+        )))
+        .unwrap_err();
+        assert!(err.to_string().contains("opencode is not running"));
     }
 }

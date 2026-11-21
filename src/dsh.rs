@@ -8,10 +8,10 @@
 //! `dsh-auth-*` cookie that must ride every /api call and the WS handshake;
 //! the cookie dies with its WebSocket, so every reconnect re-exchanges it.
 //!
-//! The app's chat pipeline is left untouched: this module folds dsh's durable
-//! session events into opencode-shaped messages/parts (full-text-so-far, same
-//! field names the store already parses defensively) and emits them as
-//! `UiEvent::Event` values, exactly like the opencode SSE pump does.
+//! This module is the dsh adapter's protocol client: the adapter folds dsh's
+//! durable session events into opencode-shaped messages/parts (full-text-so-far,
+//! the same field names the typed event translation reads) and translates them
+//! into the app-level vocabulary. No store code calls into it.
 
 use anyhow::{Context as _, Result, anyhow};
 use serde_json::{Value, json};
@@ -21,8 +21,8 @@ use std::time::Duration;
 
 use crate::harness::HarnessId;
 use crate::oc::{
-    AgentInfo, ApiRequest, CommandInfo, ModelInfo, QuestionOptionInfo, QuestionPromptInfo,
-    SessionInfo, StoredMessage, StreamStatus, UiEvent,
+    AgentInfo, CommandInfo, ModelInfo, QuestionOptionInfo, QuestionPromptInfo, SessionInfo,
+    StoredMessage, StreamStatus, UiEvent,
 };
 
 /// How long a single follow snapshot may take to arrive before GetMessages
@@ -535,216 +535,9 @@ fn question_key(question: &QuestionPromptInfo) -> String {
     }
 }
 
-// ---- request mapping ------------------------------------------------------
+// ---- catalogs and sessions -------------------------------------------------
 
-/// Runs one ApiRequest against the dsh web API and shapes the reply the store
-/// already knows. `ws_key` is the shared server's key; `folder` is the real
-/// workspace folder for the requests whose reply events key off the workspace.
-pub async fn run_request(handle: &DshHandle, ws_key: String, request: ApiRequest) -> UiEvent {
-    match request {
-        ApiRequest::ListSessions | ApiRequest::ListMcpNames => {
-            // dsh sessions are listed per workspace folder (ListSessionsIn)
-            // and MCP has no dsh equivalent; neither can be answered here —
-            // an empty list would read as "everything gone" and prune real
-            // chats, so log the misrouting instead
-            UiEvent::Log {
-                ws_key,
-                line: "request without a dsh equivalent hit the dsh runner".into(),
-            }
-        }
-        ApiRequest::ListSessionsIn { folder } => {
-            let result = list_sessions_filtered(handle, &folder).await;
-            UiEvent::SessionsLoaded {
-                ws_key: folder,
-                shared: true,
-                result,
-            }
-        }
-        ApiRequest::ListModels => UiEvent::ModelsLoaded {
-            harness: harness_id(),
-            result: model_catalog(handle).await,
-        },
-        ApiRequest::ListAgents => UiEvent::AgentsLoaded {
-            result: agent_presets(handle).await,
-        },
-        ApiRequest::ListCommands => {
-            let result = commands(handle, None).await;
-            UiEvent::CommandsLoaded { ws_key, result }
-        }
-        ApiRequest::ListAgentCommands { session_id } => {
-            let result = commands(handle, session_id.as_deref()).await;
-            UiEvent::CommandsLoaded { ws_key, result }
-        }
-        ApiRequest::CreateCommandSession { tile_key, folder } => {
-            let result = create_session(handle, Some(&folder), "New chat").await;
-            UiEvent::CommandSessionCreated {
-                tile_key,
-                ws_key: folder,
-                result,
-            }
-        }
-        ApiRequest::ExecuteCommand { session_id, line } => {
-            let result = execute_command(handle, &session_id, &line).await;
-            UiEvent::CommandExecuted { session_id, result }
-        }
-        ApiRequest::CompactSession { .. } => UiEvent::Log {
-            ws_key,
-            line: "opencode-only request hit the dsh runner".into(),
-        },
-        ApiRequest::GetMessages { session_id } => {
-            handle.ensure_follow(&session_id).await.ok();
-            let result = handle.messages(&session_id).await;
-            UiEvent::MessagesLoaded {
-                ws_key,
-                session_id,
-                result,
-            }
-        }
-        ApiRequest::CreateSession { title } | ApiRequest::CreateForkSession { title, .. } => {
-            // no folder known: create in the cwd the server was spawned in
-            let result = create_session(handle, None, &title).await;
-            UiEvent::SessionCreated { ws_key, result }
-        }
-        ApiRequest::CreateSessionIn { folder, title } => {
-            let result = create_session(handle, Some(&folder), &title).await;
-            UiEvent::SessionCreated {
-                ws_key: folder,
-                result,
-            }
-        }
-        ApiRequest::CreateForkSessionIn {
-            folder,
-            title,
-            context,
-        } => {
-            let result = create_session(handle, Some(&folder), &title).await;
-            UiEvent::ForkSessionCreated {
-                ws_key: folder,
-                context,
-                result,
-            }
-        }
-        ApiRequest::RenameSession { session_id, title } => {
-            let result = handle
-                .rpc(
-                    "session/rename",
-                    json!({ "request": { "sessionId": session_id, "title": title } }),
-                )
-                .await
-                .map(|v| SessionInfo {
-                    id: session_id.clone(),
-                    title: v
-                        .get("title")
-                        .and_then(Value::as_str)
-                        .unwrap_or(&title)
-                        .to_string(),
-                    updated_ms: now_ms(),
-                    created_ms: 0,
-                    parent_id: None,
-                });
-            UiEvent::SessionRenamed { session_id, result }
-        }
-        ApiRequest::DeleteSession { session_id } => {
-            // dsh has no hard delete; archiving removes it from the list. The
-            // reply carries the registry's cumulative archivedSessionIds —
-            // remembered so the sticky session/list projection (archived
-            // sessions stay listed until compaction, with no marker on the
-            // item) cannot pull the deleted chat back into the sidebar
-            let result = handle
-                .rpc(
-                    "workspace/archiveSession",
-                    json!({ "request": { "sessionId": session_id } }),
-                )
-                .await
-                .map(|reply| {
-                    let ids: Vec<String> = reply
-                        .get("archivedSessionIds")
-                        .and_then(Value::as_array)
-                        .map(|list| {
-                            list.iter()
-                                .filter_map(|id| id.as_str().map(String::from))
-                                .collect()
-                        })
-                        .unwrap_or_else(|| vec![session_id.clone()]);
-                    handle.note_archived(&ids);
-                });
-            UiEvent::SessionDeleted { session_id, result }
-        }
-        ApiRequest::Abort { session_id } => {
-            let result = handle
-                .rpc(
-                    "session/cancel",
-                    json!({ "request": { "sessionId": session_id } }),
-                )
-                .await
-                .map(|_| ());
-            UiEvent::Aborted { session_id, result }
-        }
-        ApiRequest::RespondPermission {
-            permission_id,
-            response,
-            ..
-        } => {
-            let result = handle.answer_approval(&permission_id, &response).await;
-            UiEvent::PermissionReplied {
-                permission_id,
-                response,
-                is_auto: false,
-                result,
-            }
-        }
-        ApiRequest::GetQuestions { for_session } => {
-            // questions arrive as waterfalls only; nothing to pull
-            UiEvent::QuestionsPulled {
-                for_session,
-                result: Ok(Vec::new()),
-            }
-        }
-        ApiRequest::ReplyQuestion {
-            request_id,
-            answers,
-        } => {
-            let summary = answers
-                .iter()
-                .map(|a| {
-                    if a.is_empty() {
-                        "(empty)".to_string()
-                    } else {
-                        a.join(", ")
-                    }
-                })
-                .collect::<Vec<_>>()
-                .join(" · ");
-            let result = handle.answer_question(&request_id, &answers).await;
-            UiEvent::QuestionReplied {
-                request_id,
-                summary,
-                result,
-            }
-        }
-        ApiRequest::RejectQuestion { request_id } => {
-            let result = handle.reject_question(&request_id).await;
-            UiEvent::QuestionReplied {
-                request_id,
-                summary: "dismissed".into(),
-                result,
-            }
-        }
-        ApiRequest::FindFiles { query } => {
-            let result = find_files(handle, &query).await;
-            UiEvent::FilesFound {
-                ws_key,
-                query,
-                result,
-            }
-        }
-        ApiRequest::McpConnect { name } | ApiRequest::McpDisconnect { name } => UiEvent::Log {
-            ws_key,
-            line: format!("mcp: {name}: not available on dsh"),
-        },
-    }
-}
-
+/// Creates a dsh session owned by `folder` (dsh sessions carry their own cwd)
 pub(crate) async fn create_session(
     handle: &DshHandle,
     folder: Option<&str>,
@@ -841,14 +634,6 @@ pub(crate) async fn list_sessions(
         sessions.push((info, cwd.map(str::to_string)));
     }
     Ok(sessions)
-}
-
-async fn list_sessions_filtered(handle: &DshHandle, folder: &str) -> Result<Vec<SessionInfo>> {
-    Ok(list_sessions(handle, Some(folder))
-        .await?
-        .into_iter()
-        .map(|(info, _)| info)
-        .collect())
 }
 
 /// The normalized title in a dsh projection. `session/list` flattens the
@@ -1047,7 +832,7 @@ pub async fn execute_command(handle: &DshHandle, session_id: &str, line: &str) -
     }
 }
 
-async fn find_files(handle: &DshHandle, query: &str) -> Result<Vec<String>> {
+pub(crate) async fn find_files(handle: &DshHandle, query: &str) -> Result<Vec<String>> {
     let Some(agent) = handle.any_session() else {
         return Ok(Vec::new());
     };

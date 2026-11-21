@@ -599,6 +599,8 @@ impl Store {
                 text,
                 choice: crate::harness::ModelChoice::default(),
                 background: false,
+                attachments: Vec::new(),
+                command: None,
             },
         );
         match result {

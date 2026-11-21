@@ -10,8 +10,9 @@ use std::path::PathBuf;
 
 use super::types::{
     Agent, Command, CommandRun, FileDiff, FormAnswer, FormRequest, HarnessError, HarnessEvent,
-    HarnessHealth, HarnessId, InboxDelivery, InboxItem, McpConfig, McpServer, Model, NewSession,
-    PermissionDecision, PermissionRequest, Prompt, Provider, SessionId, SessionSummary, Skill,
+    HarnessHealth, HarnessId, HistoryMessage, InboxDelivery, InboxItem, McpConfig, McpServer,
+    Model, NewSession, PermissionDecision, PermissionRequest, Prompt, Provider, SessionId,
+    SessionSummary, Skill,
 };
 
 /// One harness instance: its lifecycle, its catalogs, its sessions and turns,
@@ -47,17 +48,22 @@ pub trait Harness: Send + Sync {
     /// The agent list.
     fn agents(&mut self) -> Result<Vec<Agent>, HarnessError>;
 
-    /// The slash-command list.
-    fn commands(&mut self) -> Result<Vec<Command>, HarnessError>;
+    /// The slash-command list. Some harnesses scope their catalog to a
+    /// session's agent; `session` is that context when the caller has one.
+    fn commands(&mut self, session: Option<&SessionId>) -> Result<Vec<Command>, HarnessError>;
 
-    /// The skill list.
-    fn skills(&mut self) -> Result<Vec<Skill>, HarnessError>;
+    /// The skill list; `session` is the optional agent scope, as for
+    /// [`Harness::commands`].
+    fn skills(&mut self, session: Option<&SessionId>) -> Result<Vec<Skill>, HarnessError>;
 
     /// The session list.
     fn sessions(&mut self) -> Result<Vec<SessionSummary>, HarnessError>;
 
     /// One session's summary.
     fn session(&mut self, session: &SessionId) -> Result<SessionSummary, HarnessError>;
+
+    /// One session's stored transcript.
+    fn transcript(&mut self, session: &SessionId) -> Result<Vec<HistoryMessage>, HarnessError>;
 
     /// Create a session, optionally as a child of another.
     fn create_session(&mut self, spec: NewSession) -> Result<SessionSummary, HarnessError>;
@@ -115,6 +121,12 @@ pub trait Harness: Send + Sync {
 
     /// The session's file diffs.
     fn diff(&mut self, session: &SessionId) -> Result<Vec<FileDiff>, HarnessError>;
+
+    /// Filename search for the `@` mention menu, scoped to the workspace.
+    fn find_files(&mut self, query: &str) -> Result<Vec<String>, HarnessError>;
+
+    /// Drop any folded state for a chat the app deleted.
+    fn forget_session(&mut self, session: &SessionId) -> Result<(), HarnessError>;
 
     /// The session's queued inbox items.
     fn inbox(&mut self, session: &SessionId) -> Result<Vec<InboxItem>, HarnessError>;

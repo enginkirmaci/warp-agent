@@ -14,13 +14,15 @@ use std::time::Duration;
 use async_channel::{Receiver, Sender, unbounded};
 use serde_json::{Value, json};
 
+use super::bridge::history_from_stored;
 use super::interface::Harness;
 use super::opencode::translate_event;
 use super::shared::{PendingApprovals, filediffs, form_answers, partition_commands};
 use super::types::*;
 use crate::dsh::{
     DshHandle, agent_presets, commands as dsh_commands, create_session, execute_command,
-    list_sessions as dsh_list_sessions, model_catalog, send_message as dsh_send_message,
+    find_files as dsh_find_files, list_sessions as dsh_list_sessions, model_catalog,
+    send_message as dsh_send_message,
 };
 use crate::oc::{ServerProcess, StreamStatus, UiEvent, child_exited, find_free_port};
 
@@ -124,6 +126,7 @@ impl DshHarness {
             parent: info.parent_id.map(SessionId::new),
             directory,
             updated_ms: info.updated_ms,
+            created_ms: info.created_ms,
         }
     }
 
@@ -148,9 +151,7 @@ impl DshHarness {
                         StreamStatus::Reconnecting { attempt } => {
                             *health.lock().expect("health") =
                                 HarnessHealth::unavailable("dsh is reconnecting");
-                            let _ = tx.try_send(HarnessEvent::Disconnected {
-                                reason: Some(format!("reconnecting (attempt {attempt})")),
-                            });
+                            let _ = tx.try_send(HarnessEvent::Reconnecting { attempt });
                         }
                         StreamStatus::Failed => {
                             *health.lock().expect("health") =
@@ -171,9 +172,7 @@ impl DshHarness {
                     UiEvent::ServerCrashed { .. } => {
                         *health.lock().expect("health") =
                             HarnessHealth::unavailable("dsh web exited");
-                        let _ = tx.try_send(HarnessEvent::Disconnected {
-                            reason: Some("dsh web exited".into()),
-                        });
+                        let _ = tx.try_send(HarnessEvent::Exited);
                     }
                     _ => {}
                 }
@@ -192,15 +191,11 @@ impl DshHarness {
         let health = Arc::clone(&self.health);
         let task = self.runtime.spawn(async move {
             loop {
-                tokio::select! {
-                    _ = stop_rx.recv() => return,
-                    _ = tokio::time::sleep(HEALTH_POLL) => {}
-                }
+                // the first probe runs before the wait: a start that already
+                // lost its child reports it, and the gauge fills immediately
                 if child_exited(&exit_probe) {
                     *health.lock().expect("health") = HarnessHealth::unavailable("dsh web exited");
-                    let _ = tx.try_send(HarnessEvent::Disconnected {
-                        reason: Some("dsh web exited".into()),
-                    });
+                    let _ = tx.try_send(HarnessEvent::Exited);
                     return;
                 }
                 let healthy = tokio::select! {
@@ -214,6 +209,10 @@ impl DshHarness {
                 };
                 *health.lock().expect("health") = state.clone();
                 let _ = tx.try_send(HarnessEvent::Health(state));
+                tokio::select! {
+                    _ = stop_rx.recv() => return,
+                    _ = tokio::time::sleep(HEALTH_POLL) => {}
+                }
             }
         });
         self.health_task = Some(task);
@@ -229,6 +228,7 @@ impl DshHarness {
                 parent: info.parent_id.map(SessionId::new),
                 directory: directory.map(PathBuf::from),
                 updated_ms: info.updated_ms,
+                created_ms: info.created_ms,
             })
             .collect())
     }
@@ -377,17 +377,23 @@ impl Harness for DshHarness {
             .collect())
     }
 
-    fn commands(&mut self) -> Result<Vec<Command>, HarnessError> {
+    fn commands(&mut self, session: Option<&SessionId>) -> Result<Vec<Command>, HarnessError> {
         let handle = self.handle()?;
-        let session = handle.any_session();
-        let commands = self.block_on(dsh_commands(&handle, session.as_deref()))?;
+        let fallback = handle.any_session();
+        let session = session
+            .map(|session| session.as_str())
+            .or(fallback.as_deref());
+        let commands = self.block_on(dsh_commands(&handle, session))?;
         Ok(partition_commands(commands).0)
     }
 
-    fn skills(&mut self) -> Result<Vec<Skill>, HarnessError> {
+    fn skills(&mut self, session: Option<&SessionId>) -> Result<Vec<Skill>, HarnessError> {
         let handle = self.handle()?;
-        let session = handle.any_session();
-        let commands = self.block_on(dsh_commands(&handle, session.as_deref()))?;
+        let fallback = handle.any_session();
+        let session = session
+            .map(|session| session.as_str())
+            .or(fallback.as_deref());
+        let commands = self.block_on(dsh_commands(&handle, session))?;
         Ok(partition_commands(commands).1)
     }
 
@@ -401,6 +407,12 @@ impl Harness for DshHarness {
             .into_iter()
             .find(|summary| &summary.id == session)
             .ok_or_else(|| HarnessError::Unavailable(format!("session {session} not found")))
+    }
+
+    fn transcript(&mut self, session: &SessionId) -> Result<Vec<HistoryMessage>, HarnessError> {
+        let handle = self.handle()?;
+        let messages = self.block_on(handle.messages(session.as_str()))?;
+        Ok(history_from_stored(session, messages))
     }
 
     fn create_session(&mut self, spec: NewSession) -> Result<SessionSummary, HarnessError> {
@@ -465,6 +477,11 @@ impl Harness for DshHarness {
         let session_id = session.as_str().to_string();
         let error_session = session.clone();
         let tx = self.tx.clone();
+        let attachments: Vec<(String, String, std::sync::Arc<Vec<u8>>)> = prompt
+            .attachments
+            .into_iter()
+            .map(|attachment| (attachment.filename, attachment.mime, attachment.bytes))
+            .collect();
         self.runtime.spawn(async move {
             if let Err(err) = dsh_send_message(
                 &handle,
@@ -473,7 +490,7 @@ impl Harness for DshHarness {
                 prompt.choice.model.as_deref(),
                 prompt.choice.variant.as_deref(),
                 prompt.choice.agent.as_deref(),
-                &[],
+                &attachments,
             )
             .await
             {
@@ -588,6 +605,17 @@ impl Harness for DshHarness {
         let handle = self.handle()?;
         let messages = self.block_on(handle.messages(session.as_str()))?;
         Ok(filediffs(messages))
+    }
+
+    fn find_files(&mut self, query: &str) -> Result<Vec<String>, HarnessError> {
+        let handle = self.handle()?;
+        self.block_on(dsh_find_files(&handle, query))
+    }
+
+    fn forget_session(&mut self, session: &SessionId) -> Result<(), HarnessError> {
+        let handle = self.handle()?;
+        handle.forget_session(session.as_str());
+        Ok(())
     }
 
     fn inbox(&mut self, _session: &SessionId) -> Result<Vec<InboxItem>, HarnessError> {

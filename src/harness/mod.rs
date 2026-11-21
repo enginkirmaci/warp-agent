@@ -2,10 +2,11 @@
 //! opencode v1, dsh and opencode v2 adapters. The registry is the one list of
 //! harnesses the settings page, the composer pill, the door and the model
 //! pickers read; ids are wire strings ([`HarnessId`]), never an enum. Chat
-//! traffic for opencode v1 and dsh still runs on the legacy net thread, which
-//! launches its managed child from the descriptor's [`LaunchSpec`]; the
-//! attached adapter (opencode v2) is routed through the host.
+//! traffic runs through these adapters: the net thread owns one instance per
+//! workspace for opencode v1 and one app-wide dsh singleton, and the store
+//! consumes their typed event streams.
 
+pub(crate) mod bridge;
 mod dsh;
 mod host;
 mod interface;
@@ -21,7 +22,7 @@ mod types;
 pub mod test_support;
 
 pub use dsh::DshHarness;
-pub use host::HarnessHost;
+pub use host::{HarnessHandle, HarnessHost};
 pub use interface::Harness;
 pub use opencode::OpenCodeV1Harness;
 pub use opencode_v2::OpenCodeV2Harness;
@@ -240,20 +241,50 @@ mod tests {
             config.directory = Some(std::path::PathBuf::from(folder));
             host.register_instance(factory(config)).unwrap();
         }
-        assert!(
-            host.instance_at(&id, Some(std::path::Path::new("/tmp/warp-agent-a")))
-                .is_some()
-        );
-        assert!(
-            host.instance_at(&id, Some(std::path::Path::new("/tmp/warp-agent-b")))
-                .is_some()
-        );
+        assert!(host.contains_at(&id, Some(std::path::Path::new("/tmp/warp-agent-a"))));
+        assert!(host.contains_at(&id, Some(std::path::Path::new("/tmp/warp-agent-b"))));
         let mut duplicate = HarnessConfig::new("opencode");
         duplicate.directory = Some(std::path::PathBuf::from("/tmp/warp-agent-a"));
         assert!(matches!(
             host.register_instance(factory(duplicate)).unwrap_err(),
             HarnessError::DuplicateInstance(_)
         ));
+    }
+
+    #[test]
+    fn the_host_creates_instances_through_the_registry_scope() {
+        let mut host = HarnessHost::new(HarnessRegistry::builtin());
+        let workspace = HarnessId::new("opencode");
+        let folder = std::path::Path::new("/tmp/warp-agent-registry-ws");
+
+        let handle = host
+            .ensure_instance(&workspace, "opencode", Some(folder))
+            .expect("the v1 factory makes an instance");
+        let again = host
+            .ensure_instance(&workspace, "opencode", Some(folder))
+            .expect("the same key returns the same instance");
+        assert!(std::sync::Arc::ptr_eq(&handle, &again));
+        assert!(host.contains_at(&workspace, Some(folder)));
+
+        // a workspace harness cannot exist without its folder
+        assert!(matches!(
+            host.ensure_instance(&workspace, "opencode", None),
+            Err(HarnessError::Failed(_))
+        ));
+
+        // an app-wide harness has one instance whatever folder is asked for
+        let shared = HarnessId::new("dsh");
+        let first = host
+            .ensure_instance(&shared, "dsh", Some(folder))
+            .expect("the dsh factory makes an instance");
+        let second = host
+            .ensure_instance(&shared, "dsh", None)
+            .expect("the app-wide key ignores the folder");
+        assert!(std::sync::Arc::ptr_eq(&first, &second));
+        assert!(host.contains_at(&shared, None));
+
+        assert!(host.remove_instance_at(&shared, None).is_some());
+        assert!(!host.contains(&shared));
     }
 
     #[test]
@@ -267,9 +298,16 @@ mod tests {
 
         assert_eq!(harness.id().as_str(), FAKE_ID);
         assert_eq!(harness.health().state, HealthState::Ready);
+        // seeded catalogs answer; everything the fake does not model is typed
+        assert!(
+            harness
+                .models()
+                .expect("an empty seeded catalog")
+                .is_empty()
+        );
         assert_eq!(
-            harness.models().unwrap_err(),
-            HarnessError::Unsupported("models")
+            harness.agents().unwrap_err(),
+            HarnessError::Unsupported("agents")
         );
         assert_eq!(
             harness.inbox(&SessionId::new("session-1")).unwrap_err(),
@@ -308,7 +346,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(started.load(Ordering::SeqCst));
-        assert!(host.instance(&id).is_some());
+        assert!(host.contains(&id));
 
         assert!(host.shutdown().is_empty());
         assert!(stopped.load(Ordering::SeqCst));

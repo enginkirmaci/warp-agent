@@ -322,12 +322,12 @@ pub struct Store {
 
     pub is_server_running: bool,
     pub auto_allow: bool,
-    /// Whether the typed harness-event path is live: the attached adapter
-    /// turns it on when it connects. The legacy net path feeds opencode v1 and
-    /// dsh traffic independently.
+    /// Whether the typed harness-event path is live; every adapter, managed or
+    /// attached, feeds it.
     harness_ingest: bool,
     /// Attached harness adapters while the app has them, by registry id; each
     /// event stream is pumped into the typed store path by a spawned task.
+    /// Managed harnesses live on the net thread's host instead.
     attached: BTreeMap<HarnessId, Box<dyn Harness>>,
     /// Last attach failure per attached harness, surfaced by settings/door.
     pub attached_status: BTreeMap<HarnessId, String>,
@@ -555,7 +555,7 @@ impl Store {
             focused_tile: None,
             is_server_running: false,
             auto_allow,
-            harness_ingest: false,
+            harness_ingest: true,
             attached: BTreeMap::new(),
             attached_status: BTreeMap::new(),
             is_settings_open: false,
@@ -1744,8 +1744,9 @@ impl Store {
                 cx.spawn(async move |store, cx| {
                     while let Ok(event) = events.recv().await {
                         let id = id.clone();
-                        let _ =
-                            store.update(cx, |store, cx| store.on_harness_event(&id, event, cx));
+                        let _ = store.update(cx, |store, cx| {
+                            store.on_harness_event(&id, None, event, cx);
+                        });
                     }
                 })
                 .detach();
@@ -1767,13 +1768,15 @@ impl Store {
         }
     }
 
-    fn on_harness_event(
+    pub(super) fn on_harness_event(
         &mut self,
         harness: &HarnessId,
+        directory: Option<&str>,
         event: crate::harness::HarnessEvent,
         cx: &mut Context<Self>,
     ) {
-        if let Err(err) = self.ingest_harness_event(harness, event, cx) {
+        let directory = directory.map(std::path::Path::new);
+        if let Err(err) = self.ingest_harness_event_from(harness, event, directory, cx) {
             tracing::warn!("harness event ingest failed: {err}");
         }
     }

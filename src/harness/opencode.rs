@@ -14,6 +14,7 @@ use std::time::{Duration, Instant};
 use async_channel::{Receiver, Sender, unbounded};
 use serde_json::Value;
 
+use super::bridge::history_from_stored;
 use super::interface::Harness;
 use super::shared::{PendingApprovals, filediffs, form_answers, partition_commands};
 use super::types::*;
@@ -36,6 +37,13 @@ pub(crate) fn launch_spec() -> LaunchSpec {
         capture_line: None,
         timeout_message: "opencode serve did not become healthy within 25 s.",
     }
+}
+
+/// True when a send failed in the connect phase (nothing reached the server).
+fn is_connect_blip(err: &anyhow::Error) -> bool {
+    err.chain()
+        .filter_map(|cause| cause.downcast_ref::<reqwest::Error>())
+        .any(|error| error.is_connect())
 }
 
 fn launch_args(port: u16) -> Vec<String> {
@@ -122,6 +130,7 @@ impl OpenCodeV1Harness {
             parent: info.parent_id.map(SessionId::new),
             directory: self.config.directory.clone(),
             updated_ms: info.updated_ms,
+            created_ms: info.created_ms,
         }
     }
 
@@ -180,9 +189,7 @@ impl OpenCodeV1Harness {
                 if was_connected.swap(false, Ordering::AcqRel) {
                     *health.lock().expect("health") =
                         HarnessHealth::unavailable("opencode event stream is reconnecting");
-                    let _ = tx.try_send(HarnessEvent::Disconnected {
-                        reason: Some(format!("reconnecting (attempt {attempts})")),
-                    });
+                    let _ = tx.try_send(HarnessEvent::Reconnecting { attempt: attempts });
                 }
                 loop {
                     tokio::select! {
@@ -214,15 +221,11 @@ impl OpenCodeV1Harness {
         let health = Arc::clone(&self.health);
         let task = self.runtime.spawn(async move {
             loop {
-                tokio::select! {
-                    _ = stop_rx.recv() => return,
-                    _ = tokio::time::sleep(HEALTH_POLL) => {}
-                }
+                // the first probe runs before the wait: a start that already
+                // lost its child reports it, and the gauge fills immediately
                 if child_exited(&exit_probe) {
                     *health.lock().expect("health") = HarnessHealth::unavailable("opencode exited");
-                    let _ = tx.try_send(HarnessEvent::Disconnected {
-                        reason: Some("opencode exited".into()),
-                    });
+                    let _ = tx.try_send(HarnessEvent::Exited);
                     return;
                 }
                 let healthy = tokio::select! {
@@ -236,6 +239,10 @@ impl OpenCodeV1Harness {
                 };
                 *health.lock().expect("health") = state.clone();
                 let _ = tx.try_send(HarnessEvent::Health(state));
+                tokio::select! {
+                    _ = stop_rx.recv() => return,
+                    _ = tokio::time::sleep(HEALTH_POLL) => {}
+                }
             }
         });
         self.health_task = Some(task);
@@ -366,11 +373,11 @@ impl Harness for OpenCodeV1Harness {
             .collect())
     }
 
-    fn commands(&mut self) -> Result<Vec<Command>, HarnessError> {
+    fn commands(&mut self, _session: Option<&SessionId>) -> Result<Vec<Command>, HarnessError> {
         self.command_catalog().map(|(commands, _)| commands)
     }
 
-    fn skills(&mut self) -> Result<Vec<Skill>, HarnessError> {
+    fn skills(&mut self, _session: Option<&SessionId>) -> Result<Vec<Skill>, HarnessError> {
         self.command_catalog().map(|(_, skills)| skills)
     }
 
@@ -388,6 +395,12 @@ impl Harness for OpenCodeV1Harness {
             .into_iter()
             .find(|summary| &summary.id == session)
             .ok_or_else(|| HarnessError::Unavailable(format!("session {session} not found")))
+    }
+
+    fn transcript(&mut self, session: &SessionId) -> Result<Vec<HistoryMessage>, HarnessError> {
+        let client = self.client()?;
+        let messages = self.block_on(client.get_messages(session.as_str()))?;
+        Ok(history_from_stored(session, messages))
     }
 
     fn create_session(&mut self, spec: NewSession) -> Result<SessionSummary, HarnessError> {
@@ -428,6 +441,8 @@ impl Harness for OpenCodeV1Harness {
             text,
             choice,
             background,
+            attachments,
+            command,
         } = prompt;
         if background {
             return Err(HarnessError::Unsupported("background_prompt"));
@@ -442,20 +457,58 @@ impl Harness for OpenCodeV1Harness {
         let session_id = session.as_str().to_string();
         let error_session = session.clone();
         let tx = self.tx.clone();
+        let wire_attachments: Vec<(String, String, std::sync::Arc<Vec<u8>>)> = attachments
+            .into_iter()
+            .map(|attachment| (attachment.filename, attachment.mime, attachment.bytes))
+            .collect();
         // v1's message POST resolves only when the turn ends: send it on the
         // runtime so an approval or an interrupt can still reach this instance
         self.runtime.spawn(async move {
-            if let Err(err) = client
-                .send_message(
-                    &session_id,
-                    &text,
-                    choice.model.as_deref(),
-                    choice.variant.as_deref(),
-                    choice.agent.as_deref(),
-                    &[],
-                )
-                .await
-            {
+            // the app's quiet connect-blip retry: a failure in the connect
+            // phase never reached the server, so a re-POST cannot double-send
+            let mut blips = 0u32;
+            let result = loop {
+                let attempt = match &command {
+                    Some(command) => {
+                        client
+                            .send_command(
+                                &session_id,
+                                &command.name,
+                                &command.text,
+                                choice.model.as_deref(),
+                                choice.variant.as_deref(),
+                                choice.agent.as_deref(),
+                                &wire_attachments,
+                            )
+                            .await
+                    }
+                    None => {
+                        client
+                            .send_message(
+                                &session_id,
+                                &text,
+                                choice.model.as_deref(),
+                                choice.variant.as_deref(),
+                                choice.agent.as_deref(),
+                                &wire_attachments,
+                            )
+                            .await
+                    }
+                };
+                match attempt {
+                    Ok(()) => break Ok(()),
+                    Err(err) if blips < 2 && is_connect_blip(&err) => {
+                        blips += 1;
+                        tracing::warn!(
+                            "send to {session_id} could not connect, retry {blips}/2: {err:#}"
+                        );
+                        tokio::time::sleep(std::time::Duration::from_millis(1500 * blips as u64))
+                            .await;
+                    }
+                    Err(err) => break Err(err),
+                }
+            };
+            if let Err(err) = result {
                 let _ = tx.try_send(HarnessEvent::Error {
                     session: Some(error_session),
                     message: format!("{err:#}"),
@@ -541,7 +594,31 @@ impl Harness for OpenCodeV1Harness {
     }
 
     fn forms(&mut self, session: &SessionId) -> Result<Vec<FormRequest>, HarnessError> {
-        Ok(self.pending.forms_for(session))
+        // the server is authoritative for pending asks: the tracked set can
+        // miss one that arrived while the event stream was down
+        let client = self.client()?;
+        match self.block_on(client.get_questions()) {
+            Ok(requests) => {
+                let forms: Vec<FormRequest> = super::bridge::form_requests(requests);
+                for form in &forms {
+                    self.pending.observe(&HarnessEvent::QuestionAsked {
+                        request: form.clone(),
+                    });
+                }
+                let mut forms: Vec<FormRequest> = forms
+                    .into_iter()
+                    .filter(|form| &form.session == session)
+                    .collect();
+                // keep any locally tracked ask the pull did not name
+                for tracked in self.pending.forms_for(session) {
+                    if !forms.iter().any(|form| form.id == tracked.id) {
+                        forms.push(tracked);
+                    }
+                }
+                Ok(forms)
+            }
+            Err(_) => Ok(self.pending.forms_for(session)),
+        }
     }
 
     fn reply_form(
@@ -556,7 +633,11 @@ impl Harness for OpenCodeV1Harness {
             .ok_or_else(|| HarnessError::Unavailable(format!("form {form} not found")))?;
         let answers = form_answers(&pending, answer);
         let client = self.client()?;
-        self.block_on(client.reply_question(&pending.id, &answers))?;
+        if answers.iter().all(Vec::is_empty) {
+            self.block_on(client.reject_question(&pending.id))?;
+        } else {
+            self.block_on(client.reply_question(&pending.id, &answers))?;
+        }
         self.pending.remove_form(form);
         Ok(())
     }
@@ -565,6 +646,16 @@ impl Harness for OpenCodeV1Harness {
         let client = self.client()?;
         let messages = self.block_on(client.get_messages(session.as_str()))?;
         Ok(filediffs(messages))
+    }
+
+    fn find_files(&mut self, query: &str) -> Result<Vec<String>, HarnessError> {
+        let client = self.client()?;
+        self.block_on(client.find_files(query))
+    }
+
+    fn forget_session(&mut self, _session: &SessionId) -> Result<(), HarnessError> {
+        // v1 keeps no folded per-session state; the server owns the chat.
+        Ok(())
     }
 
     fn inbox(&mut self, _session: &SessionId) -> Result<Vec<InboxItem>, HarnessError> {
@@ -636,13 +727,13 @@ impl Harness for OpenCodeV1Harness {
     }
 
     fn connect_mcp(&mut self, name: &str) -> Result<(), HarnessError> {
-        let _ = name;
-        Err(HarnessError::Unsupported("connect_mcp"))
+        let client = self.client()?;
+        self.block_on(client.mcp_connect(name))
     }
 
     fn disconnect_mcp(&mut self, name: &str) -> Result<(), HarnessError> {
-        let _ = name;
-        Err(HarnessError::Unsupported("disconnect_mcp"))
+        let client = self.client()?;
+        self.block_on(client.mcp_disconnect(name))
     }
 
     fn remove_mcp(&mut self, _name: &str) -> Result<(), HarnessError> {
@@ -754,6 +845,33 @@ pub(super) fn translate_event(event: &Value) -> Option<HarnessEvent> {
                 session,
                 part_id: part_id.to_string(),
             })
+        }
+        "todo.updated" => {
+            let session = read_session(properties)?;
+            let todos = properties
+                .get("todos")
+                .and_then(Value::as_array)
+                .map(|todos| {
+                    todos
+                        .iter()
+                        .filter_map(|todo| {
+                            Some(Todo {
+                                content: todo.get("content").and_then(Value::as_str)?.to_string(),
+                                status: todo
+                                    .get("status")
+                                    .and_then(Value::as_str)
+                                    .unwrap_or("pending")
+                                    .to_string(),
+                                priority: todo
+                                    .get("priority")
+                                    .and_then(Value::as_str)
+                                    .map(str::to_string),
+                            })
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            Some(HarnessEvent::Todos { session, todos })
         }
         "permission.asked" | "permission.v2.asked" => permission_event(properties),
         "permission.replied" | "permission.v2.replied" => permission_reply(properties),
@@ -1098,7 +1216,7 @@ mod tests {
     use super::{OpenCodeV1Harness, translate_event};
     use crate::harness::{
         Harness, HarnessConfig, HarnessError, HarnessEvent, HarnessId, HealthState, MessageRole,
-        PartPayload, PermissionDecision, SessionState, ToolState,
+        PartPayload, PermissionDecision, SessionId, SessionState, Todo, ToolState,
     };
     use crate::store::ChatItem;
     use crate::store::Store;
@@ -1274,6 +1392,39 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn a_todo_write_becomes_the_typed_task_list() {
+        let event = translate_event(&json!({
+            "type": "todo.updated",
+            "properties": {
+                "sessionID": "ses_1",
+                "todos": [
+                    { "content": "write the test", "status": "completed", "priority": "high" },
+                    { "content": "land the change", "status": "in_progress" },
+                ],
+            },
+        }))
+        .expect("todos translate");
+        assert_eq!(
+            event,
+            HarnessEvent::Todos {
+                session: SessionId::new("ses_1"),
+                todos: vec![
+                    Todo {
+                        content: "write the test".into(),
+                        status: "completed".into(),
+                        priority: Some("high".into()),
+                    },
+                    Todo {
+                        content: "land the change".into(),
+                        status: "in_progress".into(),
+                        priority: None,
+                    },
+                ],
+            }
+        );
     }
 
     #[test]

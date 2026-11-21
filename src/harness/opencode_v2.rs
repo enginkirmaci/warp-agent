@@ -327,7 +327,7 @@ impl Harness for OpenCodeV2Harness {
         Ok(agents)
     }
 
-    fn commands(&mut self) -> Result<Vec<Command>, HarnessError> {
+    fn commands(&mut self, _session: Option<&SessionId>) -> Result<Vec<Command>, HarnessError> {
         let value = self.get("/api/command", true)?;
         let mut commands = Vec::new();
         for item in data_array(&value) {
@@ -346,7 +346,7 @@ impl Harness for OpenCodeV2Harness {
         Ok(commands)
     }
 
-    fn skills(&mut self) -> Result<Vec<Skill>, HarnessError> {
+    fn skills(&mut self, _session: Option<&SessionId>) -> Result<Vec<Skill>, HarnessError> {
         let value = self.get("/api/skill", true)?;
         let mut skills = Vec::new();
         for item in data_array(&value) {
@@ -382,6 +382,12 @@ impl Harness for OpenCodeV2Harness {
     fn session(&mut self, session: &SessionId) -> Result<SessionSummary, HarnessError> {
         let value = self.get(&format!("/api/session/{}", session.as_str()), false)?;
         Self::session_from_value(&value)
+    }
+
+    fn transcript(&mut self, _session: &SessionId) -> Result<Vec<HistoryMessage>, HarnessError> {
+        // the v2 service has no message-list endpoint; attached chats load
+        // their history through the store's own session restore only
+        Err(HarnessError::Unsupported("transcript"))
     }
 
     fn create_session(&mut self, spec: NewSession) -> Result<SessionSummary, HarnessError> {
@@ -568,6 +574,15 @@ impl Harness for OpenCodeV2Harness {
     fn diff(&mut self, session: &SessionId) -> Result<Vec<FileDiff>, HarnessError> {
         let value = self.get(&format!("/api/session/{}/diff", session.as_str()), false)?;
         Ok(list_values(&value).filter_map(file_diff).collect())
+    }
+
+    fn find_files(&mut self, _query: &str) -> Result<Vec<String>, HarnessError> {
+        Err(HarnessError::Unsupported("find_files"))
+    }
+
+    fn forget_session(&mut self, _session: &SessionId) -> Result<(), HarnessError> {
+        // the attached adapter keeps no folded per-session state
+        Ok(())
     }
 
     fn inbox(&mut self, session: &SessionId) -> Result<Vec<InboxItem>, HarnessError> {
@@ -1101,6 +1116,11 @@ fn session_summary(value: &Value) -> Option<SessionSummary> {
             .and_then(Value::as_str)
             .unwrap_or("New chat")
             .to_string(),
+        created_ms: value
+            .pointer("/time/created")
+            .and_then(Value::as_i64)
+            .or_else(|| value.get("createdAt").and_then(Value::as_i64))
+            .unwrap_or(0),
         parent: value
             .get("parentID")
             .and_then(Value::as_str)
@@ -1916,9 +1936,9 @@ mod tests {
         assert_eq!(agents[0].name, "build");
         assert_eq!(agents[0].mode, "primary");
 
-        let commands = harness.commands().expect("commands");
+        let commands = harness.commands(None).expect("commands");
         assert_eq!(commands[0].name, "review");
-        let skills = harness.skills().expect("skills");
+        let skills = harness.skills(None).expect("skills");
         assert_eq!(skills[0].id, "sk1");
 
         let sessions = harness.sessions().expect("sessions");

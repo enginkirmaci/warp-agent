@@ -286,6 +286,11 @@ impl Store {
             UiEvent::Event { ws_key, event } => {
                 self.handle_stream_event(&ws_key, &event, cx);
             }
+            UiEvent::HarnessEvent {
+                harness,
+                directory,
+                event,
+            } => self.on_harness_event(&harness, directory.as_deref(), event, cx),
             UiEvent::Ipc { command } => self.handle_ipc(command, cx),
             UiEvent::StreamStatus { ws_key, status } => {
                 // transitions only — except Reconnecting, where every drop

@@ -2,8 +2,8 @@
 //!
 //! These are the app-level types the store, the UI and the door speak: harness
 //! ids, capabilities, sessions, prompts, approvals and the typed event stream.
-//! The old net thread keeps its opencode-shaped request/event vocabulary for
-//! opencode v1 and dsh until their chat paths move onto the adapters.
+//! The net thread routes every managed harness through these types; only the
+//! store-facing control answers still use their app-level request vocabulary.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -409,6 +409,15 @@ pub struct ToolSnapshot {
     pub metadata: Option<serde_json::Value>,
 }
 
+/// One item of a harness's task list.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Todo {
+    pub content: String,
+    pub status: String,
+    /// The harness's own priority word, passed through verbatim.
+    pub priority: Option<String>,
+}
+
 /// One file/image part.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FileSnapshot {
@@ -449,13 +458,35 @@ pub struct PartSnapshot {
     pub payload: PartPayload,
 }
 
+/// One part of a stored message: its id plus its payload.
+#[derive(Clone, Debug, PartialEq)]
+pub struct HistoryPart {
+    pub id: String,
+    pub payload: PartPayload,
+}
+
+/// One stored message from a session's history, in the same typed shape the
+/// live stream uses; the adapter reads it from its protocol, the store rebuilds
+/// its transcript from it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct HistoryMessage {
+    pub message: MessageSnapshot,
+    pub parts: Vec<HistoryPart>,
+}
+
 /// What a harness instance reports on its event stream.
 #[derive(Clone, Debug, PartialEq)]
 pub enum HarnessEvent {
     Connected,
+    /// The event stream dropped and the adapter is retrying at this attempt.
+    Reconnecting {
+        attempt: u32,
+    },
     Disconnected {
         reason: Option<String>,
     },
+    /// The managed child process exited on its own (never a user stop).
+    Exited,
     Health(HarnessHealth),
     /// A session was created; the parent establishes subagent lineage.
     SessionCreated {
@@ -494,6 +525,11 @@ pub enum HarnessEvent {
     PartRemoved {
         session: SessionId,
         part_id: String,
+    },
+    /// The session's todo list changed.
+    Todos {
+        session: SessionId,
+        todos: Vec<Todo>,
     },
     /// An approval request.
     PermissionAsked {
@@ -621,6 +657,8 @@ pub struct SessionSummary {
     pub parent: Option<SessionId>,
     pub directory: Option<PathBuf>,
     pub updated_ms: i64,
+    /// Creation time when the harness reports one; 0 when it does not.
+    pub created_ms: i64,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -638,11 +676,25 @@ pub struct NewSession {
     pub choice: ModelChoice,
 }
 
+/// One file attached to a prompt.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Attachment {
+    pub filename: String,
+    pub mime: String,
+    pub bytes: std::sync::Arc<Vec<u8>>,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Prompt {
     pub text: String,
     pub choice: ModelChoice,
     pub background: bool,
+    /// Files sent with the prompt, in order.
+    pub attachments: Vec<Attachment>,
+    /// The server command/skill the text names, when the composer resolved
+    /// one: the adapter sends it on the command route instead of a plain
+    /// message.
+    pub command: Option<CommandRun>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

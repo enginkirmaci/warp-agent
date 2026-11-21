@@ -1,26 +1,25 @@
 //! Typed harness-event ingestion.
 //!
-//! The attached adapter's typed [`HarnessEvent`] stream lands here and feeds
-//! the store's existing handlers through their stream frames, so the
-//! transcript, tool, approval and catalog state has one state machine rather
-//! than a second one per harness. The legacy net thread still delivers
-//! opencode v1 and dsh traffic as [`crate::oc::UiEvent`]s; both paths converge
-//! on the same handlers.
+//! Every adapter's typed [`HarnessEvent`] stream lands here and feeds the
+//! store's existing handlers through their stream frames, so the transcript,
+//! tool, approval and catalog state has one state machine rather than a second
+//! one per harness. The net thread forwards managed harness events tagged with
+//! their instance; the store never parses a harness wire format.
 
 use std::path::Path;
 
 use super::Store;
+use crate::harness::bridge;
 use crate::harness::{
-    FormFieldKind, HarnessError, HarnessEvent, HarnessId, PartPayload, SessionId, SessionState,
-    ToolSnapshot, ToolState,
+    FormFieldKind, HarnessError, HarnessEvent, HarnessId, SessionId, SessionState,
 };
 use crate::oc::{AgentInfo, CommandInfo, ModelInfo, UiEvent};
 use gpui::Context;
 use serde_json::{Value, json};
 
 impl Store {
-    /// Turn the typed harness-event path on or off. It starts off: the old net
-    /// path stays authoritative until the adapters and the contract ticket land.
+    /// Turn the typed harness-event path on or off; it is on from startup and
+    /// only the probe seam ever flips it.
     pub fn set_harness_ingest(&mut self, enabled: bool) {
         self.harness_ingest = enabled;
     }
@@ -32,6 +31,19 @@ impl Store {
         event: HarnessEvent,
         cx: &mut Context<Self>,
     ) -> Result<(), HarnessError> {
+        self.ingest_harness_event_from(harness, event, None, cx)
+    }
+
+    /// Feed one typed harness event, tagged with the per-workspace instance's
+    /// folder when the harness has one: the event stream itself never names a
+    /// workspace, and the store needs it to address the right chat list.
+    pub fn ingest_harness_event_from(
+        &mut self,
+        harness: &HarnessId,
+        event: HarnessEvent,
+        directory: Option<&Path>,
+        cx: &mut Context<Self>,
+    ) -> Result<(), HarnessError> {
         if !self.harness_ingest {
             return Err(HarnessError::Unavailable(
                 "typed harness events are off".into(),
@@ -39,10 +51,12 @@ impl Store {
         }
         self.ipc_broadcast_harness_event(harness, &event);
         match event {
-            // The host owns connection and health state during the expand
-            // phase; the old stream-status path still reports them to the UI.
+            // connection, health and process-exit facts reach the store as
+            // their app-level notifications; they are not transcript events
             HarnessEvent::Connected
+            | HarnessEvent::Reconnecting { .. }
             | HarnessEvent::Disconnected { .. }
+            | HarnessEvent::Exited
             | HarnessEvent::Health(_) => Ok(()),
             HarnessEvent::SessionCreated {
                 session,
@@ -50,7 +64,7 @@ impl Store {
                 parent,
                 agent,
             } => {
-                let ws_key = self.harness_ws_key(harness, Some(&session), None)?;
+                let ws_key = self.harness_ws_key(harness, Some(&session), directory)?;
                 let mut info = json!({ "id": session.as_str() });
                 if let Some(title) = title {
                     info["title"] = json!(title);
@@ -74,7 +88,7 @@ impl Store {
                 parent,
                 agent,
             } => {
-                let ws_key = self.harness_ws_key(harness, Some(&session), None)?;
+                let ws_key = self.harness_ws_key(harness, Some(&session), directory)?;
                 let mut info = json!({ "id": session.as_str() });
                 if let Some(title) = title {
                     info["title"] = json!(title);
@@ -110,7 +124,7 @@ impl Store {
                 Ok(())
             }
             HarnessEvent::SessionStatus { session, state } => {
-                let ws_key = self.harness_ws_key(harness, Some(&session), None)?;
+                let ws_key = self.harness_ws_key(harness, Some(&session), directory)?;
                 let event = match state {
                     SessionState::Idle => json!({
                         "type": "session.idle",
@@ -135,43 +149,14 @@ impl Store {
                 Ok(())
             }
             HarnessEvent::MessageSnapshot { message } => {
-                let ws_key = self.harness_ws_key(harness, Some(&message.session), None)?;
-                let mut info = json!({
-                    "id": message.id,
-                    "sessionID": message.session.as_str(),
-                    "role": message.role.as_wire(),
-                    "time": { "created": message.created_ms },
-                });
-                if let Some(completed) = message.completed_ms {
-                    info["time"]["completed"] = json!(completed);
-                }
-                if let Some(provider) = message.provider {
-                    info["providerID"] = json!(provider);
-                }
-                if let Some(model) = message.model {
-                    info["modelID"] = json!(model);
-                }
-                if let Some(error) = message.error {
-                    info["error"] = json!({ "data": { "message": error } });
-                }
-                if let Some(tokens) = message.tokens {
-                    info["tokens"] = json!({
-                        "input": tokens.input,
-                        "output": tokens.output,
-                        "reasoning": tokens.reasoning,
-                        "cache": { "read": tokens.cache_read, "write": tokens.cache_write },
-                    });
-                }
-                if let Some(cost) = message.cost_micros {
-                    info["cost"] = json!(cost as f64 / 1_000_000.0);
-                }
+                let ws_key = self.harness_ws_key(harness, Some(&message.session), directory)?;
                 self.stream_event(
                     ws_key,
                     json!({
                         "type": "message.updated",
                         "properties": {
                             "sessionID": message.session.as_str(),
-                            "info": info,
+                            "info": bridge::message_info_json(&message),
                         },
                     }),
                     cx,
@@ -179,34 +164,42 @@ impl Store {
                 Ok(())
             }
             HarnessEvent::PartSnapshot { part } => {
-                let ws_key = self.harness_ws_key(harness, Some(&part.session), None)?;
-                let mut payload = json!({
-                    "id": part.id,
-                    "sessionID": part.session.as_str(),
-                    "messageID": part.message_id,
-                    "type": part.payload.as_wire(),
-                });
-                match part.payload {
-                    PartPayload::Text(text) | PartPayload::Reasoning(text) => {
-                        payload["text"] = json!(text);
-                    }
-                    PartPayload::Tool(tool) => {
-                        payload["tool"] = json!(tool.name);
-                        payload["state"] = tool_state_json(&tool);
-                    }
-                    PartPayload::File(file) => {
-                        payload["url"] = json!(file.url);
-                        payload["filename"] = json!(file.filename);
-                    }
-                    PartPayload::StepStart | PartPayload::StepFinish => {}
-                }
+                let ws_key = self.harness_ws_key(harness, Some(&part.session), directory)?;
                 self.stream_event(
                     ws_key,
                     json!({
                         "type": "message.part.updated",
                         "properties": {
                             "sessionID": part.session.as_str(),
-                            "part": payload,
+                            "part": bridge::part_json(&part),
+                        },
+                    }),
+                    cx,
+                );
+                Ok(())
+            }
+            HarnessEvent::Todos { session, todos } => {
+                let ws_key = self.harness_ws_key(harness, Some(&session), directory)?;
+                let todos: Vec<Value> = todos
+                    .into_iter()
+                    .map(|todo| {
+                        let mut item = json!({
+                            "content": todo.content,
+                            "status": todo.status,
+                        });
+                        if let Some(priority) = todo.priority {
+                            item["priority"] = json!(priority);
+                        }
+                        item
+                    })
+                    .collect();
+                self.stream_event(
+                    ws_key,
+                    json!({
+                        "type": "todo.updated",
+                        "properties": {
+                            "sessionID": session.as_str(),
+                            "todos": todos,
                         },
                     }),
                     cx,
@@ -214,7 +207,7 @@ impl Store {
                 Ok(())
             }
             HarnessEvent::PartRemoved { session, part_id } => {
-                let ws_key = self.harness_ws_key(harness, Some(&session), None)?;
+                let ws_key = self.harness_ws_key(harness, Some(&session), directory)?;
                 self.stream_event(
                     ws_key,
                     json!({
@@ -229,7 +222,7 @@ impl Store {
                 Ok(())
             }
             HarnessEvent::PermissionAsked { request } => {
-                let ws_key = self.harness_ws_key(harness, Some(&request.session), None)?;
+                let ws_key = self.harness_ws_key(harness, Some(&request.session), directory)?;
                 let event_type =
                     if harness_kind(harness).is_ok_and(|id| crate::harness::attached(&id)) {
                         "permission.v2.asked"
@@ -267,7 +260,7 @@ impl Store {
                 Ok(())
             }
             HarnessEvent::QuestionAsked { request } => {
-                let ws_key = self.harness_ws_key(harness, Some(&request.session), None)?;
+                let ws_key = self.harness_ws_key(harness, Some(&request.session), directory)?;
                 let questions: Vec<Value> = request
                     .fields
                     .iter()
@@ -350,10 +343,11 @@ impl Store {
                 Ok(())
             }
             HarnessEvent::CommandsLoaded {
-                directory,
+                directory: catalog_directory,
                 commands,
             } => {
-                let ws_key = self.harness_ws_key(harness, None, directory.as_deref())?;
+                let ws_key =
+                    self.harness_ws_key(harness, None, directory.or(catalog_directory.as_deref()))?;
                 let mut merged = self.commands.get(&ws_key).cloned().unwrap_or_default();
                 merged.retain(|command| command.source != "command");
                 merged.extend(commands.into_iter().map(|command| CommandInfo {
@@ -371,8 +365,12 @@ impl Store {
                 );
                 Ok(())
             }
-            HarnessEvent::SkillsLoaded { directory, skills } => {
-                let ws_key = self.harness_ws_key(harness, None, directory.as_deref())?;
+            HarnessEvent::SkillsLoaded {
+                directory: catalog_directory,
+                skills,
+            } => {
+                let ws_key =
+                    self.harness_ws_key(harness, None, directory.or(catalog_directory.as_deref()))?;
                 let mut merged = self.commands.get(&ws_key).cloned().unwrap_or_default();
                 merged.retain(|command| command.source != "skill");
                 merged.extend(skills.into_iter().map(|skill| CommandInfo {
@@ -397,7 +395,7 @@ impl Store {
             } => {
                 match session {
                     Some(session) => {
-                        let ws_key = self.harness_ws_key(harness, Some(&session), None)?;
+                        let ws_key = self.harness_ws_key(harness, Some(&session), directory)?;
                         let event = json!({
                             "type": "session.error",
                             "properties": {
@@ -461,36 +459,8 @@ impl Store {
 
 fn harness_kind(harness: &HarnessId) -> Result<HarnessId, HarnessError> {
     HarnessId::from_wire(harness.as_str()).ok_or_else(|| {
-        HarnessError::Unavailable(format!(
-            "harness {} is not in the legacy store yet",
-            harness.as_str()
-        ))
+        HarnessError::Unavailable(format!("harness {} is not registered", harness.as_str()))
     })
-}
-
-fn tool_state_json(tool: &ToolSnapshot) -> Value {
-    let status = match &tool.state {
-        ToolState::Pending => "pending",
-        ToolState::Running => "running",
-        ToolState::Completed { .. } => "completed",
-        ToolState::Failed { .. } => "error",
-    };
-    let mut state = json!({ "status": status });
-    if let Some(input) = &tool.input {
-        state["input"] = input.clone();
-    }
-    if let Some(title) = &tool.title {
-        state["title"] = json!(title);
-    }
-    if let Some(metadata) = &tool.metadata {
-        state["metadata"] = metadata.clone();
-    }
-    match &tool.state {
-        ToolState::Completed { output } => state["output"] = json!(output),
-        ToolState::Failed { message } => state["error"] = json!(message),
-        ToolState::Pending | ToolState::Running => {}
-    }
-    state
 }
 
 #[cfg(test)]
@@ -632,11 +602,57 @@ mod tests {
                     description: "typed".into(),
                 }],
             },
+            HarnessEvent::Todos {
+                session: session.clone(),
+                todos: vec![crate::harness::Todo {
+                    content: "ship the typed path".into(),
+                    status: "in_progress".into(),
+                    priority: Some("high".into()),
+                }],
+            },
             HarnessEvent::SessionStatus {
                 session: session.clone(),
                 state: SessionState::Idle,
             },
         ]
+    }
+
+    #[gpui_kit::gpui::test]
+    fn the_instance_directory_resolves_an_unknown_session(cx: &mut gpui::TestAppContext) {
+        let _lock = lock_home();
+        let home = HomeGuard::new();
+        let folder = home.home.join("workspace");
+        std::fs::create_dir_all(&folder).expect("workspace");
+        let folder = folder.to_string_lossy().to_string();
+
+        let store = cx.update(Store::for_probe);
+        store.update(cx, |store, cx| {
+            store.add_workspace(&folder, cx);
+            store.set_harness_ingest(true);
+        });
+
+        let harness = HarnessId::new("opencode");
+        let event = || HarnessEvent::SessionChanged {
+            session: SessionId::new("unmapped"),
+            title: Some("Unknown chat".into()),
+            parent: None,
+            agent: None,
+        };
+        // without the instance's folder the store cannot address the chat ...
+        store.update(cx, |store, cx| {
+            assert!(store.ingest_harness_event(&harness, event(), cx).is_err());
+        });
+        // ... and the net thread's tagged event carries it
+        store.update(cx, |store, cx| {
+            store
+                .ingest_harness_event_from(
+                    &harness,
+                    event(),
+                    Some(std::path::Path::new(&folder)),
+                    cx,
+                )
+                .expect("the directory addresses the event");
+        });
     }
 
     #[gpui_kit::gpui::test]
@@ -657,7 +673,9 @@ mod tests {
             })
         });
 
-        // the switch starts off: the typed path stays inert until enabled
+        // every adapter's stream feeds the typed path from startup; the probe
+        // seam can still silence it, and says so with a typed failure
+        store.update(cx, |store, _| store.set_harness_ingest(false));
         let off = store.update(cx, |store, cx| {
             store
                 .ingest_harness_event(
@@ -705,6 +723,12 @@ mod tests {
                 item.as_ref(),
                 ChatItem::Question(question) if question.id == "q1"
             )));
+            assert!(
+                tile.tasks
+                    .iter()
+                    .any(|task| task.content == "ship the typed path"
+                        && task.status == "in_progress")
+            );
             assert!(!store.running_by_session.contains("s1"));
 
             assert!(

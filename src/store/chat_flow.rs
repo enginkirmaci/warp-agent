@@ -14,13 +14,14 @@ impl Store {
         // a variant only makes sense next to a model; the model's own list
         // decides the rest when the tile is built
         let variant = model.as_ref().and_then(|_| self.seed_variant());
-        // an attached harness has its own agent catalog (opencode v2 has no
-        // dsh "standard" preset), so a new draft there starts on the server
+        // only the shared dsh server has the "standard" preset the composer
+        // remembers; a workspace v1 server and an attached v2 service have
+        // their own agent catalogs, so a new draft there starts on the server
         // default instead of inheriting the other harness's agent name
-        let agent = if crate::harness::attached(&harness) {
-            None
-        } else {
+        let agent = if crate::harness::shared_server(&harness) {
             self.seed_agent()
+        } else {
+            None
         };
         let mut tile = ChatTile::new(key.clone(), model, agent, variant);
         tile.harness = harness.clone();

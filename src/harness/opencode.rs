@@ -439,11 +439,21 @@ impl Harness for OpenCodeV1Harness {
     fn send_prompt(&mut self, session: &SessionId, prompt: Prompt) -> Result<(), HarnessError> {
         let Prompt {
             text,
-            choice,
+            mut choice,
             background,
             attachments,
             command,
         } = prompt;
+        // a draft may carry the dsh "standard" preset; v1's catalog has
+        // build/explore/general, so an unknown name must not ride the POST
+        if let Some(agent) = choice.agent.clone()
+            && !self
+                .agents()
+                .map(|agents| agents.iter().any(|known| known.name == agent))
+                .unwrap_or(false)
+        {
+            choice.agent = None;
+        }
         if background {
             return Err(HarnessError::Unsupported("background_prompt"));
         }

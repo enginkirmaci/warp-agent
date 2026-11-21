@@ -3888,6 +3888,25 @@ mod harness_settings_tests {
     }
 
     #[gpui_kit::gpui::test]
+    fn a_v1_draft_does_not_inherit_the_dsh_agent(cx: &mut gpui::TestAppContext) {
+        let _lock = lock_home();
+        let _home = HomeGuard::new();
+        let store = cx.update(Store::for_probe);
+        cx.update(|cx| {
+            store.update(cx, |store, cx| {
+                store.settings.default_harness = HarnessId::from("opencode");
+                store.ui.agent = Some("standard".into());
+                let tile = store.create_tile(cx);
+                assert_eq!(tile.harness, HarnessId::from("opencode"));
+                assert!(
+                    tile.selected_agent.is_none(),
+                    "v1 must not carry dsh's standard agent"
+                );
+            });
+        });
+    }
+
+    #[gpui_kit::gpui::test]
     fn a_v2_draft_does_not_inherit_the_dsh_agent(cx: &mut gpui::TestAppContext) {
         let _lock = lock_home();
         let _home = HomeGuard::new();

@@ -1,6 +1,6 @@
 [package]
 name = "warp-agent"
-version = "0.1.34"
+version = "0.1.35"
 edition = "2024"
 description = "WarpAgent — a tile-grid chat client for opencode serve, rebuilt on GPUI"
 license = "GPL-3.0"
@@ -12,14 +12,14 @@ publish = false
 
 [dependencies]
 # kit line: pinned by tag, patched to kits/ by warp-suite's local build
-warpui-kit-core = { git = "https://github.com/enginkirmaci/warp-suite", tag = "kits-v0.2.76", package = "warpui-kit-core" }
+warpui-kit-core = { git = "https://github.com/enginkirmaci/warp-suite", tag = "kits-v0.2.112", package = "warpui-kit-core" }
 # all-languages also feeds the chat code-block grammars; a removed diff dep
 # would take every tree-sitter grammar with it
-warpui-kit-diff = { git = "https://github.com/enginkirmaci/warp-suite", tag = "kits-v0.2.76", package = "warpui-kit-diff", features = ["all-languages"] }
-warpui-kit-markdown = { git = "https://github.com/enginkirmaci/warp-suite", tag = "kits-v0.2.76", package = "warpui-kit-markdown", features = ["all-languages"] }
-warpui-kit-picker = { git = "https://github.com/enginkirmaci/warp-suite", tag = "kits-v0.2.76", package = "warpui-kit-picker" }
-warpui-kit-platform = { git = "https://github.com/enginkirmaci/warp-suite", tag = "kits-v0.2.76", package = "warpui-kit-platform" }
-warpui-kit-worktree = { git = "https://github.com/enginkirmaci/warp-suite", tag = "kits-v0.2.76", package = "warpui-kit-worktree" }
+warpui-kit-diff = { git = "https://github.com/enginkirmaci/warp-suite", tag = "kits-v0.2.112", package = "warpui-kit-diff", features = ["all-languages"] }
+warpui-kit-markdown = { git = "https://github.com/enginkirmaci/warp-suite", tag = "kits-v0.2.112", package = "warpui-kit-markdown", features = ["all-languages"] }
+warpui-kit-picker = { git = "https://github.com/enginkirmaci/warp-suite", tag = "kits-v0.2.112", package = "warpui-kit-picker" }
+warpui-kit-platform = { git = "https://github.com/enginkirmaci/warp-suite", tag = "kits-v0.2.112", package = "warpui-kit-platform" }
+warpui-kit-worktree = { git = "https://github.com/enginkirmaci/warp-suite", tag = "kits-v0.2.112", package = "warpui-kit-worktree" }
 
 # the gpui stack, pinned here because the app builds standalone
 gpui = { package = "gpui-pre", version = "=0.3.11" }
@@ -57,7 +57,7 @@ unicode-segmentation = "1"
 gpui-kit = { version = "0.9", features = ["test-support"] }
 
 [build-dependencies]
-warpui-kit-build = { git = "https://github.com/enginkirmaci/warp-suite", tag = "kits-v0.2.76", package = "warpui-kit-build" }
+warpui-kit-build = { git = "https://github.com/enginkirmaci/warp-suite", tag = "kits-v0.2.112", package = "warpui-kit-build" }
 
 [target.'cfg(unix)'.dependencies]
 # PR_SET_PDEATHSIG for the spawned serve/dsh children

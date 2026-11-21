@@ -7,11 +7,11 @@ impl Store {
         &mut self,
         ws_key: &str,
         sessions: Vec<SessionInfo>,
-        is_dsh_list: bool,
+        is_shared_list: bool,
         cx: &mut Context<Self>,
     ) {
-        // a deleted chat can still ride a server list (dsh archives per
-        // process); never let one back into a workspace after a restart
+        // a deleted chat can still ride a server list (the shared server archives
+        // per process); never let one back into a workspace after a restart
         let sessions: Vec<SessionInfo> = sessions
             .into_iter()
             .filter(|s| !self.deleted_sessions.contains(&s.id))
@@ -22,10 +22,10 @@ impl Store {
                 self.track_session_info(Some(&s.id), Some(parent_id), None);
             }
         }
-        // a dsh list's entries are dsh chats by definition: mark them and
+        // a shared-server list's entries are its chats by definition: mark them and
         // track the ones this workspace doesn't know yet (revealed here by
         // cwd, e.g. created from another window)
-        if is_dsh_list {
+        if is_shared_list {
             let unknown: Vec<SessionInfo> = {
                 let known = self
                     .workspaces
@@ -42,9 +42,10 @@ impl Store {
                     .collect()
             };
             for s in &sessions {
-                self.ui
-                    .harness_by_session
-                    .insert(s.id.clone(), HarnessKind::Dsh);
+                self.ui.harness_by_session.insert(
+                    s.id.clone(),
+                    crate::harness::shared_server_id().unwrap_or_default(),
+                );
             }
             if !unknown.is_empty() {
                 if let Some(ws) = self.workspace_by_path_mut(ws_key) {
@@ -117,9 +118,7 @@ impl Store {
                     .unwrap_or_default();
                 existing
                     .into_iter()
-                    .filter(|chat| {
-                        (self.session_harness(&chat.id) == HarnessKind::Dsh) != is_dsh_list
-                    })
+                    .filter(|chat| self.session_is_shared(&chat.id) != is_shared_list)
                     .collect()
             };
             for chat in keep {
@@ -152,13 +151,13 @@ impl Store {
         });
         let alive: HashSet<String> = mine.iter().map(|s| s.id.clone()).collect();
         // drop chats that no longer exist on the server — only the ones this
-        // list's server owns (a dsh list knows nothing about opencode sessions)
+        // list's server owns (a shared list knows nothing about workspace sessions)
         let gone: Vec<String> = state
             .sessions
             .iter()
             .filter(|id| {
-                let dsh = self.session_harness(id) == HarnessKind::Dsh;
-                dsh == is_dsh_list && !alive.contains(*id)
+                let shared = self.session_is_shared(id);
+                shared == is_shared_list && !alive.contains(*id)
             })
             .cloned()
             .collect();
@@ -209,7 +208,7 @@ impl Store {
                 .unwrap_or_default();
             existing
                 .into_iter()
-                .filter(|item| (self.session_harness(&item.id) == HarnessKind::Dsh) != is_dsh_list)
+                .filter(|item| self.session_is_shared(&item.id) != is_shared_list)
                 .collect()
         };
         for item in keep {
@@ -500,7 +499,7 @@ impl Store {
     pub(super) fn forget_session(&mut self, id: &str, cx: &mut Context<Self>) {
         // a dsh follow stream keeps folded state for the chat; the net thread
         // drops it (a no-op for opencode) so deleting chats frees memory
-        self.net.send(NetCommand::ForgetDshSession {
+        self.net.send(NetCommand::ForgetSession {
             session_id: id.to_string(),
         });
         if let Some(tile_key) = self.tile_by_session.get(id).cloned() {
@@ -594,9 +593,9 @@ impl Store {
             let route = self
                 .net_key_for_session(&id)
                 .unwrap_or_else(|| ws_key.to_string());
-            if route == DSH_SERVER_KEY && !self.runtimes.contains_key(DSH_SERVER_KEY) {
-                self.ensure_dsh(cx);
-                self.pending_opens.push((DSH_SERVER_KEY.into(), id.clone()));
+            if self.is_shared_key(&route) && !self.runtimes.contains_key(&route) {
+                self.ensure_shared_server(cx);
+                self.pending_opens.push((route, id.clone()));
             } else {
                 self.net.send(NetCommand::Request {
                     ws_key: route,

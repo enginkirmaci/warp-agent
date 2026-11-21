@@ -93,8 +93,8 @@ impl Store {
             }
             UiEvent::ServerStarted { ws_key, result } => match result {
                 Ok(()) => {
-                    if ws_key == DSH_SERVER_KEY {
-                        self.on_dsh_started(cx);
+                    if self.is_shared_key(&ws_key) {
+                        self.on_shared_server_started(cx);
                         return;
                     }
                     // status starts Connected to match the pump's first attach
@@ -199,17 +199,17 @@ impl Store {
                     tracing::error!("server start failed for {name}: {err:#}");
                     // a models request parked on this start must not sit until
                     // the door's own timeout
-                    let harness = if ws_key == DSH_SERVER_KEY {
-                        HarnessKind::Dsh
+                    let harness = if self.is_shared_key(&ws_key) {
+                        crate::harness::shared_server_id().unwrap_or_default()
                     } else {
-                        HarnessKind::OpenCode
+                        crate::harness::workspace_harness().unwrap_or_default()
                     };
-                    if self.models_refreshing == Some(harness) {
+                    if self.models_refreshing.as_ref() == Some(&harness) {
                         self.models_refreshing = None;
                     }
                     let waiters = std::mem::take(&mut self.ipc_models_waiters);
                     for (requested, reply) in waiters {
-                        if requested.is_none_or(|h| h == harness) {
+                        if requested.as_ref().is_none_or(|h| h == &harness) {
                             let _ = reply.send(Err(format!("server failed to start: {err:#}")));
                         } else {
                             self.ipc_models_waiters.push((requested, reply));
@@ -304,8 +304,8 @@ impl Store {
                             oc::StreamStatus::Connected => {
                                 // the server is back: its sessions may have
                                 // changed (restart) while the stream was down
-                                if ws_key == DSH_SERVER_KEY {
-                                    self.refresh_dsh_lists();
+                                if self.is_shared_key(&ws_key) {
+                                    self.refresh_shared_lists();
                                 } else {
                                     self.net.send(NetCommand::Request {
                                         ws_key: ws_key.clone(),
@@ -352,13 +352,13 @@ impl Store {
             }
             UiEvent::SessionsLoaded {
                 ws_key,
-                dsh,
+                shared,
                 result,
             } => match result {
-                // the event names its own source: a dsh list (ListDshSessions)
+                // the event names its own source: a shared-server list
                 // carries the workspace folder and must never prune the same
-                // workspace's opencode chats — and vice versa
-                Ok(sessions) => self.apply_session_list(&ws_key, sessions, dsh, cx),
+                // workspace's per-workspace chats — and vice versa
+                Ok(sessions) => self.apply_session_list(&ws_key, sessions, shared, cx),
                 Err(err) => tracing::debug!("session list refresh failed: {err:#}"),
             },
             UiEvent::MessagesLoaded {
@@ -582,7 +582,9 @@ impl Store {
                         .is_some_and(|(folder, _)| folder == &ws_key)
                     {
                         let (_, kind) = self.pending_create_harness.pop_front().unwrap();
-                        self.ui.harness_by_session.insert(info.id.clone(), kind);
+                        self.ui
+                            .harness_by_session
+                            .insert(info.id.clone(), kind.clone());
                         kind
                     } else {
                         self.session_harness(&info.id)
@@ -767,10 +769,10 @@ impl Store {
             UiEvent::ModelsLoaded { harness, result } => {
                 match result {
                     Ok(models) => {
-                        if self.models_refreshing == Some(harness) {
+                        if self.models_refreshing.as_ref() == Some(&harness) {
                             self.models_refreshing = None;
                         }
-                        self.models_live.insert(harness);
+                        self.models_live.insert(harness.clone());
                         // merge: every running server contributes; existing entries stay for its own tiles
                         let restore: Vec<(String, Option<String>, Option<String>)> = self
                             .open_tiles
@@ -840,20 +842,20 @@ impl Store {
                         // un-harnessed request takes whichever list lands first)
                         let waiters = std::mem::take(&mut self.ipc_models_waiters);
                         for (requested, reply) in waiters {
-                            if requested.is_none_or(|h| h == harness) {
-                                let _ = reply.send(Ok(self.models_payload(requested)));
+                            if requested.as_ref().is_none_or(|h| h == &harness) {
+                                let _ = reply.send(Ok(self.models_payload(requested.clone())));
                             } else {
                                 self.ipc_models_waiters.push((requested, reply));
                             }
                         }
                     }
                     Err(err) => {
-                        if self.models_refreshing == Some(harness) {
+                        if self.models_refreshing.as_ref() == Some(&harness) {
                             self.models_refreshing = None;
                         }
                         let waiters = std::mem::take(&mut self.ipc_models_waiters);
                         for (requested, reply) in waiters {
-                            if requested.is_none_or(|h| h == harness) {
+                            if requested.as_ref().is_none_or(|h| h == &harness) {
                                 let _ = reply.send(Err(format!(
                                     "could not load {} models: {err:#}",
                                     harness.label()
@@ -896,7 +898,7 @@ impl Store {
             UiEvent::CommandsLoaded { ws_key, result } => {
                 self.commands_loading.remove(&ws_key);
                 if let Ok(commands) = result {
-                    let opencode = ws_key != DSH_SERVER_KEY;
+                    let opencode = !self.is_shared_key(&ws_key);
                     self.commands.insert(ws_key.clone(), commands);
                     if opencode {
                         self.ensure_local_opencode_commands(&ws_key);
@@ -904,30 +906,36 @@ impl Store {
                     self.repaint(cx);
                 }
             }
-            UiEvent::DshCommandSessionCreated {
+            UiEvent::CommandSessionCreated {
                 tile_key,
                 ws_key,
                 result,
             } => {
                 self.pending_command_tiles.remove(&tile_key);
+                let shared = self.shared_key();
                 if self.tile_by_key(&tile_key).is_none() {
-                    self.commands_loading.remove(DSH_SERVER_KEY);
+                    self.commands_loading.remove(&shared);
                     return;
                 }
                 match result {
-                    Ok(info) => self.adopt_dsh_command_session(&tile_key, &ws_key, info, cx),
+                    Ok(info) => self.adopt_command_session(&tile_key, &ws_key, info, cx),
                     Err(err) => {
-                        self.commands_loading.remove(DSH_SERVER_KEY);
+                        self.commands_loading.remove(&shared);
                         self.tile_note(
                             &tile_key,
-                            &format!("Could not open a dsh chat: {err:#}"),
+                            &format!(
+                                "Could not open a {} chat: {err:#}",
+                                crate::harness::shared_server_id()
+                                    .map(|id| crate::harness::label(&id))
+                                    .unwrap_or("harness")
+                            ),
                             true,
                             cx,
                         );
                     }
                 }
             }
-            UiEvent::DshCommandExecuted { session_id, result } => {
+            UiEvent::CommandExecuted { session_id, result } => {
                 let (text, error) = match result {
                     Ok(text) if text.trim().is_empty() => ("Command finished.".to_string(), false),
                     Ok(text) => (text, false),
@@ -991,7 +999,7 @@ impl Store {
     /// Adopts the session a dsh draft opened for its slash menu and asks for
     /// the catalog. Mirrors the session side of `SessionCreated`, without a
     /// pending prompt.
-    fn adopt_dsh_command_session(
+    fn adopt_command_session(
         &mut self,
         tile_key: &str,
         ws_key: &str,
@@ -1007,9 +1015,10 @@ impl Store {
             .insert(info.id.clone(), info.title.clone());
         self.tile_by_session
             .insert(info.id.clone(), tile_key.to_string());
-        self.ui
-            .harness_by_session
-            .insert(info.id.clone(), HarnessKind::Dsh);
+        self.ui.harness_by_session.insert(
+            info.id.clone(),
+            crate::harness::shared_server_id().unwrap_or_default(),
+        );
         if let Some(tile) = self.tile_by_key_mut(tile_key) {
             tile.session_id = Some(info.id.clone());
             tile.title = info.title.clone();
@@ -1035,9 +1044,10 @@ impl Store {
         self.sync_workspace_chats(cx);
         self.persist_tiles();
         self.save_state();
+        let shared = self.shared_key();
         self.net.send(NetCommand::Request {
-            ws_key: DSH_SERVER_KEY.into(),
-            request: ApiRequest::ListDshCommands {
+            ws_key: shared,
+            request: ApiRequest::ListAgentCommands {
                 session_id: Some(info.id),
             },
         });

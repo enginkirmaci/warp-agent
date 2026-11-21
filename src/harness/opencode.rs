@@ -21,9 +21,37 @@ use crate::oc::{
     ApiClient, RECONNECT_INITIAL, RECONNECT_MAX, RECONNECT_MAX_ATTEMPTS, RECONNECT_RESET_AFTER,
     ServerProcess, child_exited, find_free_port, read_question_request,
 };
-use crate::settings::HarnessKind;
 
 const HEALTH_POLL: Duration = Duration::from_secs(10);
+
+/// How the managed `opencode serve` child is launched. The registry carries
+/// this spec, so the legacy net path and this adapter share one definition.
+pub(crate) fn launch_spec() -> LaunchSpec {
+    LaunchSpec {
+        args: launch_args,
+        env: launch_env,
+        readiness: Readiness::HttpHealth,
+        timeout: Duration::from_secs(25),
+        attach_healthy: true,
+        capture_line: None,
+        timeout_message: "opencode serve did not become healthy within 25 s.",
+    }
+}
+
+fn launch_args(port: u16) -> Vec<String> {
+    [
+        "serve".to_string(),
+        "--hostname".to_string(),
+        "127.0.0.1".to_string(),
+        "--port".to_string(),
+        port.to_string(),
+    ]
+    .to_vec()
+}
+
+fn launch_env() -> Vec<(&'static str, &'static str)> {
+    vec![("OPENCODE_CONFIG_CONTENT", crate::oc::ASK_CONFIG)]
+}
 
 /// The managed opencode v1 adapter.
 pub struct OpenCodeV1Harness {
@@ -245,7 +273,7 @@ impl Harness for OpenCodeV1Harness {
             .unwrap_or_else(|| ".".into());
         let port = find_free_port().map_err(|err| HarnessError::Failed(format!("{err:#}")))?;
         let result = self.runtime.block_on(ServerProcess::start(
-            HarnessKind::OpenCode,
+            launch_spec(),
             &self.config.executable,
             &folder,
             port,

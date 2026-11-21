@@ -229,7 +229,6 @@ impl Store {
     ) {
         // close the buttons immediately so a slow reply cannot be clicked twice
         let mut session_id = None;
-        let mut is_v2 = false;
         for tile in &mut self.open_tiles {
             for item in &mut tile.items {
                 if let ChatItem::Permission(p) = Arc::make_mut(item)
@@ -244,7 +243,6 @@ impl Store {
                     p.was_auto_answered = is_auto;
                     p.auto_countdown = None;
                     session_id = Some(p.session_id.clone());
-                    is_v2 = p.is_v2;
                 }
             }
         }
@@ -259,19 +257,20 @@ impl Store {
                     item.was_auto_answered = is_auto;
                     item.auto_countdown = None;
                     session_id = Some(item.session_id.clone());
-                    is_v2 = item.is_v2;
                 }
             }
         }
         let Some(session_id) = session_id else { return };
-        if self.session_harness(&session_id) == HarnessKind::OpenCodeV2 {
+        if self.session_is_attached(&session_id) {
+            let harness = self.session_harness(&session_id);
             let decision = match response {
                 "always" => crate::harness::PermissionDecision::Always,
                 "reject" => crate::harness::PermissionDecision::Reject,
                 _ => crate::harness::PermissionDecision::Once,
             };
-            let result = self.v2.as_mut().map_or_else(
-                || Err("opencode v2 is not attached".to_string()),
+            let label = crate::harness::label(&harness);
+            let result = self.attached_mut(&harness).map_or_else(
+                || Err(format!("{label} is not attached")),
                 |adapter| {
                     adapter
                         .reply_permission(
@@ -300,17 +299,10 @@ impl Store {
             return;
         }
         let response = response.to_string();
-        let request = if is_v2 {
-            ApiRequest::ReplyV2 {
-                request_id: permission_id.to_string(),
-                response,
-            }
-        } else {
-            ApiRequest::RespondPermission {
-                session_id: session_id.clone(),
-                permission_id: permission_id.to_string(),
-                response,
-            }
+        let request = ApiRequest::RespondPermission {
+            session_id: session_id.clone(),
+            permission_id: permission_id.to_string(),
+            response,
         };
         self.net.send(NetCommand::Request { ws_key, request });
         // the card flipped to "sending…" — repaint now, not on the next event

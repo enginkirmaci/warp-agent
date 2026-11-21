@@ -14,9 +14,8 @@ use crate::harness::{
     PartPayload, SessionId, SessionState, ToolState,
 };
 use crate::ipc::{DoorModel, IpcCommand, Reply};
-use crate::oc::{ApiRequest, DSH_SERVER_KEY, NetCommand};
+use crate::oc::{ApiRequest, NetCommand};
 use crate::paths::AppPaths;
-use crate::settings::HarnessKind;
 
 /// One door-run: a prompt DevTools wants executed and answered. Bound to a
 /// draft tile key until the session exists, then to the session id.
@@ -102,44 +101,32 @@ impl Store {
             if !self.settings.harness_enabled(id) {
                 continue;
             }
-            let (state, available) = match id {
-                "opencode" => (
-                    if self
-                        .runtimes
-                        .keys()
-                        .any(|key| key.as_str() != DSH_SERVER_KEY)
-                    {
-                        "ready"
-                    } else {
-                        "stopped"
-                    },
-                    true,
-                ),
-                "dsh" => (
-                    if self.runtimes.contains_key(DSH_SERVER_KEY) {
-                        "ready"
-                    } else {
-                        "stopped"
-                    },
-                    true,
-                ),
-                // the host does not own the v2 instance until the store
-                // wiring ticket; the door reports it as not yet available
-                "opencode-v2" => {
-                    if self.v2.is_some() {
-                        ("ready", true)
-                    } else {
-                        (
-                            if self.v2_status.is_some() {
-                                "unavailable"
-                            } else {
-                                "stopped"
-                            },
-                            false,
-                        )
-                    }
+            let (state, available) = if crate::harness::attached(&descriptor.id) {
+                if self.attached.contains_key(&descriptor.id) {
+                    ("ready", true)
+                } else if self.attached_status.contains_key(&descriptor.id) {
+                    ("unavailable", false)
+                } else {
+                    ("stopped", false)
                 }
-                _ => ("stopped", false),
+            } else if crate::harness::app_scope(&descriptor.id) {
+                (
+                    if self.runtimes.contains_key(id) {
+                        "ready"
+                    } else {
+                        "stopped"
+                    },
+                    true,
+                )
+            } else {
+                (
+                    if self.runtimes.keys().any(|key| !self.is_shared_key(key)) {
+                        "ready"
+                    } else {
+                        "stopped"
+                    },
+                    true,
+                )
             };
             let connection = match descriptor.connection {
                 crate::harness::ConnectionKind::Managed => "managed",
@@ -180,7 +167,7 @@ impl Store {
             "models" => {
                 let id = harness.ok_or_else(|| "harness is required".to_string())?;
                 require_enabled(id)?;
-                let Some(kind) = HarnessKind::from_wire(id) else {
+                let Some(kind) = HarnessId::from_wire(id) else {
                     return Err(format!(
                         "unavailable: harness {id} has no model catalog yet"
                     ));
@@ -194,14 +181,14 @@ impl Store {
                         continue;
                     };
                     if let Some(id) = harness
-                        && id != tile.harness.label()
+                        && id != tile.harness.as_str()
                     {
                         continue;
                     }
                     sessions.push(json!({
                         "id": session,
                         "title": self.title_for(session),
-                        "harness": tile.harness.label(),
+                        "harness": tile.harness.as_str(),
                         "running": self.running_by_session.contains(session),
                     }));
                 }
@@ -217,7 +204,7 @@ impl Store {
                     Some(tile) => Ok(json!({
                         "id": session,
                         "title": self.title_for(session),
-                        "harness": tile.harness.label(),
+                        "harness": tile.harness.as_str(),
                         "running": self.running_by_session.contains(session),
                     })),
                     None => Err(format!("not-found: session {session}")),
@@ -265,7 +252,7 @@ impl Store {
         model: DoorModel,
         cx: &mut Context<Self>,
     ) -> Result<Value, String> {
-        if let Some(harness) = model.harness
+        if let Some(harness) = &model.harness
             && !self.harness_enabled(harness)
         {
             return Err(format!("harness {} is disabled", harness.label()));
@@ -278,7 +265,7 @@ impl Store {
         };
         // the picker's harness is applied before the model so switching
         // backends cannot leave a model the new harness never listed
-        if let Some(harness) = model.harness {
+        if let Some(harness) = model.harness.clone() {
             self.set_tile_harness(&tile_key, harness, cx);
         }
         self.ipc_seed_tile(&tile_key, prefill, model);
@@ -384,7 +371,7 @@ impl Store {
         reply: Reply,
         cx: &mut Context<Self>,
     ) {
-        if let Some(harness) = model.harness
+        if let Some(harness) = &model.harness
             && !self.harness_enabled(harness)
         {
             let _ = reply.send(Err(format!("harness {} is disabled", harness.label())));
@@ -409,7 +396,7 @@ impl Store {
         };
         // the picker's harness is applied before the model so switching
         // backends cannot leave a model the new harness never listed
-        if let Some(harness) = model.harness {
+        if let Some(harness) = model.harness.clone() {
             self.set_tile_harness(&tile_key, harness, cx);
         }
         self.ipc_seed_tile(&tile_key, prompt, model);
@@ -478,12 +465,12 @@ impl Store {
 
     fn ipc_models(
         &mut self,
-        harness: Option<HarnessKind>,
+        harness: Option<HarnessId>,
         refresh: bool,
         reply: Reply,
         cx: &mut Context<Self>,
     ) {
-        if let Some(harness) = harness
+        if let Some(harness) = &harness
             && !self.harness_enabled(harness)
         {
             let _ = reply.send(Err(format!("harness {} is disabled", harness.label())));
@@ -493,9 +480,9 @@ impl Store {
             // a refresh is a request to re-read the backend, not a cache
             // lookup: drop the "live" marker so the answer lands only after
             // the fresh catalog does, and a later plain request re-lists too
-            match harness {
+            match &harness {
                 Some(harness) => {
-                    self.models_live.remove(&harness);
+                    self.models_live.remove(harness);
                 }
                 None => {
                     let _ = reply.send(Err("refresh requires a harness".into()));
@@ -503,34 +490,38 @@ impl Store {
                 }
             }
         } else {
-            let known = match harness {
-                Some(harness) => self.models_live.contains(&harness),
+            let known = match &harness {
+                Some(harness) => self.models_live.contains(harness),
                 None => !self.model_infos.is_empty(),
             };
             if known {
-                let _ = reply.send(Ok(self.models_payload(harness)));
+                let _ = reply.send(Ok(self.models_payload(harness.clone())));
                 return;
             }
         }
-        if harness == Some(HarnessKind::OpenCodeV2) {
-            self.ensure_v2(cx);
-            if self.models_live.contains(&HarnessKind::OpenCodeV2) {
-                let _ = reply.send(Ok(self.models_payload(harness)));
+        if let Some(harness) = harness.clone().filter(crate::harness::attached) {
+            self.ensure_attached(&harness, cx);
+            if self.models_live.contains(&harness) {
+                let _ = reply.send(Ok(self.models_payload(Some(harness))));
             } else {
                 let detail = self
-                    .v2_status
-                    .clone()
-                    .unwrap_or_else(|| "opencode v2 did not list models".into());
+                    .attached_status
+                    .get(&harness)
+                    .cloned()
+                    .unwrap_or_else(|| {
+                        format!("{} did not list models", crate::harness::label(&harness))
+                    });
                 let _ = reply.send(Err(format!("unavailable: {detail}")));
             }
             return;
         }
-        if harness == Some(HarnessKind::Dsh) {
-            let running = self.runtimes.contains_key(DSH_SERVER_KEY);
-            self.ensure_dsh(cx);
+        if harness.as_ref().is_some_and(crate::harness::shared_server) {
+            let shared = self.shared_key();
+            let running = self.runtimes.contains_key(&shared);
+            self.ensure_shared_server(cx);
             if running {
                 self.net.send(NetCommand::Request {
-                    ws_key: DSH_SERVER_KEY.into(),
+                    ws_key: shared,
                     request: ApiRequest::ListModels,
                 });
             }
@@ -560,7 +551,7 @@ impl Store {
     /// One `models` answer: the legacy flat key list plus the harness and
     /// variant metadata the settings pickers need. A requested harness only
     /// sees its own catalog; without one every known model is included.
-    pub(super) fn models_payload(&self, harness: Option<HarnessKind>) -> Value {
+    pub(super) fn models_payload(&self, harness: Option<HarnessId>) -> Value {
         let enabled = self.settings.enabled_harness_ids();
         models_payload(&self.model_infos, harness, &enabled)
     }
@@ -898,17 +889,21 @@ fn harness_capabilities(capabilities: &HarnessCapabilities) -> Value {
 
 fn models_payload(
     infos: &[crate::oc::ModelInfo],
-    harness: Option<HarnessKind>,
+    harness: Option<HarnessId>,
     enabled_ids: &[String],
 ) -> Value {
-    let enabled: Vec<HarnessKind> = enabled_ids
+    let enabled: Vec<HarnessId> = enabled_ids
         .iter()
-        .filter_map(|id| HarnessKind::from_wire(id))
+        .filter_map(|id| HarnessId::from_wire(id))
         .collect();
     let entries: Vec<&crate::oc::ModelInfo> = infos
         .iter()
         .filter(|model| enabled.contains(&model.harness))
-        .filter(|model| harness.is_none_or(|harness| model.harness == harness))
+        .filter(|model| {
+            harness
+                .as_ref()
+                .is_none_or(|harness| &model.harness == harness)
+        })
         .collect();
     let models: Vec<&str> = entries.iter().map(|model| model.key.as_str()).collect();
     let catalog: Vec<Value> = entries
@@ -922,13 +917,13 @@ fn models_payload(
             })
         })
         .collect();
-    let harnesses: Vec<Value> = HarnessKind::ALL
+    let harnesses: Vec<Value> = HarnessId::all()
         .iter()
         .filter(|harness| enabled.contains(harness))
         .map(|harness| {
             json!({
-                "id": harness.label(),
-                "label": harness.option_label(),
+                "id": harness.as_str(),
+                "label": harness.label(),
             })
         })
         .collect();
@@ -949,19 +944,19 @@ mod tests {
         let infos = vec![
             ModelInfo {
                 key: "a/x".into(),
-                harness: HarnessKind::OpenCode,
+                harness: HarnessId::from("opencode"),
                 variants: vec!["low".into(), "high".into()],
                 context_limit: 100,
             },
             ModelInfo {
                 key: "b/y".into(),
-                harness: HarnessKind::Dsh,
+                harness: HarnessId::from("dsh"),
                 variants: vec!["max".into()],
                 context_limit: 0,
             },
         ];
         let enabled = vec!["opencode".to_string(), "dsh".to_string()];
-        let dsh = models_payload(&infos, Some(HarnessKind::Dsh), &enabled);
+        let dsh = models_payload(&infos, Some(HarnessId::from("dsh")), &enabled);
         assert_eq!(dsh["models"], json!(["b/y"]));
         assert_eq!(dsh["catalog"][0]["key"], "b/y");
         assert_eq!(dsh["catalog"][0]["harness"], "dsh");
@@ -974,7 +969,7 @@ mod tests {
         assert_eq!(all["catalog"].as_array().unwrap().len(), 2);
 
         let only_opencode = vec!["opencode".to_string()];
-        let disabled = models_payload(&infos, Some(HarnessKind::Dsh), &only_opencode);
+        let disabled = models_payload(&infos, Some(HarnessId::from("dsh")), &only_opencode);
         assert_eq!(disabled["models"], json!([]));
         assert_eq!(disabled["harnesses"].as_array().unwrap().len(), 1);
     }

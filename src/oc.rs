@@ -7,8 +7,8 @@
 //! events whose "part" carries the full text-so-far each time.
 //!
 //! A second harness, DeepSeek Harness (`dsh web`), rides the same thread: its
-//! client and event translation live in [`crate::dsh`], keyed by the reserved
-//! workspace key [`DSH_SERVER_KEY`].
+//! client and event translation live in [`crate::dsh`], keyed by the harness
+//! id the registry gives its app-wide instance.
 
 use anyhow::{Context as _, Result, anyhow};
 use serde::{Deserialize, Serialize};
@@ -17,13 +17,9 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use crate::settings::HarnessKind;
+use crate::harness::{HarnessId, LaunchSpec, Readiness};
 
 pub const ASK_CONFIG: &str = r#"{"$schema":"https://opencode.ai/config.json","permission":{"edit":"ask","bash":"ask","webfetch":"ask"}}"#;
-
-/// Reserved net-thread key of the shared `dsh web` singleton. dsh sessions
-/// carry their own cwd, so one process serves every workspace's dsh chats.
-pub const DSH_SERVER_KEY: &str = "dsh";
 
 // ---- reconnect policy ------------------------------------------------------
 
@@ -65,9 +61,9 @@ pub struct StoredMessage {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ModelInfo {
     pub key: String,
-    /// Which backend serves the model; the two catalogs overlap on some
-    /// names, so a key alone is not enough to resolve it.
-    pub harness: HarnessKind,
+    /// Which backend serves the model; the catalogs overlap on some names, so
+    /// a key alone is not enough to resolve it.
+    pub harness: HarnessId,
     #[serde(default)]
     pub variants: Vec<String>,
     #[serde(default)]
@@ -146,8 +142,12 @@ impl ServerProcess {
         Arc::clone(&self.child)
     }
 
+    /// Launch the managed child (or attach to an already healthy one) and
+    /// wait for it to become reachable. The descriptor's [`LaunchSpec`] owns
+    /// everything harness-specific: arguments, environment, what "up" means
+    /// and how long to wait.
     pub async fn start(
-        kind: HarnessKind,
+        spec: LaunchSpec,
         executable: &str,
         folder: &str,
         port: u16,
@@ -157,13 +157,11 @@ impl ServerProcess {
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(2))
             .build()?;
-        // dsh's launch token is per-process: an existing server cannot be
-        // attached to (its token is unknowable), so always spawn our own
-        if kind == HarnessKind::OpenCode && is_healthy(&client, &base_url).await {
-            tracing::info!("attached to a healthy opencode server at {base_url}");
-            on_log(format!(
-                "attaching to a healthy opencode server at {base_url}"
-            ));
+        // a launch credential is per-process: an existing server cannot be
+        // attached to (its credential is unknowable), always spawn our own
+        if spec.attach_healthy && is_healthy(&client, &base_url).await {
+            tracing::info!("attached to a healthy server at {base_url}");
+            on_log(format!("attaching to a healthy server at {base_url}"));
             return Ok(ServerProcess {
                 base_url,
                 token: None,
@@ -172,34 +170,7 @@ impl ServerProcess {
         }
 
         let mut command = tokio::process::Command::new(executable);
-        match kind {
-            HarnessKind::OpenCode => {
-                command
-                    .args([
-                        "serve",
-                        "--hostname",
-                        "127.0.0.1",
-                        "--port",
-                        &port.to_string(),
-                    ])
-                    .env("OPENCODE_CONFIG_CONTENT", ASK_CONFIG);
-            }
-            HarnessKind::Dsh => {
-                command.args([
-                    "web",
-                    "--no-open",
-                    "--host",
-                    "127.0.0.1",
-                    "--port",
-                    &port.to_string(),
-                ]);
-            }
-            HarnessKind::OpenCodeV2 => {
-                return Err(anyhow!(
-                    "opencode v2 is attached through the harness adapter, not a managed server"
-                ));
-            }
-        }
+        command.args((spec.args)(port)).envs((spec.env)());
         command
             .current_dir(std::path::Path::new(
                 if std::path::Path::new(folder).exists() {
@@ -235,7 +206,8 @@ impl ServerProcess {
             .with_context(|| format!("'{executable}' failed to start"))?;
         tracing::info!("spawned {executable} (pid {:?}) in {folder}", child.id());
 
-        // dsh prints its auth token on stdout; the wait loop below polls it
+        // some children print a launch credential on stdout; the wait loop
+        // below polls it
         let token_slot = Arc::new(Mutex::new(None::<String>));
         // stream stdout/stderr into the log
         let log = std::sync::Arc::new(on_log);
@@ -247,15 +219,15 @@ impl ServerProcess {
                 let reader = BufReader::new(stdout);
                 let mut lines = reader.lines();
                 while let Ok(Some(line)) = lines.next_line().await {
-                    let token = crate::dsh::token_from_line(&line);
-                    if let Some(token) = token
-                        && token_slot.lock().expect("dsh token").is_none()
+                    let token = spec.capture_line.and_then(|capture| capture(&line));
+                    if let Some(token) = &token
+                        && token_slot.lock().expect("launch credential").is_none()
                     {
-                        *token_slot.lock().expect("dsh token") = Some(token.to_string());
+                        *token_slot.lock().expect("launch credential") = Some(token.clone());
                     }
                     // the URL line carries the /connect credential: keep the
-                    // URL and port in the log, never the token value
-                    let logged = match token {
+                    // URL and port in the log, never the credential value
+                    let logged = match &token {
                         Some(token) => line.replace(token, "…"),
                         None => line,
                     };
@@ -281,22 +253,11 @@ impl ServerProcess {
             child: Arc::new(Mutex::new(Some(child))),
         };
 
-        // dsh is a node app — give its boot far more headroom than opencode
-        let timeout = match kind {
-            HarnessKind::OpenCode => Duration::from_secs(25),
-            HarnessKind::Dsh => Duration::from_secs(40),
-            HarnessKind::OpenCodeV2 => Duration::from_secs(25),
-        };
-        let deadline = std::time::Instant::now() + timeout;
+        let deadline = std::time::Instant::now() + spec.timeout;
         loop {
             if std::time::Instant::now() >= deadline {
-                let what = match kind {
-                    HarnessKind::OpenCode => "opencode serve did not become healthy within 25 s.",
-                    HarnessKind::Dsh => "dsh web did not print its URL within 40 s.",
-                    HarnessKind::OpenCodeV2 => "opencode v2 is not a managed server.",
-                };
-                tracing::warn!("{what}");
-                return Err(anyhow!("{what}"));
+                tracing::warn!("{}", spec.timeout_message);
+                return Err(anyhow!("{}", spec.timeout_message));
             }
             {
                 let mut guard = process.child.lock().expect("child lock");
@@ -307,21 +268,18 @@ impl ServerProcess {
                     return Err(anyhow!("the server exited with code {status}."));
                 }
             }
-            match kind {
-                HarnessKind::OpenCode => {
+            match spec.readiness {
+                Readiness::HttpHealth => {
                     if is_healthy(&client, &base_url).await {
                         return Ok(process);
                     }
                 }
-                HarnessKind::Dsh => {
-                    let token = token_slot.lock().expect("dsh token").clone();
+                Readiness::LaunchCredential => {
+                    let token = token_slot.lock().expect("launch credential").clone();
                     if let Some(token) = token {
                         process.token = Some(token);
                         return Ok(process);
                     }
-                }
-                HarnessKind::OpenCodeV2 => {
-                    return Err(anyhow!("opencode v2 is not a managed server"));
                 }
             }
             tokio::time::sleep(Duration::from_millis(300)).await;
@@ -346,6 +304,11 @@ async fn is_healthy(client: &reqwest::Client, base_url: &str) -> bool {
             .await,
         Ok(resp) if resp.status().is_success()
     )
+}
+
+/// The registry's per-workspace harness, which this client module serves.
+fn workspace_harness_id() -> HarnessId {
+    crate::harness::workspace_harness().unwrap_or_else(|| HarnessId::new("opencode"))
 }
 
 pub fn find_free_port() -> Result<u16> {
@@ -630,16 +593,6 @@ impl ApiClient {
         error_for_status(resp).await.map(|_| ())
     }
 
-    pub async fn reply_v2(&self, request_id: &str, reply: &str) -> Result<()> {
-        let resp = self
-            .rest
-            .post(format!("{}/permission/{}/reply", self.base_url, request_id))
-            .json(&json!({ "reply": reply }))
-            .send()
-            .await?;
-        error_for_status(resp).await.map(|_| ())
-    }
-
     pub async fn get_questions(&self) -> Result<Vec<QuestionRequestInfo>> {
         let resp = self
             .rest
@@ -823,7 +776,7 @@ impl ApiClient {
                         .unwrap_or(0);
                     models.push(ModelInfo {
                         key: format!("{pid}/{name}"),
-                        harness: HarnessKind::OpenCode,
+                        harness: workspace_harness_id(),
                         variants,
                         context_limit,
                     });
@@ -1030,11 +983,11 @@ pub(crate) fn base64_encode(data: &[u8]) -> String {
 // ---- net thread ----------------------------------------------------------
 
 pub enum NetCommand {
-    /// Spawn (or attach to) the server for a workspace and start its event pump.
-    /// `ws_key` is [`DSH_SERVER_KEY`] for the shared dsh singleton.
+    /// Spawn (or attach to) the server for a harness instance and start its
+    /// event pump. An app-wide harness is keyed by its id.
     StartServer {
         ws_key: String,
-        kind: HarnessKind,
+        harness: HarnessId,
         executable: String,
         folder: String,
     },
@@ -1057,8 +1010,8 @@ pub enum NetCommand {
     },
     /// Fan a pre-serialized event frame out to every connected door client.
     IpcBroadcast { line: String },
-    /// A chat was deleted: drop any folded dsh follow state for it.
-    ForgetDshSession { session_id: String },
+    /// A chat was deleted: drop any folded follow state for it.
+    ForgetSession { session_id: String },
     /// Ask whether a folder is a git repository: the worktree toggle's
     /// visibility, answered once per folder.
     ProbeRepository { folder: String },
@@ -1083,18 +1036,18 @@ pub enum ApiRequest {
     /// dsh: one workspace folder's sessions, filtered by cwd from the shared
     /// server's list. The reply carries the folder as ws_key so the store
     /// applies it like that workspace's own list.
-    ListDshSessions {
+    ListSessionsIn {
         folder: String,
     },
     /// dsh: create a session owned by `folder` (dsh sessions carry their own
     /// cwd). The reply carries the folder as ws_key.
-    CreateDshSession {
+    CreateSessionIn {
         folder: String,
         title: String,
     },
     /// dsh: the fork flow — an empty session whose composer is seeded with
     /// `context` (the dsh server has no parts-append endpoint either).
-    CreateDshForkSession {
+    CreateForkSessionIn {
         folder: String,
         title: String,
         context: String,
@@ -1129,10 +1082,6 @@ pub enum ApiRequest {
         permission_id: String,
         response: String,
     },
-    ReplyV2 {
-        request_id: String,
-        response: String,
-    },
     GetQuestions {
         for_session: String,
     },
@@ -1148,19 +1097,19 @@ pub enum ApiRequest {
     /// dsh: the agent-scoped command + skill catalog (commands/list +
     /// skills/list). Commands are the builtin actions (`compact`, `plan`, …);
     /// skills are the workspace instructions. Both need a session id.
-    ListDshCommands {
+    ListAgentCommands {
         session_id: Option<String>,
     },
     /// dsh: open a session for a draft's slash menu. Unlike
-    /// [`ApiRequest::CreateDshSession`] this carries no prompt: the first real
+    /// [`ApiRequest::CreateSessionIn`] this carries no prompt: the first real
     /// send reuses the session.
-    CreateDshCommandSession {
+    CreateCommandSession {
         tile_key: String,
         folder: String,
     },
     /// dsh: run one listed command through commands/execute. Commands are
     /// log-only; they never become a model message.
-    ExecuteDshCommand {
+    ExecuteCommand {
         session_id: String,
         line: String,
     },
@@ -1248,10 +1197,10 @@ pub enum UiEvent {
     },
     SessionsLoaded {
         ws_key: String,
-        /// True when the reply came from the shared dsh server (a dsh list
-        /// must never prune the same workspace's opencode chats, and vice
-        /// versa); carried on the event so replies can never be misattributed
-        dsh: bool,
+        /// True when the reply came from the shared app-wide server (such a
+        /// list must never prune a workspace server's chats, and vice versa);
+        /// carried on the event so replies can never be misattributed
+        shared: bool,
         result: Result<Vec<SessionInfo>>,
     },
     MessagesLoaded {
@@ -1296,7 +1245,7 @@ pub enum UiEvent {
         result: Result<()>,
     },
     ModelsLoaded {
-        harness: HarnessKind,
+        harness: HarnessId,
         result: Result<Vec<ModelInfo>>,
     },
     AgentsLoaded {
@@ -1306,15 +1255,15 @@ pub enum UiEvent {
         ws_key: String,
         result: Result<Vec<CommandInfo>>,
     },
-    /// dsh: the lazy session a draft asked for when its slash menu opened.
-    DshCommandSessionCreated {
+    /// The lazy session a draft asked for when its slash menu opened.
+    CommandSessionCreated {
         tile_key: String,
         ws_key: String,
         result: Result<SessionInfo>,
     },
-    /// dsh: one `commands/execute` result; `Ok` carries the success text
-    /// (possibly empty), `Err` the command's own error text.
-    DshCommandExecuted {
+    /// One command execution result; `Ok` carries the success text (possibly
+    /// empty), `Err` the command's own error text.
+    CommandExecuted {
         session_id: String,
         result: Result<String>,
     },
@@ -1351,12 +1300,12 @@ pub enum UiEvent {
 }
 
 struct WorkspaceNet {
-    kind: HarnessKind,
+    harness: HarnessId,
     process: Option<ServerProcess>,
     api: ApiClient,
-    /// set when kind is Dsh: the shared web client + its event pump feeds
-    /// UiEvents that are already opencode-shaped
-    dsh: Option<crate::dsh::DshHandle>,
+    /// The shared app-wide server's web client; its event pump feeds
+    /// UiEvents that are already opencode-shaped.
+    shared: Option<crate::dsh::DshHandle>,
     event_stop: Option<async_channel::Sender<()>>,
 }
 
@@ -1417,7 +1366,7 @@ async fn net_main(
         match command {
             NetCommand::StartServer {
                 ws_key,
-                kind,
+                harness,
                 executable,
                 folder,
             } => {
@@ -1455,7 +1404,7 @@ async fn net_main(
                 let event_tx = event_tx.clone();
                 tokio::spawn(async move {
                     let result =
-                        start_workspace(&ws_key, kind, &executable, &folder, &event_tx).await;
+                        start_workspace(&ws_key, &harness, &executable, &folder, &event_tx).await;
                     starting.lock().expect("starting").remove(&ws_key);
                     // a stop that landed while booting wins: tear the child
                     // down and stay silent (StopServer already announced)
@@ -1600,36 +1549,31 @@ async fn net_main(
                     let workspaces = workspaces.lock().expect("workspaces");
                     workspaces
                         .get(&ws_key)
-                        .map(|ws| (ws.kind, ws.api.clone(), ws.dsh.clone()))
+                        .map(|ws| (ws.harness.clone(), ws.api.clone(), ws.shared.clone()))
                 };
-                let Some((kind, client, handle)) = target else {
+                let Some((harness, client, shared)) = target else {
                     continue;
                 };
                 let event_tx = event_tx.clone();
-                match kind {
-                    HarnessKind::OpenCode => {
-                        tokio::spawn(async move {
-                            let event = run_request(&client, ws_key, request).await;
-                            let _ = event_tx.send(event).await;
-                        });
-                    }
-                    HarnessKind::Dsh => {
-                        let Some(handle) = handle else {
-                            continue;
-                        };
-                        tokio::spawn(async move {
-                            let event = crate::dsh::run_request(&handle, ws_key, request).await;
-                            let _ = event_tx.send(event).await;
-                        });
-                    }
-                    HarnessKind::OpenCodeV2 => {
-                        let _ = event_tx
-                            .send(UiEvent::Log {
-                                ws_key: ws_key.clone(),
-                                line: "opencode v2 requests go through the harness adapter".into(),
-                            })
-                            .await;
-                    }
+                if crate::harness::attached(&harness) {
+                    let event = UiEvent::Log {
+                        ws_key: ws_key.clone(),
+                        line: format!("{harness} requests go through its harness adapter"),
+                    };
+                    let _ = event_tx.send(event).await;
+                } else if crate::harness::shared_server(&harness) {
+                    let Some(handle) = shared else {
+                        continue;
+                    };
+                    tokio::spawn(async move {
+                        let event = crate::dsh::run_request(&handle, ws_key, request).await;
+                        let _ = event_tx.send(event).await;
+                    });
+                } else {
+                    tokio::spawn(async move {
+                        let event = run_request(&client, ws_key, request).await;
+                        let _ = event_tx.send(event).await;
+                    });
                 }
             }
             NetCommand::SendMessage {
@@ -1646,9 +1590,9 @@ async fn net_main(
                     let workspaces = workspaces.lock().expect("workspaces");
                     workspaces
                         .get(&ws_key)
-                        .map(|ws| (ws.kind, ws.api.clone(), ws.dsh.clone()))
+                        .map(|ws| (ws.harness.clone(), ws.api.clone(), ws.shared.clone()))
                 };
-                let Some((kind, client, handle)) = target else {
+                let Some((harness, client, shared)) = target else {
                     // don't drop silently — the tile would sit "running" forever
                     let _ = event_tx
                         .send(UiEvent::MessageSendFailed {
@@ -1659,69 +1603,69 @@ async fn net_main(
                     continue;
                 };
                 let event_tx = event_tx.clone();
-                match kind {
-                    HarnessKind::OpenCode => {
-                        tokio::spawn(async move {
-                            send_with_blips(
-                                &client,
-                                session_id,
-                                text,
-                                model,
-                                variant,
-                                agent,
-                                attachments,
-                                command,
-                                &event_tx,
-                            )
-                            .await;
-                        });
-                    }
-                    HarnessKind::Dsh => {
-                        let Some(handle) = handle else {
-                            let _ = event_tx
-                                .send(UiEvent::MessageSendFailed {
-                                    session_id: session_id.clone(),
-                                    error: "this chat's workspace server is not running".into(),
-                                })
-                                .await;
-                            continue;
-                        };
-                        tokio::spawn(async move {
-                            // slash text goes out verbatim: dsh expands it itself
-                            let result = crate::dsh::send_message(
-                                &handle,
-                                &session_id,
-                                &text,
-                                model.as_deref(),
-                                variant.as_deref(),
-                                agent.as_deref(),
-                                &attachments,
-                            )
-                            .await;
-                            if let Err(err) = result {
-                                let _ = event_tx
-                                    .send(UiEvent::MessageSendFailed {
-                                        session_id,
-                                        error: format!("{err:#}"),
-                                    })
-                                    .await;
-                            }
-                        });
-                    }
-                    HarnessKind::OpenCodeV2 => {
+                if crate::harness::attached(&harness) {
+                    let _ = event_tx
+                        .send(UiEvent::MessageSendFailed {
+                            session_id: session_id.clone(),
+                            error: format!("{harness} sends through its harness adapter"),
+                        })
+                        .await;
+                } else if crate::harness::shared_server(&harness) {
+                    let Some(handle) = shared else {
                         let _ = event_tx
                             .send(UiEvent::MessageSendFailed {
                                 session_id: session_id.clone(),
-                                error: "opencode v2 sends through the harness adapter".into(),
+                                error: "this chat's workspace server is not running".into(),
                             })
                             .await;
-                    }
+                        continue;
+                    };
+                    tokio::spawn(async move {
+                        // slash text goes out verbatim: the shared server
+                        // expands it itself
+                        let result = crate::dsh::send_message(
+                            &handle,
+                            &session_id,
+                            &text,
+                            model.as_deref(),
+                            variant.as_deref(),
+                            agent.as_deref(),
+                            &attachments,
+                        )
+                        .await;
+                        if let Err(err) = result {
+                            let _ = event_tx
+                                .send(UiEvent::MessageSendFailed {
+                                    session_id,
+                                    error: format!("{err:#}"),
+                                })
+                                .await;
+                        }
+                    });
+                } else {
+                    tokio::spawn(async move {
+                        send_with_blips(
+                            &client,
+                            session_id,
+                            text,
+                            model,
+                            variant,
+                            agent,
+                            attachments,
+                            command,
+                            &event_tx,
+                        )
+                        .await;
+                    });
                 }
             }
-            NetCommand::ForgetDshSession { session_id } => {
+            NetCommand::ForgetSession { session_id } => {
                 let handle = {
                     let workspaces = workspaces.lock().expect("workspaces");
-                    workspaces.get(DSH_SERVER_KEY).and_then(|ws| ws.dsh.clone())
+                    workspaces
+                        .values()
+                        .find(|ws| crate::harness::shared_server(&ws.harness))
+                        .and_then(|ws| ws.shared.clone())
                 };
                 if let Some(handle) = handle {
                     handle.forget_session(&session_id);
@@ -1754,16 +1698,22 @@ async fn net_main(
 
 async fn start_workspace(
     ws_key: &str,
-    kind: HarnessKind,
+    harness: &HarnessId,
     executable: &str,
     folder: &str,
     event_tx: &async_channel::Sender<UiEvent>,
 ) -> Result<WorkspaceNet> {
+    let Some(spec) = crate::harness::registry()
+        .get(harness)
+        .and_then(|descriptor| descriptor.launch)
+    else {
+        return Err(anyhow!("{harness} is not a managed server"));
+    };
     let port = find_free_port()?;
     let log_tx = event_tx.clone();
     let key = ws_key.to_string();
     let process = ServerProcess::start(
-        kind,
+        spec,
         executable,
         folder,
         port,
@@ -1779,7 +1729,7 @@ async fn start_workspace(
     let base_url = process.base_url.clone();
     let api = ApiClient::new(&base_url);
 
-    if kind == HarnessKind::Dsh {
+    if crate::harness::shared_server(harness) {
         let token = process
             .token
             .clone()
@@ -1829,10 +1779,10 @@ async fn start_workspace(
             }
         });
         return Ok(WorkspaceNet {
-            kind,
+            harness: harness.clone(),
             process: Some(process),
             api,
-            dsh: Some(handle),
+            shared: Some(handle),
             event_stop: Some(stop_tx),
         });
     }
@@ -1977,10 +1927,10 @@ async fn start_workspace(
     });
 
     Ok(WorkspaceNet {
-        kind,
+        harness: harness.clone(),
         process: Some(process),
         api,
-        dsh: None,
+        shared: None,
         event_stop: Some(stop_tx),
     })
 }
@@ -2063,27 +2013,27 @@ async fn run_request(client: &ApiClient, ws_key: String, request: ApiRequest) ->
     match request {
         ApiRequest::ListSessions => UiEvent::SessionsLoaded {
             ws_key,
-            dsh: false,
+            shared: false,
             result: client.list_sessions().await,
         },
         // dsh-only requests never reach the opencode runner (net_main routes
         // by workspace kind); answering with a list would prune the workspace's
         // real dsh chats, so log the misrouting instead
-        ApiRequest::ListDshSessions { folder } => UiEvent::Log {
+        ApiRequest::ListSessionsIn { folder } => UiEvent::Log {
             ws_key,
             line: format!("dsh session list for {folder} misrouted to an opencode runner"),
         },
-        ApiRequest::CreateDshSession { folder, .. } => UiEvent::SessionCreated {
+        ApiRequest::CreateSessionIn { folder, .. } => UiEvent::SessionCreated {
             ws_key: folder,
             result: Err(anyhow!("dsh request routed to an opencode server")),
         },
-        ApiRequest::CreateDshForkSession { folder, .. } => UiEvent::ForkSessionCreated {
+        ApiRequest::CreateForkSessionIn { folder, .. } => UiEvent::ForkSessionCreated {
             ws_key: folder,
             context: String::new(),
             result: Err(anyhow!("dsh request routed to an opencode server")),
         },
         ApiRequest::ListModels => UiEvent::ModelsLoaded {
-            harness: HarnessKind::OpenCode,
+            harness: workspace_harness_id(),
             result: client.get_models().await,
         },
         ApiRequest::ListAgents => UiEvent::AgentsLoaded {
@@ -2125,18 +2075,6 @@ async fn run_request(client: &ApiClient, ws_key: String, request: ApiRequest) ->
                 .await;
             UiEvent::PermissionReplied {
                 permission_id,
-                response,
-                is_auto: false,
-                result,
-            }
-        }
-        ApiRequest::ReplyV2 {
-            request_id,
-            response,
-        } => {
-            let result = client.reply_v2(&request_id, &response).await;
-            UiEvent::PermissionReplied {
-                permission_id: request_id,
                 response,
                 is_auto: false,
                 result,
@@ -2186,11 +2124,11 @@ async fn run_request(client: &ApiClient, ws_key: String, request: ApiRequest) ->
         }
         // dsh-only requests never route to an opencode workspace; answer the
         // list ones so a misroute cannot leave the menu loading forever
-        ApiRequest::ListDshCommands { .. } => UiEvent::CommandsLoaded {
+        ApiRequest::ListAgentCommands { .. } => UiEvent::CommandsLoaded {
             ws_key,
             result: Ok(Vec::new()),
         },
-        ApiRequest::CreateDshCommandSession { .. } | ApiRequest::ExecuteDshCommand { .. } => {
+        ApiRequest::CreateCommandSession { .. } | ApiRequest::ExecuteCommand { .. } => {
             UiEvent::Log {
                 ws_key,
                 line: "dsh-only request hit the opencode runner".into(),

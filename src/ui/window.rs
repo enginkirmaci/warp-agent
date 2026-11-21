@@ -209,14 +209,14 @@ impl SettingsSection {
 /// button draws. Keeping this separate from the render is what the unit test
 /// pins: a display label must never leak into the key.
 fn harness_choices(
-    current: crate::settings::HarnessKind,
-    enabled: &[crate::settings::HarnessKind],
+    current: crate::harness::HarnessId,
+    enabled: &[crate::harness::HarnessId],
 ) -> Vec<kit::Choice> {
-    crate::settings::HarnessKind::ALL
-        .iter()
+    crate::harness::HarnessId::all()
+        .into_iter()
         .filter(|harness| enabled.contains(harness))
         .map(|harness| {
-            kit::Choice::new(harness.label(), harness.option_label(), *harness == current)
+            kit::Choice::new(harness.as_str(), harness.option_label(), harness == current)
         })
         .collect()
 }
@@ -418,7 +418,7 @@ pub struct WarpWindow {
     /// E2E hook: WARP_AGENT_PAGE=about opens the rail's About section, for the
     /// same reason.
     open_about_on_first_render: bool,
-    settings_fields: Vec<(&'static str, Entity<InputState>)>,
+    settings_fields: Vec<(String, Entity<InputState>)>,
     /// The pending debounced settings commit: every field keystroke bumps it,
     /// the task that fired for an older sequence stands down.
     settings_commit_seq: usize,
@@ -427,7 +427,7 @@ pub struct WarpWindow {
     settings_committed_seq: usize,
     /// leaf renderers for the plain settings fields — keystrokes repaint
     /// only the field, never the window (see InputLeaf below)
-    settings_leafs: Vec<(&'static str, Entity<InputLeaf>)>,
+    settings_leafs: Vec<(String, Entity<InputLeaf>)>,
     /// the Model field + its standalone picker component
     settings_model_picker: Option<Entity<FilteredPicker>>,
     /// the Variant field + its standalone picker component; scoped to the
@@ -909,8 +909,8 @@ impl Render for WarpWindow {
 /// The settings-page composer state: labeled buffers, labeled leaves and the
 /// two catalog pickers (Model and its dependent Variant).
 struct SettingsFields {
-    fields: Vec<(&'static str, Entity<InputState>)>,
-    leafs: Vec<(&'static str, Entity<InputLeaf>)>,
+    fields: Vec<(String, Entity<InputState>)>,
+    leafs: Vec<(String, Entity<InputLeaf>)>,
     model_picker: Option<Entity<FilteredPicker>>,
     variant_picker: Option<Entity<FilteredPicker>>,
 }
@@ -989,7 +989,7 @@ impl WarpWindow {
         self.settings_buffers = SettingsBuffers::from_settings(&self.store.read(cx).settings);
         let harness = self.settings_buffers.harness();
         self.settings_harness.update(cx, |scope, cx| {
-            scope.0 = harness;
+            scope.0 = harness.clone();
             cx.notify();
         });
         let settings = self.make_settings_fields(window, cx);
@@ -2902,24 +2902,34 @@ impl WarpWindow {
         cx: &mut Context<Self>,
     ) -> SettingsFields {
         let b = self.settings_buffers.clone();
-        let rows: Vec<(&'static str, String)> = vec![
-            ("executable", b.opencode_executable),
-            ("dsh_executable", b.dsh_executable),
-            ("v2_executable", b.v2_executable),
-            ("model", b.default_model),
-            ("variant", b.default_variant),
-            ("agent", b.default_agent),
-            ("min", b.auto_allow_default_min),
-            ("max", b.auto_allow_default_max),
-            ("awaymin", b.auto_allow_away_min),
-            ("awaymax", b.auto_allow_away_max),
-            ("idlemin", b.server_idle_min),
-            ("chatsperws", b.chats_per_workspace),
-            ("lunchstart", b.lunch_start),
-            ("lunchend", b.lunch_end),
-            ("offstart", b.off_hours_start),
-            ("workdaystart", b.workday_start),
-        ];
+        let mut rows: Vec<(String, String)> = crate::harness::HarnessRegistry::builtin()
+            .iter()
+            .map(|descriptor| {
+                (
+                    format!("executable-{}", descriptor.id),
+                    b.harness_executable(descriptor.id.as_str()),
+                )
+            })
+            .collect();
+        rows.extend(
+            [
+                ("model", b.default_model),
+                ("variant", b.default_variant),
+                ("agent", b.default_agent),
+                ("min", b.auto_allow_default_min),
+                ("max", b.auto_allow_default_max),
+                ("awaymin", b.auto_allow_away_min),
+                ("awaymax", b.auto_allow_away_max),
+                ("idlemin", b.server_idle_min),
+                ("chatsperws", b.chats_per_workspace),
+                ("lunchstart", b.lunch_start),
+                ("lunchend", b.lunch_end),
+                ("offstart", b.off_hours_start),
+                ("workdaystart", b.workday_start),
+            ]
+            .into_iter()
+            .map(|(key, value)| (key.to_string(), value)),
+        );
         let mut fields = Vec::new();
         let mut leafs = Vec::new();
         let mut model_picker = None;
@@ -2944,7 +2954,7 @@ impl WarpWindow {
                 let harness = self.settings_harness.clone();
                 let picker = settings_model_picker(state.clone(), store, harness, window, cx);
                 model_state = Some(state.clone());
-                fields.push((key, state));
+                fields.push((key.clone(), state));
                 model_picker = Some(picker);
             } else if key == "variant" {
                 let state = cx.new(|cx| {
@@ -2961,7 +2971,7 @@ impl WarpWindow {
                 // the picker is the visible control; the field only carries
                 // the picked value into `commit_settings`
                 variant_state = Some(state.clone());
-                fields.push((key, state));
+                fields.push((key.clone(), state));
             } else {
                 let entity = cx.new(|cx| {
                     InputState::new(window, cx)
@@ -2980,7 +2990,7 @@ impl WarpWindow {
                     mono: true,
                     icon: None,
                 });
-                fields.push((key, entity));
+                fields.push((key.clone(), entity));
                 leafs.push((key, leaf));
             }
         }
@@ -3611,12 +3621,9 @@ impl WarpWindow {
                 let store = self.store.clone();
                 for descriptor in crate::harness::HarnessRegistry::builtin().iter() {
                     let id = descriptor.id.as_str().to_string();
-                    let (id_label, field_label, key) = match id.as_str() {
-                        "opencode" => ("opencode", "OpenCode executable", "executable"),
-                        "opencode-v2" => ("opencode v2", "opencode v2 executable", "v2_executable"),
-                        "dsh" => ("DeepSeek (dsh)", "DSH executable", "dsh_executable"),
-                        _ => continue,
-                    };
+                    let id_label = descriptor.label;
+                    let field_label = format!("{id_label} executable");
+                    let key = format!("executable-{id}");
                     let entity = entity.clone();
                     let store = store.clone();
                     let toggle_id = id.clone();
@@ -3663,7 +3670,7 @@ impl WarpWindow {
                                     );
                                 let harness = this.settings_buffers.harness();
                                 this.settings_harness.update(cx, |scope, cx| {
-                                    scope.0 = harness;
+                                    scope.0 = harness.clone();
                                     cx.notify();
                                 });
                                 this.commit_settings(cx);
@@ -3671,7 +3678,7 @@ impl WarpWindow {
                             });
                         },
                     ));
-                    field!(field_label, key, None::<&str>);
+                    field!(field_label, &key, None::<&str>);
                 }
                 let control = div()
                     .flex()
@@ -3704,13 +3711,13 @@ impl WarpWindow {
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let current = self.settings_buffers.harness();
-        let enabled: Vec<crate::settings::HarnessKind> = self
+        let enabled: Vec<crate::harness::HarnessId> = self
             .store
             .read(cx)
             .settings
             .enabled_harness_ids()
             .iter()
-            .filter_map(|id| crate::settings::HarnessKind::from_wire(id))
+            .filter_map(|id| crate::harness::HarnessId::from_wire(id))
             .collect();
         let choices = harness_choices(current, &enabled);
         let entity = cx.entity();
@@ -3719,19 +3726,18 @@ impl WarpWindow {
             "settings-harness",
             choices,
             move |key, window, cx: &mut gpui::App| {
-                let picked = crate::settings::HarnessKind::from_wire(key.as_ref())
-                    .unwrap_or(crate::settings::HarnessKind::OpenCode);
+                let picked = crate::harness::HarnessId::from_wire(key.as_ref()).unwrap_or_default();
                 entity.update(cx, |this, cx| {
                     let was = this.settings_buffers.harness();
                     if was == picked {
                         return;
                     }
-                    this.settings_buffers.default_harness = picked;
+                    this.settings_buffers.default_harness = picked.clone();
                     // the model and variant belong to the harness they were
                     // listed under; a switch starts at the new server default
                     for key in ["model", "variant"] {
                         if let Some((_, field)) =
-                            this.settings_fields.iter().find(|(name, _)| *name == key)
+                            this.settings_fields.iter().find(|(name, _)| name == key)
                         {
                             field.update(cx, |state, cx| state.set_value("", window, cx));
                         }
@@ -3740,14 +3746,14 @@ impl WarpWindow {
                     this.settings_buffers.default_variant.clear();
                     this.commit_settings(cx);
                     scope.update(cx, |scope, cx| {
-                        scope.0 = picked;
+                        scope.0 = picked.clone();
                         cx.notify();
                     });
                     let store = this.store.clone();
                     store.update(cx, |store, cx| {
-                        store.retarget_untouched_drafts(was, picked, cx);
-                        if picked == crate::settings::HarnessKind::Dsh {
-                            store.ensure_dsh(cx);
+                        store.retarget_untouched_drafts(was, picked.clone(), cx);
+                        if crate::harness::shared_server(&picked) {
+                            store.ensure_shared_server(cx);
                         }
                     });
                     cx.notify();
@@ -3764,10 +3770,11 @@ impl WarpWindow {
         let mut buffers = self.settings_buffers.clone();
         for (key, field) in &self.settings_fields {
             let text = field.read(cx).value().to_string();
-            match *key {
-                "executable" => buffers.opencode_executable = text,
-                "dsh_executable" => buffers.dsh_executable = text,
-                "v2_executable" => buffers.v2_executable = text,
+            if let Some(id) = key.strip_prefix("executable-") {
+                buffers.set_harness_executable(id, text);
+                continue;
+            }
+            match key.as_str() {
                 "model" => buffers.default_model = text,
                 "variant" => buffers.default_variant = text,
                 "agent" => buffers.default_agent = text,
@@ -3905,7 +3912,7 @@ fn settings_model_picker(
                         let variant = this
                             .settings_fields
                             .iter()
-                            .find(|(key, _)| *key == "variant")
+                            .find(|(key, _)| key == "variant")
                             .map(|(_, field)| field.clone());
                         if let Some(variant) = variant {
                             variant.update(cx, |state, cx| state.set_value("", window, cx));
@@ -3922,7 +3929,7 @@ fn settings_model_picker(
         let refresh_store = store.clone();
         let refresh_harness = harness.clone();
         picker.set_on_refresh(Box::new(move |cx| {
-            let harness = refresh_harness.read(cx).0;
+            let harness = refresh_harness.read(cx).0.clone();
             refresh_store.update(cx, |store, cx| store.refresh_models(harness, cx));
         }));
         picker.observe_entity(&store, cx);
@@ -3944,12 +3951,12 @@ fn model_data(
     let fonts = store.read(cx).fonts;
     let accent = store.read(cx).accent.accent;
     let selected = state.read(cx).value().trim().to_string();
-    let harness = harness.read(cx).0;
-    let refreshing = store.read(cx).models_refreshing == Some(harness);
+    let harness = harness.read(cx).0.clone();
+    let refreshing = store.read(cx).models_refreshing.as_ref() == Some(&harness);
     let filter = filter.to_lowercase();
     let mut models: Vec<String> = store
         .read(cx)
-        .model_keys_for(harness)
+        .model_keys_for(&harness)
         .into_iter()
         .filter(|model| {
             let model = model.trim();
@@ -3975,16 +3982,18 @@ fn model_data(
     if models.is_empty() {
         rows.push(PickerRow::Message {
             id: "model-message".into(),
-            label: match harness {
-                crate::settings::HarnessKind::Dsh => {
-                    "No dsh models yet. Refresh once dsh is running.".to_string()
-                }
-                crate::settings::HarnessKind::OpenCode => {
-                    "No models yet. Start a workspace or refresh.".to_string()
-                }
-                crate::settings::HarnessKind::OpenCodeV2 => {
-                    "No opencode v2 models yet. Refresh once the service is available.".to_string()
-                }
+            label: if crate::harness::shared_server(&harness) {
+                format!(
+                    "No {} models yet. Refresh once it is running.",
+                    crate::harness::label(&harness)
+                )
+            } else if crate::harness::attached(&harness) {
+                format!(
+                    "No {} models yet. Refresh once the service is available.",
+                    crate::harness::label(&harness)
+                )
+            } else {
+                "No models yet. Start a workspace or refresh.".to_string()
             },
         });
     } else {
@@ -4124,11 +4133,11 @@ fn variant_data(
     let accent = store.read(cx).accent.accent;
     let model = model.read(cx).value().trim().to_string();
     let selected = state.read(cx).value().trim().to_string();
-    let harness = harness.read(cx).0;
+    let harness = harness.read(cx).0.clone();
     let filter = filter.to_lowercase();
     let variants: Vec<String> = store
         .read(cx)
-        .variants_for(harness, &model)
+        .variants_for(&harness, &model)
         .into_iter()
         .filter(|variant| filter.is_empty() || variant.to_lowercase().contains(&filter))
         .collect();
@@ -4289,7 +4298,7 @@ mod scope_tests {
 #[cfg(test)]
 mod harness_tests {
     use super::harness_choices;
-    use crate::settings::HarnessKind;
+    use crate::harness::HarnessId;
 
     /// The regression this pins: a display label ("DeepSeek (dsh)") used as
     /// the choice key made every click select opencode, and the dsh button
@@ -4297,10 +4306,13 @@ mod harness_tests {
     #[test]
     fn the_harness_choice_keys_are_wire_ids_and_exactly_one_is_selected() {
         for (current, expected) in [
-            (HarnessKind::OpenCode, "opencode"),
-            (HarnessKind::Dsh, "dsh"),
+            (HarnessId::from("opencode"), "opencode"),
+            (HarnessId::from("dsh"), "dsh"),
         ] {
-            let choices = harness_choices(current, &[HarnessKind::OpenCode, HarnessKind::Dsh]);
+            let choices = harness_choices(
+                current.clone(),
+                &[HarnessId::from("opencode"), HarnessId::from("dsh")],
+            );
             assert_eq!(choices.len(), 2);
             let selected: Vec<&str> = choices
                 .iter()
@@ -4316,7 +4328,7 @@ mod harness_tests {
             assert_eq!(dsh.label.as_ref(), "DeepSeek (dsh)");
             // the display label is not a wire id: a past regression compared
             // against "DeepSeek (dsh)" and could never select the harness
-            assert_eq!(HarnessKind::from_wire("DeepSeek (dsh)"), None);
+            assert_eq!(HarnessId::from_wire("DeepSeek (dsh)"), None);
         }
     }
 }

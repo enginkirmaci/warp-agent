@@ -1,12 +1,14 @@
 //! Shared vocabulary for the harness interface.
 //!
-//! These are the app-level types the store, the UI and the door will speak once
-//! the adapters land. The old opencode and dsh modules keep their own types
-//! during the expand phase; the contract ticket replaces them.
+//! These are the app-level types the store, the UI and the door speak: harness
+//! ids, capabilities, sessions, prompts, approvals and the typed event stream.
+//! The old net thread keeps its opencode-shaped request/event vocabulary for
+//! opencode v1 and dsh until their chat paths move onto the adapters.
 
 use std::collections::BTreeMap;
 use std::fmt;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
@@ -25,6 +27,39 @@ impl HarnessId {
 
     pub fn as_str(&self) -> &str {
         self.0.as_str()
+    }
+
+    /// The registry's display name for this id.
+    pub fn label(&self) -> &'static str {
+        super::registry().label_for(self)
+    }
+
+    /// The registry's display name for this id (the picker label).
+    pub fn option_label(&self) -> &'static str {
+        self.label()
+    }
+
+    /// Every registered id, in registry order.
+    pub fn all() -> Vec<Self> {
+        super::registry()
+            .iter()
+            .map(|descriptor| descriptor.id.clone())
+            .collect()
+    }
+
+    /// Strict wire parse: an unknown id is a client bug, not something to
+    /// silently route to the default harness.
+    pub fn from_wire(wire: &str) -> Option<Self> {
+        super::registry()
+            .resolve(wire)
+            .ok()
+            .map(|descriptor| descriptor.id.clone())
+    }
+}
+
+impl Default for HarnessId {
+    fn default() -> Self {
+        super::registry().default_id()
     }
 }
 
@@ -235,6 +270,38 @@ impl HarnessConfig {
             directory: None,
         }
     }
+}
+
+/// What "up" means for one managed child process.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Readiness {
+    /// Poll `/global/health` until it answers.
+    HttpHealth,
+    /// Wait for the launch credential the process prints on stdout.
+    LaunchCredential,
+}
+
+/// How one managed harness's child process is launched.
+///
+/// This is descriptor data, not a branch: the legacy net path and the adapters
+/// ask the registry for it, so neither has to name a harness to know how its
+/// process starts. An attached harness has no launch spec at all.
+#[derive(Clone, Copy, Debug)]
+pub struct LaunchSpec {
+    /// Program arguments for a given port.
+    pub args: fn(u16) -> Vec<String>,
+    /// Environment additions for the child.
+    pub env: fn() -> Vec<(&'static str, &'static str)>,
+    /// What "up" means for this child.
+    pub readiness: Readiness,
+    /// Longest wait for readiness.
+    pub timeout: Duration,
+    /// Attach to an already healthy server instead of spawning a second one.
+    pub attach_healthy: bool,
+    /// Parser for a launch credential printed on stdout (dsh's token).
+    pub capture_line: Option<fn(&str) -> Option<String>>,
+    /// Failure sentence when readiness times out.
+    pub timeout_message: &'static str,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

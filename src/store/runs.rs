@@ -341,16 +341,16 @@ impl Store {
             ws.set_expanded(true); // the opened chat's row belongs in a visible sidebar section
         }
         self.touch_server_activity(ws_path);
-        if self.session_harness(session_id) == HarnessKind::Dsh {
-            if !self.runtimes.contains_key(DSH_SERVER_KEY) {
-                self.ensure_dsh(cx);
-                self.pending_opens
-                    .push((DSH_SERVER_KEY.into(), session_id.to_string()));
+        if self.session_is_shared(session_id) {
+            let shared = self.shared_key();
+            if !self.runtimes.contains_key(&shared) {
+                self.ensure_shared_server(cx);
+                self.pending_opens.push((shared, session_id.to_string()));
                 self.repaint(cx);
                 return;
             }
             self.net.send(NetCommand::Request {
-                ws_key: DSH_SERVER_KEY.into(),
+                ws_key: shared,
                 request: ApiRequest::GetMessages {
                     session_id: session_id.to_string(),
                 },

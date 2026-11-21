@@ -16,11 +16,9 @@ impl Store {
         let data = evt.get("properties").unwrap_or(evt);
         match type_ {
             "server.connected" => {
-                let harness = if ws_key == DSH_SERVER_KEY {
-                    "dsh"
-                } else {
-                    "opencode"
-                };
+                let harness = crate::harness::harness_for_key(ws_key)
+                    .map(|id| crate::harness::label(&id))
+                    .unwrap_or("harness");
                 self.announce_for_key(
                     ws_key,
                     &format!("Connected to the {harness} event stream."),
@@ -105,14 +103,15 @@ impl Store {
                     // refresh the chat list of the workspace the chat belongs to
                     if background {
                         // retired below, with its session deleted server-side
-                    } else if self.session_harness(sid) == HarnessKind::Dsh {
-                        self.touch_server_activity(DSH_SERVER_KEY);
-                        self.refresh_dsh_lists();
-                        // the first completed turn is when dsh's agent-scoped
-                        // command/skill catalog is certainly ready
+                    } else if self.session_is_shared(sid) {
+                        let shared = self.shared_key();
+                        self.touch_server_activity(&shared);
+                        self.refresh_shared_lists();
+                        // the first completed turn is when the shared
+                        // server's agent-scoped command catalog is ready
                         self.net.send(NetCommand::Request {
-                            ws_key: DSH_SERVER_KEY.into(),
-                            request: ApiRequest::ListDshCommands {
+                            ws_key: shared,
+                            request: ApiRequest::ListAgentCommands {
                                 session_id: Some(sid.to_string()),
                             },
                         });

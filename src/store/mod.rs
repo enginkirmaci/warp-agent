@@ -2,15 +2,11 @@
 //! transcripts, queues, permissions, questions and subagent tracking. A 1:1
 //! port of MainViewModel + ChatTileViewModel + the ChatItems model.
 
-use crate::harness::Harness as _;
-use crate::harness::{HarnessConfig, HarnessId, OpenCodeV2Harness};
-use crate::oc::{
-    self, ApiRequest, CommandInfo, DSH_SERVER_KEY, ModelInfo, NetCommand, SessionInfo,
-    StoredMessage,
-};
+use crate::harness::{Harness, HarnessConfig, HarnessId};
+use crate::oc::{self, ApiRequest, CommandInfo, ModelInfo, NetCommand, SessionInfo, StoredMessage};
 // the store's event intake is public, so its event type is reachable from here
 pub use crate::oc::UiEvent;
-use crate::settings::{AppSettings, HarnessKind, UiState, WorkspaceState};
+use crate::settings::{AppSettings, UiState, WorkspaceState};
 pub mod ipc;
 // the impl Store continuation modules, one per section
 mod chat_flow;
@@ -37,7 +33,7 @@ pub use parsing::*;
 use parsing::{fork_transcript, lookup_context_limit};
 pub use sidebar::*;
 use sidebar::{session_recency, sort_workspaces, workspace_order_key};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 pub use tile::*;
@@ -153,10 +149,10 @@ fn highest_variant(variants: &[String]) -> Option<String> {
 
 /// The variants one harness/model pair reports; empty until that harness's
 /// catalog lands (or when the model has no tiers).
-fn variants_for_entry(model_infos: &[ModelInfo], harness: HarnessKind, model: &str) -> Vec<String> {
+fn variants_for_entry(model_infos: &[ModelInfo], harness: &HarnessId, model: &str) -> Vec<String> {
     model_infos
         .iter()
-        .find(|entry| entry.harness == harness && entry.key == model)
+        .find(|entry| &entry.harness == harness && entry.key == model)
         .map(|entry| entry.variants.clone())
         .unwrap_or_default()
 }
@@ -326,14 +322,15 @@ pub struct Store {
 
     pub is_server_running: bool,
     pub auto_allow: bool,
-    /// The typed harness-event path is inert until the adapters are wired; the
-    /// old net path stays authoritative during the expand phase.
+    /// Whether the typed harness-event path is live: the attached adapter
+    /// turns it on when it connects. The legacy net path feeds opencode v1 and
+    /// dsh traffic independently.
     harness_ingest: bool,
-    /// The attached v2 adapter while the app has it; its events are pumped
-    /// into the typed store path by a spawned task.
-    v2: Option<OpenCodeV2Harness>,
-    /// Last v2 attach failure, surfaced by the settings/door availability.
-    pub v2_status: Option<String>,
+    /// Attached harness adapters while the app has them, by registry id; each
+    /// event stream is pumped into the typed store path by a spawned task.
+    attached: BTreeMap<HarnessId, Box<dyn Harness>>,
+    /// Last attach failure per attached harness, surfaced by settings/door.
+    pub attached_status: BTreeMap<HarnessId, String>,
     pub is_settings_open: bool,
     /// The rail's About section: the family table, not a chat surface.
     pub is_about_open: bool,
@@ -384,10 +381,10 @@ pub struct Store {
     /// Harnesses whose catalog came from a live server this session. A
     /// cache-loaded list still answers one door request with a refresh, so
     /// clients see real variants instead of the cache's empty ones.
-    models_live: HashSet<HarnessKind>,
+    models_live: HashSet<HarnessId>,
     /// The harness whose settings refresh is waiting on `ModelsLoaded`; the
     /// picker's refresh button spins until the event clears it.
-    pub models_refreshing: Option<HarnessKind>,
+    pub models_refreshing: Option<HarnessId>,
     variants_by_model: HashMap<String, Vec<String>>,
     context_limit_by_model: HashMap<String, i64>,
     subagent_by_session: HashMap<String, SubagentInfo>,
@@ -399,12 +396,12 @@ pub struct Store {
     /// (text + attachments) stashed until the reply lands
     pending_sends: Vec<(String, String, Vec<AttachmentItem>)>,
     /// harness of each in-flight session create, FIFO-aligned with
-    /// pending_sends so a dsh create is recognized on its reply
-    pending_create_harness: std::collections::VecDeque<(String, HarnessKind)>,
-    /// dsh drafts parked while the dsh server starts: (tile key, text,
-    /// attachments, workspace folder). ServerStarted(DSH) converts them into
-    /// pending_sends + CreateDshSession pairs.
-    pending_dsh_drafts: Vec<(String, String, Vec<AttachmentItem>, String)>,
+    /// pending_sends so the create reply can record the right backend
+    pending_create_harness: std::collections::VecDeque<(String, HarnessId)>,
+    /// shared-server drafts parked while its process starts: (tile key, text,
+    /// attachments, workspace folder). ServerStarted converts them into
+    /// pending_sends + CreateSessionIn pairs.
+    pending_shared_drafts: Vec<(String, String, Vec<AttachmentItem>, String)>,
     /// workspaces started by Restore whose open-tile lists reload on ServerStarted
     pending_restores: Vec<(String, Vec<String>)>,
     /// chats requested while their workspace server was still starting
@@ -451,7 +448,7 @@ pub struct Store {
     /// Door `models` requests parked on a server start or a refresh. A list,
     /// not a single slot: a second client (or the settings refresh while the
     /// page's first load is still in flight) must not drop the first reply.
-    ipc_models_waiters: Vec<(Option<HarnessKind>, crate::ipc::Reply)>,
+    ipc_models_waiters: Vec<(Option<HarnessId>, crate::ipc::Reply)>,
     /// reused checkout dummy for `with_tile` — hot stream events would
     /// otherwise build a throwaway ChatTile each
     tile_placeholder: Option<ChatTile>,
@@ -463,7 +460,7 @@ pub struct Store {
     /// Net keys whose command list is in flight (the menu says loading until
     /// the answer lands, instead of the false "no server commands").
     commands_loading: HashSet<String>,
-    /// dsh drafts whose slash menu asked for the agent-scoped catalog before
+    /// shared-server drafts whose slash menu asked for the agent-scoped catalog before
     /// the chat had a session; the session-create reply drains them.
     pending_command_tiles: HashSet<String>,
     /// The workspace's configured MCP server names, keyed by workspace folder
@@ -559,8 +556,8 @@ impl Store {
             is_server_running: false,
             auto_allow,
             harness_ingest: false,
-            v2: None,
-            v2_status: None,
+            attached: BTreeMap::new(),
+            attached_status: BTreeMap::new(),
             is_settings_open: false,
             is_about_open: false,
             menu_armed: None,
@@ -605,7 +602,7 @@ impl Store {
             prompt_history: Vec::new(),
             pending_sends: Vec::new(),
             pending_create_harness: std::collections::VecDeque::new(),
-            pending_dsh_drafts: Vec::new(),
+            pending_shared_drafts: Vec::new(),
             pending_restores: Vec::new(),
             pending_opens: Vec::new(),
             pending_session_sends: Vec::new(),
@@ -765,13 +762,13 @@ impl Store {
     /// The model keys one harness lists, in load order. The settings picker
     /// scopes its rows to the harness the segmented control shows; the
     /// merged `models` list cannot distinguish the two catalogs.
-    pub fn model_keys_for(&self, harness: HarnessKind) -> Vec<String> {
+    pub fn model_keys_for(&self, harness: &HarnessId) -> Vec<String> {
         if !self.harness_enabled(harness) {
             return Vec::new();
         }
         self.model_infos
             .iter()
-            .filter(|model| model.harness == harness)
+            .filter(|model| &model.harness == harness)
             .map(|model| model.key.clone())
             .collect()
     }
@@ -779,7 +776,7 @@ impl Store {
     /// The variants one harness/model pair reports. Empty until that
     /// harness's catalog lands (or when the model has no tiers), which the
     /// settings Variant picker explains instead of showing an empty list.
-    pub fn variants_for(&self, harness: HarnessKind, model: &str) -> Vec<String> {
+    pub fn variants_for(&self, harness: &HarnessId, model: &str) -> Vec<String> {
         if !self.harness_enabled(harness) {
             return Vec::new();
         }
@@ -921,12 +918,12 @@ impl Store {
         };
         self.commands_loading.insert(ws.clone());
         let tile = self.tile_by_key(tile_key);
-        let harness = tile.map(|t| t.harness).unwrap_or_default();
+        let harness = tile.map(|t| t.harness.clone()).unwrap_or_default();
         let session_id = tile.and_then(|t| t.session_id.clone());
-        if harness == HarnessKind::OpenCode {
+        if crate::harness::workspace_scoped(&harness) {
             self.ensure_local_opencode_commands(&ws);
         }
-        if harness == HarnessKind::Dsh && session_id.is_none() {
+        if crate::harness::shared_server(&harness) && session_id.is_none() {
             if self.pending_command_tiles.contains(tile_key) {
                 // a create is already in flight; a second menu open must not
                 // mint a second empty session
@@ -934,16 +931,17 @@ impl Store {
                 return;
             }
             self.pending_command_tiles.insert(tile_key.to_string());
-            if self.runtimes.contains_key(DSH_SERVER_KEY) {
-                self.create_dsh_command_session(tile_key, cx);
+            let shared = self.shared_key();
+            if self.runtimes.contains_key(&shared) {
+                self.create_command_session(tile_key, cx);
             } else {
-                self.ensure_dsh(cx);
+                self.ensure_shared_server(cx);
             }
             self.repaint(cx);
             return;
         }
-        let request = if harness == HarnessKind::Dsh {
-            ApiRequest::ListDshCommands { session_id }
+        let request = if crate::harness::shared_server(&harness) {
+            ApiRequest::ListAgentCommands { session_id }
         } else {
             ApiRequest::ListCommands
         };
@@ -976,9 +974,9 @@ impl Store {
             .is_some_and(|ws| self.commands_loading.contains(&ws))
     }
 
-    /// Opens the dsh session a draft's slash menu needs. The first real send
-    /// finds `session_id` set and reuses it, so the session is not wasted.
-    fn create_dsh_command_session(&mut self, tile_key: &str, cx: &mut Context<Self>) {
+    /// Opens the shared server's session a draft's slash menu needs. The first
+    /// real send finds `session_id` set and reuses it, so it is not wasted.
+    fn create_command_session(&mut self, tile_key: &str, cx: &mut Context<Self>) {
         if self.tile_by_key(tile_key).is_none() {
             // the chat closed while waiting for the server
             self.pending_command_tiles.remove(tile_key);
@@ -987,9 +985,10 @@ impl Store {
         let Some(folder) = self.tile_ws_key(tile_key) else {
             return;
         };
+        let shared = self.shared_key();
         self.net.send(NetCommand::Request {
-            ws_key: DSH_SERVER_KEY.into(),
-            request: ApiRequest::CreateDshCommandSession {
+            ws_key: shared,
+            request: ApiRequest::CreateCommandSession {
                 tile_key: tile_key.to_string(),
                 folder,
             },
@@ -997,17 +996,18 @@ impl Store {
         let _ = cx;
     }
 
-    /// Runs a listed dsh command instead of sending it as a model prompt. The
-    /// result comes back as `UiEvent::DshCommandExecuted`.
-    pub(super) fn execute_dsh_command(
+    /// Runs a listed shared-server command instead of sending it as a model
+    /// prompt. The result comes back as `UiEvent::CommandExecuted`.
+    pub(super) fn execute_harness_command(
         &mut self,
         session_id: &str,
         line: String,
         cx: &mut Context<Self>,
     ) {
+        let shared = self.shared_key();
         self.net.send(NetCommand::Request {
-            ws_key: DSH_SERVER_KEY.into(),
-            request: ApiRequest::ExecuteDshCommand {
+            ws_key: shared,
+            request: ApiRequest::ExecuteCommand {
                 session_id: session_id.to_string(),
                 line,
             },
@@ -1618,7 +1618,7 @@ impl Store {
     /// Which backend a session runs on. Sessions predate per-chat harnesses,
     /// so anything unrecorded follows its owning chat; a tree with no recorded
     /// harness either is opencode.
-    pub fn session_harness(&self, session_id: &str) -> HarnessKind {
+    pub fn session_harness(&self, session_id: &str) -> HarnessId {
         lineage_harness(
             session_id,
             &self.ui.harness_by_session,
@@ -1626,11 +1626,32 @@ impl Store {
         )
     }
 
+    /// The registry's managed app-wide harness key (its id).
+    pub fn shared_key(&self) -> String {
+        crate::harness::shared_server_key()
+    }
+
+    /// Whether a net key names the shared app-wide server.
+    pub fn is_shared_key(&self, key: &str) -> bool {
+        crate::harness::is_shared_key(key)
+    }
+
+    /// Whether a session runs on the shared app-wide server.
+    pub fn session_is_shared(&self, session_id: &str) -> bool {
+        crate::harness::shared_server(&self.session_harness(session_id))
+    }
+
+    /// Whether a session runs on an attached harness (opencode v2).
+    pub fn session_is_attached(&self, session_id: &str) -> bool {
+        crate::harness::attached(&self.session_harness(session_id))
+    }
+
     /// The net-thread key a session's server lives on: the workspace folder
-    /// for opencode, [`DSH_SERVER_KEY`] for dsh (one shared process).
+    /// for a per-workspace harness, the harness id for a shared app-wide one.
     fn net_key_for_session(&self, session_id: &str) -> Option<String> {
-        if self.session_harness(session_id) == HarnessKind::Dsh {
-            return Some(DSH_SERVER_KEY.into());
+        let harness = self.session_harness(session_id);
+        if crate::harness::shared_server(&harness) {
+            return Some(harness.as_str().to_string());
         }
         self.effective_workspace_path(session_id)
     }
@@ -1639,8 +1660,8 @@ impl Store {
     /// the harness pill the composer is showing.
     fn tile_net_key_or(&self, tile_key: &str) -> Option<String> {
         if let Some(tile) = self.tile_by_key(tile_key) {
-            if tile.harness == HarnessKind::Dsh {
-                return Some(DSH_SERVER_KEY.into());
+            if crate::harness::shared_server(&tile.harness) {
+                return Some(tile.harness.as_str().to_string());
             }
             if let Some(sid) = &tile.session_id {
                 return self.net_key_for_session(sid);
@@ -1649,59 +1670,94 @@ impl Store {
         self.tile_ws_key(tile_key)
     }
 
-    /// Starts the shared dsh server unless it is already up. Replies arrive
-    /// as ServerStarted(DSH_SERVER_KEY); parked work drains there.
-    pub fn ensure_dsh(&mut self, cx: &mut Context<Self>) {
-        self.touch_server_activity(DSH_SERVER_KEY);
-        if self.runtimes.contains_key(DSH_SERVER_KEY) {
+    /// Starts the registry's shared app-wide server unless it is already up.
+    /// Replies arrive as ServerStarted(its id); parked work drains there.
+    pub fn ensure_shared_server(&mut self, cx: &mut Context<Self>) {
+        let Some(shared) = crate::harness::shared_server_id() else {
+            return;
+        };
+        let key = shared.as_str().to_string();
+        self.touch_server_activity(&key);
+        if self.runtimes.contains_key(&key) {
             return;
         }
-        let executable = self.settings.harness_executable("dsh");
-        tracing::info!("starting the shared dsh server");
+        let executable = self.settings.harness_executable(shared.as_str());
+        tracing::info!("starting the shared {shared} server");
         self.net.send(NetCommand::StartServer {
-            ws_key: DSH_SERVER_KEY.into(),
-            kind: HarnessKind::Dsh,
+            ws_key: key,
+            harness: shared,
             executable,
             folder: ".".into(),
         });
         let _ = cx;
     }
 
-    /// Starts the attached v2 adapter on first use and pumps its typed event
-    /// stream into the store. The adapter stays connected until the harness is
-    /// disabled; it never stops the shared service.
-    pub fn ensure_v2(&mut self, cx: &mut Context<Self>) {
-        if !self.settings.harness_enabled("opencode-v2") {
-            self.v2_status = Some("opencode v2 is disabled".into());
+    /// The attached harness adapter for an id, once connected.
+    pub fn attached(&self, id: &HarnessId) -> Option<&dyn Harness> {
+        self.attached.get(id).map(|adapter| adapter.as_ref())
+    }
+
+    /// The mutable attached harness adapter for an id, once connected.
+    pub fn attached_mut(&mut self, id: &HarnessId) -> Option<&mut Box<dyn Harness>> {
+        self.attached.get_mut(id)
+    }
+
+    /// The last attach failure for an attached harness.
+    pub fn attached_status(&self, id: &HarnessId) -> Option<&String> {
+        self.attached_status.get(id)
+    }
+
+    fn set_attached_status(&mut self, id: &HarnessId, detail: impl Into<String>) {
+        self.attached_status.insert(id.clone(), detail.into());
+    }
+
+    /// Connects one attached harness through its registry factory on first
+    /// use and pumps its typed event stream into the store. The adapter stays
+    /// connected until the harness is disabled; it never stops the shared
+    /// service.
+    pub fn ensure_attached(&mut self, id: &HarnessId, cx: &mut Context<Self>) {
+        if !self.settings.harness_enabled(id.as_str()) {
+            self.set_attached_status(id, format!("{} is disabled", crate::harness::label(id)));
             return;
         }
-        if self.v2.is_some() {
+        if self.attached.contains_key(id) {
             return;
         }
-        let executable = self.settings.harness_executable("opencode-v2");
-        let mut adapter = OpenCodeV2Harness::new(HarnessConfig::new(executable));
+        let Some(descriptor) = crate::harness::registry().get(id) else {
+            self.set_attached_status(id, format!("unknown harness: {id}"));
+            return;
+        };
+        let Some(factory) = descriptor.factory else {
+            self.set_attached_status(id, format!("{id} has no adapter"));
+            return;
+        };
+        let executable = self.settings.harness_executable(id.as_str());
+        let mut adapter = factory(HarnessConfig::new(executable));
         match adapter.start() {
             Ok(()) => {
                 self.harness_ingest = true;
                 let events = adapter.events();
-                self.v2 = Some(adapter);
-                self.v2_status = None;
-                self.load_v2_catalog(cx);
+                self.attached.insert(id.clone(), adapter);
+                self.attached_status.remove(id);
+                self.load_attached_catalog(id, cx);
+                let id = id.clone();
                 cx.spawn(async move |store, cx| {
                     while let Ok(event) = events.recv().await {
-                        let _ = store.update(cx, |store, cx| store.on_v2_event(event, cx));
+                        let id = id.clone();
+                        let _ =
+                            store.update(cx, |store, cx| store.on_harness_event(&id, event, cx));
                     }
                 })
                 .detach();
             }
             Err(err) => {
                 let detail = err.to_string();
-                tracing::warn!("opencode v2 attach failed: {detail}");
-                self.v2_status = Some(detail.clone());
+                tracing::warn!("{id} attach failed: {detail}");
+                self.set_attached_status(id, detail.clone());
                 if let Some(tile) = self.focused_tile.clone() {
                     self.tile_note(
                         &tile,
-                        &format!("opencode v2 is unavailable: {detail}"),
+                        &format!("{} is unavailable: {detail}", crate::harness::label(id)),
                         true,
                         cx,
                     );
@@ -1711,21 +1767,24 @@ impl Store {
         }
     }
 
-    fn on_v2_event(&mut self, event: crate::harness::HarnessEvent, cx: &mut Context<Self>) {
-        let harness = HarnessId::new("opencode-v2");
-        if let Err(err) = self.ingest_harness_event(&harness, event, cx) {
-            tracing::warn!("v2 event ingest failed: {err}");
+    fn on_harness_event(
+        &mut self,
+        harness: &HarnessId,
+        event: crate::harness::HarnessEvent,
+        cx: &mut Context<Self>,
+    ) {
+        if let Err(err) = self.ingest_harness_event(harness, event, cx) {
+            tracing::warn!("harness event ingest failed: {err}");
         }
     }
 
-    fn load_v2_catalog(&mut self, cx: &mut Context<Self>) {
-        let Some(adapter) = self.v2.as_mut() else {
+    fn load_attached_catalog(&mut self, id: &HarnessId, cx: &mut Context<Self>) {
+        let Some(adapter) = self.attached.get_mut(id) else {
             return;
         };
         match adapter.models() {
             Ok(models) => {
-                self.model_infos
-                    .retain(|model| model.harness != HarnessKind::OpenCodeV2);
+                self.model_infos.retain(|model| &model.harness != id);
                 for model in models {
                     if !self.models.iter().any(|key| key == &model.key) {
                         self.models.push(model.key.clone());
@@ -1738,26 +1797,27 @@ impl Store {
                         .insert(model.key.clone(), model.context_limit);
                     self.model_infos.push(ModelInfo {
                         key: model.key,
-                        harness: HarnessKind::OpenCodeV2,
+                        harness: id.clone(),
                         variants: model.variants,
                         context_limit: model.context_limit,
                     });
                 }
-                self.models_live.insert(HarnessKind::OpenCodeV2);
+                self.models_live.insert(id.clone());
                 self.models_refreshing = None;
-                self.v2_status = None;
+                self.attached_status.remove(id);
                 self.repaint(cx);
             }
             Err(err) => {
-                self.v2_status = Some(err.to_string());
+                let detail = err.to_string();
+                self.set_attached_status(id, detail);
                 self.models_refreshing = None;
                 self.repaint(cx);
             }
         }
     }
 
-    pub fn harness_enabled(&self, harness: HarnessKind) -> bool {
-        self.settings.harness_enabled(harness.label())
+    pub fn harness_enabled(&self, harness: &HarnessId) -> bool {
+        self.settings.harness_enabled(harness.as_str())
     }
 
     pub fn harness_id_enabled(&self, id: &str) -> bool {
@@ -1765,17 +1825,17 @@ impl Store {
     }
 
     /// The next enabled harness after `current`, for the composer pill.
-    pub fn next_enabled_harness(&self, current: HarnessKind) -> Option<HarnessKind> {
-        let all = HarnessKind::ALL;
+    pub fn next_enabled_harness(&self, current: &HarnessId) -> Option<HarnessId> {
+        let all = HarnessId::all();
         let start = all
             .iter()
-            .position(|harness| *harness == current)
+            .position(|harness| harness == current)
             .map(|index| index + 1)
             .unwrap_or(0);
         for offset in 0..all.len() {
-            let harness = all[(start + offset) % all.len()];
+            let harness = &all[(start + offset) % all.len()];
             if harness != current && self.harness_enabled(harness) {
-                return Some(harness);
+                return Some(harness.clone());
             }
         }
         None
@@ -1785,7 +1845,7 @@ impl Store {
     pub fn harness_has_running_turn(&self, id: &str) -> bool {
         self.running_by_session
             .iter()
-            .any(|session| self.session_harness(session).label() == id)
+            .any(|session| self.session_harness(session).as_str() == id)
     }
 
     /// Enable or disable one harness. Disabling a managed harness stops its
@@ -1809,9 +1869,9 @@ impl Store {
         if !enabled {
             // v2 cannot be the default until the registry-fed default lands;
             // counting only the enum-backed harnesses keeps a usable backend.
-            let enabled_count = HarnessKind::ALL
+            let enabled_count = HarnessId::all()
                 .iter()
-                .filter(|harness| self.harness_enabled(**harness))
+                .filter(|harness| self.harness_enabled(harness))
                 .count();
             if enabled_count <= 1 {
                 return Err("The last enabled harness cannot be disabled.".into());
@@ -1824,44 +1884,42 @@ impl Store {
             .or_insert(crate::settings::HarnessEntry::new(enabled, executable))
             .enabled = enabled;
         if !enabled {
-            match id {
-                "opencode" => {
-                    let keys: Vec<String> = self
-                        .runtimes
-                        .keys()
-                        .filter(|key| key.as_str() != DSH_SERVER_KEY)
-                        .cloned()
-                        .collect();
-                    for key in keys {
-                        self.net.send(NetCommand::StopServer {
-                            ws_key: key.clone(),
-                        });
-                        self.teardown_runtime(&key);
-                    }
+            let harness = HarnessId::from(id);
+            if crate::harness::attached(&harness) {
+                if let Some(mut adapter) = self.attached.remove(&harness) {
+                    let _ = adapter.stop();
                 }
-                "dsh" if self.runtimes.contains_key(DSH_SERVER_KEY) => {
+                self.set_attached_status(&harness, "disconnected");
+            } else if crate::harness::shared_server(&harness) {
+                let key = self.shared_key();
+                if self.runtimes.contains_key(&key) {
                     self.net.send(NetCommand::StopServer {
-                        ws_key: DSH_SERVER_KEY.into(),
+                        ws_key: key.clone(),
                     });
-                    self.teardown_runtime(DSH_SERVER_KEY);
+                    self.teardown_runtime(&key);
                 }
-                // attached opencode-v2 disconnects in the v2 connection ticket
-                "opencode-v2" => {
-                    if let Some(mut adapter) = self.v2.take() {
-                        let _ = crate::harness::Harness::stop(&mut adapter);
-                    }
-                    self.v2_status = Some("disconnected".into());
+            } else {
+                let keys: Vec<String> = self
+                    .runtimes
+                    .keys()
+                    .filter(|key| !self.is_shared_key(key))
+                    .cloned()
+                    .collect();
+                for key in keys {
+                    self.net.send(NetCommand::StopServer {
+                        ws_key: key.clone(),
+                    });
+                    self.teardown_runtime(&key);
                 }
-                _ => {}
             }
-            if self.settings.default_harness.label() == id {
-                self.settings.default_harness = self.settings.default_harness_kind();
+            if self.settings.default_harness.as_str() == id {
+                self.settings.default_harness = self.settings.default_harness_id();
             }
         }
         self.settings.save();
         self.save_state();
         self.ipc_push_status();
-        if enabled && let Some(harness) = HarnessKind::from_wire(id) {
+        if enabled && let Some(harness) = HarnessId::from_wire(id) {
             self.refresh_models(harness, cx);
         }
         self.repaint(cx);
@@ -1872,56 +1930,54 @@ impl Store {
     /// the backend when it is not up; `ModelsLoaded` refreshes the rows. The
     /// dsh path shares the one `dsh web` server; opencode uses the built-in
     /// General workspace, the same place the door's first models request goes.
-    pub fn refresh_models(&mut self, harness: HarnessKind, cx: &mut Context<Self>) {
+    pub fn refresh_models(&mut self, harness: HarnessId, cx: &mut Context<Self>) {
         // the picker's refresh button spins until the catalog lands
-        self.models_refreshing = Some(harness);
-        match harness {
-            HarnessKind::OpenCodeV2 => {
-                self.ensure_v2(cx);
+        self.models_refreshing = Some(harness.clone());
+        if crate::harness::attached(&harness) {
+            self.ensure_attached(&harness, cx);
+        } else if crate::harness::shared_server(&harness) {
+            let shared = self.shared_key();
+            let running = self.runtimes.contains_key(&shared);
+            self.ensure_shared_server(cx);
+            if running {
+                self.net.send(NetCommand::Request {
+                    ws_key: shared,
+                    request: ApiRequest::ListModels,
+                });
             }
-            HarnessKind::Dsh => {
-                let running = self.runtimes.contains_key(DSH_SERVER_KEY);
-                self.ensure_dsh(cx);
-                if running {
-                    self.net.send(NetCommand::Request {
-                        ws_key: DSH_SERVER_KEY.into(),
-                        request: ApiRequest::ListModels,
-                    });
-                }
-                // otherwise ServerStarted asks for the list on its own
+            // otherwise ServerStarted asks for the list on its own
+        } else {
+            let general = crate::paths::AppPaths::general_workspace_path()
+                .to_string_lossy()
+                .to_string();
+            if !self.workspaces.iter().any(|ws| ws.folder_path() == general) {
+                self.install_workspace(&general, cx);
             }
-            HarnessKind::OpenCode => {
-                let general = crate::paths::AppPaths::general_workspace_path()
-                    .to_string_lossy()
-                    .to_string();
-                if !self.workspaces.iter().any(|ws| ws.folder_path() == general) {
-                    self.install_workspace(&general, cx);
-                }
-                if !self.workspaces.iter().any(|ws| ws.folder_path() == general) {
-                    // no workspace to host the server: fail the spinner
-                    // instead of parking until the next unrelated event
-                    self.models_refreshing = None;
-                    self.repaint(cx);
-                    return;
-                }
-                if self.runtimes.contains_key(&general) {
-                    self.net.send(NetCommand::Request {
-                        ws_key: general,
-                        request: ApiRequest::ListModels,
-                    });
-                } else {
-                    self.start_workspace(&general, cx);
-                }
+            if !self.workspaces.iter().any(|ws| ws.folder_path() == general) {
+                // no workspace to host the server: fail the spinner
+                // instead of parking until the next unrelated event
+                self.models_refreshing = None;
+                self.repaint(cx);
+                return;
+            }
+            if self.runtimes.contains_key(&general) {
+                self.net.send(NetCommand::Request {
+                    ws_key: general,
+                    request: ApiRequest::ListModels,
+                });
+            } else {
+                self.start_workspace(&general, cx);
             }
         }
         self.repaint(cx);
     }
 
-    /// Refreshes every workspace's dsh chat list from the shared server. Each
-    /// request filters by the workspace folder server-side (dsh sessions
-    /// carry their own cwd).
-    fn refresh_dsh_lists(&mut self) {
-        if !self.runtimes.contains_key(DSH_SERVER_KEY) {
+    /// Refreshes every workspace's shared-server chat list. Each request
+    /// filters by the workspace folder server-side (the shared harness's
+    /// sessions carry their own cwd).
+    fn refresh_shared_lists(&mut self) {
+        let shared = self.shared_key();
+        if !self.runtimes.contains_key(&shared) {
             return;
         }
         let folders: Vec<String> = self
@@ -1931,23 +1987,23 @@ impl Store {
                 ws.state
                     .sessions
                     .iter()
-                    .any(|sid| self.session_harness(sid) == HarnessKind::Dsh)
+                    .any(|sid| self.session_is_shared(sid))
             })
             .map(|ws| ws.folder_path().to_string())
             .collect();
         for folder in folders {
             self.net.send(NetCommand::Request {
-                ws_key: DSH_SERVER_KEY.into(),
-                request: ApiRequest::ListDshSessions { folder },
+                ws_key: shared.clone(),
+                request: ApiRequest::ListSessionsIn { folder },
             });
         }
     }
 
-    /// Restarts whichever server a net key names — a workspace's opencode
-    /// process or the shared dsh singleton.
+    /// Restarts whichever server a net key names — a workspace's managed
+    /// process or the shared app-wide singleton.
     fn start_server_for_key(&mut self, key: &str, cx: &mut Context<Self>) {
-        if key == DSH_SERVER_KEY {
-            self.ensure_dsh(cx);
+        if self.is_shared_key(key) {
+            self.ensure_shared_server(cx);
         } else {
             self.start_workspace(key, cx);
         }
@@ -1969,7 +2025,7 @@ impl Store {
         // in-flight creates park work outside the runtimes; wait for them
         if !self.pending_sends.is_empty()
             || !self.pending_create_harness.is_empty()
-            || !self.pending_dsh_drafts.is_empty()
+            || !self.pending_shared_drafts.is_empty()
         {
             return;
         }
@@ -1977,7 +2033,7 @@ impl Store {
         let keys: Vec<String> = self
             .runtimes
             .keys()
-            .filter(|key| key.as_str() != DSH_SERVER_KEY)
+            .filter(|key| !self.is_shared_key(key))
             .cloned()
             .collect();
         for key in keys {
@@ -2055,68 +2111,71 @@ impl Store {
         }
     }
 
-    /// ServerStarted for the shared dsh server: pickers fill from it, parked
-    /// dsh work starts flowing, every workspace's dsh chat list refreshes.
-    fn on_dsh_started(&mut self, cx: &mut Context<Self>) {
-        self.touch_server_activity(DSH_SERVER_KEY);
+    /// ServerStarted for the shared app-wide server: pickers fill from it,
+    /// parked work starts flowing, every workspace's chat list refreshes.
+    fn on_shared_server_started(&mut self, cx: &mut Context<Self>) {
+        let shared = self.shared_key();
+        self.touch_server_activity(&shared);
         self.runtimes.insert(
-            DSH_SERVER_KEY.into(),
+            shared.clone(),
             WorkspaceRuntime {
                 stream_status: oc::StreamStatus::Connected,
                 healthy: None,
             },
         );
         self.net.send(NetCommand::Request {
-            ws_key: DSH_SERVER_KEY.into(),
+            ws_key: shared.clone(),
             request: ApiRequest::ListModels,
         });
         self.net.send(NetCommand::Request {
-            ws_key: DSH_SERVER_KEY.into(),
+            ws_key: shared.clone(),
             request: ApiRequest::ListAgents,
         });
         // a draft opened its slash menu before the shared server existed:
         // open the session its catalog needs now
         let pending_commands: Vec<String> = self.pending_command_tiles.iter().cloned().collect();
         for tile_key in pending_commands {
-            self.create_dsh_command_session(&tile_key, cx);
+            self.create_command_session(&tile_key, cx);
         }
-        self.refresh_dsh_lists();
+        self.refresh_shared_lists();
         // a restart must refill the menu of chats that already had a session
         self.net.send(NetCommand::Request {
-            ws_key: DSH_SERVER_KEY.into(),
-            request: ApiRequest::ListDshCommands { session_id: None },
+            ws_key: shared.clone(),
+            request: ApiRequest::ListAgentCommands { session_id: None },
         });
         // drafts parked while the server spun up become real creates now
         let parked: Vec<(String, String, Vec<AttachmentItem>, String)> =
-            std::mem::take(&mut self.pending_dsh_drafts);
+            std::mem::take(&mut self.pending_shared_drafts);
         for (tile_key, text, attachments, folder) in parked {
             self.pending_sends.push((tile_key, text, attachments));
-            self.pending_create_harness
-                .push_back((folder.clone(), HarnessKind::Dsh));
+            self.pending_create_harness.push_back((
+                folder.clone(),
+                crate::harness::shared_server_id().unwrap_or_default(),
+            ));
             self.net.send(NetCommand::Request {
-                ws_key: DSH_SERVER_KEY.into(),
-                request: ApiRequest::CreateDshSession {
+                ws_key: shared.clone(),
+                request: ApiRequest::CreateSessionIn {
                     folder,
                     title: DRAFT_TITLE.into(),
                 },
             });
         }
         // sends parked while the shared server's port was closed
-        self.drain_pending_session_sends(DSH_SERVER_KEY, cx);
+        self.drain_pending_session_sends(&shared, cx);
         let pending_restores: Vec<(String, Vec<String>)> = self
             .pending_restores
-            .extract_if(.., |(path, _)| path == DSH_SERVER_KEY)
+            .extract_if(.., |(path, _)| path == &shared)
             .collect();
         for (_, wanted) in pending_restores {
-            self.restore_open_tiles(DSH_SERVER_KEY, wanted, cx);
+            self.restore_open_tiles(&shared, wanted, cx);
         }
         let pending_opens: Vec<(String, String)> = self
             .pending_opens
-            .extract_if(.., |(path, _)| path == DSH_SERVER_KEY)
+            .extract_if(.., |(path, _)| path == &shared)
             .collect();
         for (_, session_id) in pending_opens {
             self.net.send(NetCommand::Request {
-                ws_key: DSH_SERVER_KEY.into(),
+                ws_key: shared.clone(),
                 request: ApiRequest::GetMessages { session_id },
             });
         }
@@ -2287,11 +2346,14 @@ impl Store {
             return;
         };
         let folder = ws.folder_path().to_string();
-        let executable = self.settings.harness_executable("opencode");
+        let Some(harness) = crate::harness::workspace_harness() else {
+            return;
+        };
+        let executable = self.settings.harness_executable(harness.as_str());
         tracing::info!("starting server for {}", ws.name);
         self.net.send(NetCommand::StartServer {
             ws_key: folder,
-            kind: HarnessKind::OpenCode,
+            harness,
             executable,
             folder: path.into(),
         });
@@ -2355,10 +2417,11 @@ impl Store {
         // the shared dsh server lists per folder independent of the
         // workspace's opencode server; refresh this folder's dsh chats
         // whenever it is up
-        if self.runtimes.contains_key(DSH_SERVER_KEY) {
+        let shared = self.shared_key();
+        if self.runtimes.contains_key(&shared) {
             self.net.send(NetCommand::Request {
-                ws_key: DSH_SERVER_KEY.into(),
-                request: ApiRequest::ListDshSessions {
+                ws_key: shared,
+                request: ApiRequest::ListSessionsIn {
                     folder: path.to_string(),
                 },
             });
@@ -2400,10 +2463,11 @@ impl Store {
         if !running {
             self.start_workspace(path, cx);
         }
-        if self.runtimes.contains_key(DSH_SERVER_KEY) {
+        let shared = self.shared_key();
+        if self.runtimes.contains_key(&shared) {
             self.net.send(NetCommand::Request {
-                ws_key: DSH_SERVER_KEY.into(),
-                request: ApiRequest::ListDshSessions {
+                ws_key: shared,
+                request: ApiRequest::ListSessionsIn {
                     folder: path.to_string(),
                 },
             });
@@ -2415,11 +2479,11 @@ impl Store {
                 w.state
                     .sessions
                     .iter()
-                    .any(|sid| self.session_harness(sid) == HarnessKind::Dsh)
+                    .any(|sid| self.session_is_shared(sid))
             })
         {
             // the list (and every pending open) flows once ServerStarted lands
-            self.ensure_dsh(cx);
+            self.ensure_shared_server(cx);
         }
     }
     // ---- attachments ----
@@ -2816,13 +2880,13 @@ fn lineage_workspace_path(
 /// default. Same depth cap as the workspace walk.
 fn lineage_harness(
     session_id: &str,
-    harnesses: &KeyMap<HarnessKind>,
+    harnesses: &KeyMap<HarnessId>,
     subagents: &HashMap<String, SubagentInfo>,
-) -> HarnessKind {
+) -> HarnessId {
     let mut current = session_id;
     for _ in 0..=MAX_LINEAGE_DEPTH {
         if let Some(kind) = harnesses.get(current) {
-            return *kind;
+            return kind.clone();
         }
         match subagents.get(current) {
             Some(sub) if sub.parent_session_id.as_str() != current => {
@@ -2831,7 +2895,7 @@ fn lineage_harness(
             _ => break,
         }
     }
-    HarnessKind::OpenCode
+    crate::harness::workspace_harness().unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -2986,9 +3050,9 @@ mod time_tests {
 
 #[cfg(test)]
 mod variant_lookup_tests {
-    use super::{HarnessKind, ModelInfo, variants_for_entry};
+    use super::{HarnessId, ModelInfo, variants_for_entry};
 
-    fn info(key: &str, harness: HarnessKind, variants: &[&str]) -> ModelInfo {
+    fn info(key: &str, harness: HarnessId, variants: &[&str]) -> ModelInfo {
         ModelInfo {
             key: key.into(),
             harness,
@@ -3002,20 +3066,20 @@ mod variant_lookup_tests {
     #[test]
     fn variants_resolve_per_harness_and_model() {
         let infos = [
-            info("zai/glm", HarnessKind::OpenCode, &["low", "max"]),
-            info("zai/glm", HarnessKind::Dsh, &["max"]),
-            info("no/tiers", HarnessKind::OpenCode, &[]),
+            info("zai/glm", HarnessId::from("opencode"), &["low", "max"]),
+            info("zai/glm", HarnessId::from("dsh"), &["max"]),
+            info("no/tiers", HarnessId::from("opencode"), &[]),
         ];
         assert_eq!(
-            variants_for_entry(&infos, HarnessKind::OpenCode, "zai/glm"),
+            variants_for_entry(&infos, &HarnessId::from("opencode"), "zai/glm"),
             ["low", "max"]
         );
         assert_eq!(
-            variants_for_entry(&infos, HarnessKind::Dsh, "zai/glm"),
+            variants_for_entry(&infos, &HarnessId::from("dsh"), "zai/glm"),
             ["max"]
         );
-        assert!(variants_for_entry(&infos, HarnessKind::OpenCode, "no/tiers").is_empty());
-        assert!(variants_for_entry(&infos, HarnessKind::OpenCode, "missing").is_empty());
+        assert!(variants_for_entry(&infos, &HarnessId::from("opencode"), "no/tiers").is_empty());
+        assert!(variants_for_entry(&infos, &HarnessId::from("opencode"), "missing").is_empty());
     }
 }
 
@@ -3132,7 +3196,7 @@ mod command_flow_tests {
         store.update(cx, |store, cx| {
             store.on_net_event(
                 UiEvent::Event {
-                    ws_key: DSH_SERVER_KEY.into(),
+                    ws_key: crate::harness::shared_server_key(),
                     event: json!({
                         "type": "session.updated",
                         "properties": { "info": {
@@ -3263,7 +3327,7 @@ mod command_flow_tests {
             let key = store.create_tile(cx).key.clone();
             store.focused_tile = Some(key.clone());
             if let Some(tile) = store.tile_by_key_mut(&key) {
-                tile.harness = HarnessKind::Dsh;
+                tile.harness = HarnessId::from("dsh");
             }
             store.refresh_commands(&key, cx);
             assert!(store.tile_commands_loading(&key));
@@ -3273,9 +3337,12 @@ mod command_flow_tests {
         // no session yet: the menu starts the shared dsh server
         let mut started = false;
         while let Ok(command) = rx.try_recv() {
-            if let NetCommand::StartServer { ws_key, kind, .. } = command {
-                assert_eq!(ws_key, DSH_SERVER_KEY);
-                assert_eq!(kind, HarnessKind::Dsh);
+            if let NetCommand::StartServer {
+                ws_key, harness, ..
+            } = command
+            {
+                assert_eq!(ws_key, crate::harness::shared_server_key());
+                assert_eq!(harness, HarnessId::from("dsh"));
                 started = true;
                 break;
             }
@@ -3283,13 +3350,13 @@ mod command_flow_tests {
         assert!(started, "the draft's first slash starts the dsh server");
 
         // the server is up now: its start drains the pending menu request
-        store.update(cx, |store, cx| store.on_dsh_started(cx));
+        store.update(cx, |store, cx| store.on_shared_server_started(cx));
 
         let mut created = false;
         while let Ok(command) = rx.try_recv() {
             if let NetCommand::Request {
                 request:
-                    ApiRequest::CreateDshCommandSession {
+                    ApiRequest::CreateCommandSession {
                         tile_key,
                         folder: requested,
                     },
@@ -3306,7 +3373,7 @@ mod command_flow_tests {
 
         store.update(cx, |store, cx| {
             store.on_net_event(
-                UiEvent::DshCommandSessionCreated {
+                UiEvent::CommandSessionCreated {
                     tile_key: key.clone(),
                     ws_key: folder.clone(),
                     result: Ok(SessionInfo {
@@ -3324,7 +3391,7 @@ mod command_flow_tests {
         let mut listed = false;
         while let Ok(command) = rx.try_recv() {
             if let NetCommand::Request {
-                request: ApiRequest::ListDshCommands { session_id },
+                request: ApiRequest::ListAgentCommands { session_id },
                 ..
             } = command
                 && session_id.as_deref() == Some("ses_probe")
@@ -3338,7 +3405,7 @@ mod command_flow_tests {
         store.update(cx, |store, cx| {
             store.on_net_event(
                 UiEvent::CommandsLoaded {
-                    ws_key: DSH_SERVER_KEY.into(),
+                    ws_key: crate::harness::shared_server_key(),
                     result: Ok(vec![CommandInfo {
                         name: "compact".into(),
                         name_lower: "compact".into(),
@@ -3366,7 +3433,7 @@ mod command_flow_tests {
         let mut executed = false;
         while let Ok(command) = rx.try_recv() {
             if let NetCommand::Request {
-                request: ApiRequest::ExecuteDshCommand { session_id, line },
+                request: ApiRequest::ExecuteCommand { session_id, line },
                 ..
             } = command
             {
@@ -3406,7 +3473,7 @@ mod command_flow_tests {
             store.add_workspace(&folder, cx);
             let key = store.create_tile(cx).key.clone();
             if let Some(tile) = store.tile_by_key_mut(&key) {
-                tile.harness = HarnessKind::OpenCode;
+                tile.harness = HarnessId::from("opencode");
                 tile.session_id = Some("ses_oc".into());
                 tile.selected_model = Some("opencode-go/deepseek-v4.1-flash".into());
                 tile.items.push(Arc::new(ChatItem::UserMessage {
@@ -3422,7 +3489,7 @@ mod command_flow_tests {
             store
                 .ui
                 .harness_by_session
-                .insert("ses_oc".into(), HarnessKind::OpenCode);
+                .insert("ses_oc".into(), HarnessId::from("opencode"));
             store.runtimes.insert(
                 folder.clone(),
                 WorkspaceRuntime {
@@ -3510,7 +3577,7 @@ mod command_flow_tests {
         let draft = store.update(cx, |store, cx| {
             let draft = store.create_tile(cx).key.clone();
             if let Some(tile) = store.tile_by_key_mut(&draft) {
-                tile.harness = HarnessKind::OpenCode;
+                tile.harness = HarnessId::from("opencode");
                 tile.input = "/compact".into();
             }
             store.focused_tile = Some(draft.clone());
@@ -3583,7 +3650,7 @@ mod command_flow_tests {
 #[cfg(test)]
 mod lineage_tests {
     use super::{
-        HarnessKind, HashMap, KeyMap, SubagentInfo, lineage_harness, lineage_workspace_path,
+        HarnessId, HashMap, KeyMap, SubagentInfo, lineage_harness, lineage_workspace_path,
     };
 
     fn subagent(parent: &str) -> SubagentInfo {
@@ -3646,14 +3713,14 @@ mod lineage_tests {
     #[test]
     fn a_subagent_inherits_its_owners_harness() {
         let mut harnesses = KeyMap::new();
-        harnesses.insert("session-root".to_string(), HarnessKind::Dsh);
+        harnesses.insert("session-root".to_string(), HarnessId::from("dsh"));
         let mut subagents = HashMap::new();
         subagents.insert("child".to_string(), subagent("session-root"));
         subagents.insert("grandchild".to_string(), subagent("child"));
 
         assert_eq!(
             lineage_harness("grandchild", &harnesses, &subagents),
-            HarnessKind::Dsh,
+            HarnessId::from("dsh"),
             "an unmarked subagent follows the chat that spawned it"
         );
     }
@@ -3661,14 +3728,14 @@ mod lineage_tests {
     #[test]
     fn a_subagents_own_harness_wins_over_the_lineage() {
         let mut harnesses = KeyMap::new();
-        harnesses.insert("session-root".to_string(), HarnessKind::Dsh);
-        harnesses.insert("child".to_string(), HarnessKind::OpenCode);
+        harnesses.insert("session-root".to_string(), HarnessId::from("dsh"));
+        harnesses.insert("child".to_string(), HarnessId::from("opencode"));
         let mut subagents = HashMap::new();
         subagents.insert("child".to_string(), subagent("session-root"));
 
         assert_eq!(
             lineage_harness("child", &harnesses, &subagents),
-            HarnessKind::OpenCode
+            HarnessId::from("opencode")
         );
     }
 }
@@ -3684,7 +3751,7 @@ mod harness_settings_tests {
         let _home = HomeGuard::new();
         let store = cx.update(Store::for_probe);
         store.update(cx, |store, _| {
-            store.settings.default_harness = HarnessKind::Dsh;
+            store.settings.default_harness = HarnessId::from("dsh");
         });
         store.update(cx, |store, cx| {
             store
@@ -3693,7 +3760,7 @@ mod harness_settings_tests {
         });
         store.read_with(cx, |store, _| {
             assert!(!store.harness_id_enabled("opencode"));
-            assert_eq!(store.settings.default_harness, HarnessKind::Dsh);
+            assert_eq!(store.settings.default_harness, HarnessId::from("dsh"));
         });
         store.update(cx, |store, cx| {
             assert!(store.set_harness_enabled("dsh", false, cx).is_err());

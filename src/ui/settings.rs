@@ -8,18 +8,15 @@ use std::collections::BTreeMap;
 /// The harness the Chat defaults page is configuring. A tiny entity because
 /// the model picker's data closure outlives a render and must re-scope when
 /// the segmented control changes without borrowing the window view.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct HarnessChoice(pub crate::settings::HarnessKind);
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HarnessChoice(pub crate::harness::HarnessId);
 
 #[derive(Clone)]
 pub struct SettingsBuffers {
     /// Per-harness settings keyed by wire id; the Server section renders a row
     /// per registry descriptor and Save writes this map straight back.
     pub harnesses: BTreeMap<String, crate::settings::HarnessEntry>,
-    pub opencode_executable: String,
-    pub dsh_executable: String,
-    pub v2_executable: String,
-    pub default_harness: crate::settings::HarnessKind,
+    pub default_harness: crate::harness::HarnessId,
     pub default_model: String,
     pub default_variant: String,
     pub variant_highest: bool,
@@ -50,18 +47,39 @@ impl SettingsBuffers {
         self.harness_entry(id).is_some_and(|entry| entry.enabled)
     }
 
+    /// The executable one harness row shows.
+    pub fn harness_executable(&self, id: &str) -> String {
+        self.harnesses
+            .get(id)
+            .map(|entry| entry.executable.trim().to_string())
+            .filter(|executable| !executable.is_empty())
+            .or_else(|| {
+                crate::harness::HarnessRegistry::builtin()
+                    .resolve(id)
+                    .ok()
+                    .map(|descriptor| descriptor.default_executable.to_string())
+            })
+            .unwrap_or_else(|| crate::settings::DEFAULT_EXECUTABLE.to_string())
+    }
+
+    /// Writes one harness row's executable back.
+    pub fn set_harness_executable(&mut self, id: &str, executable: String) {
+        let entry = self
+            .harnesses
+            .entry(id.to_string())
+            .or_insert_with(|| crate::settings::HarnessEntry::new(true, ""));
+        entry.executable = executable;
+    }
+
     /// The harness the buffers currently select.
-    pub fn harness(&self) -> crate::settings::HarnessKind {
-        self.default_harness
+    pub fn harness(&self) -> crate::harness::HarnessId {
+        self.default_harness.clone()
     }
 
     pub fn from_settings(s: &crate::settings::AppSettings) -> Self {
         Self {
             harnesses: s.harnesses.clone(),
-            opencode_executable: s.harness_executable("opencode"),
-            dsh_executable: s.harness_executable("dsh"),
-            v2_executable: s.harness_executable("opencode-v2"),
-            default_harness: s.default_harness,
+            default_harness: s.default_harness.clone(),
             default_model: s.default_model.clone().unwrap_or_default(),
             default_variant: s.default_variant.clone().unwrap_or_default(),
             variant_highest: s.default_variant_highest,
@@ -106,35 +124,25 @@ impl SettingsBuffers {
                 }
             };
             set.harnesses = self.harnesses.clone();
-            set.harnesses
-                .entry("opencode".into())
-                .or_insert_with(|| crate::settings::HarnessEntry::new(true, "opencode"))
-                .executable = executable(
-                &self.opencode_executable,
-                crate::settings::DEFAULT_EXECUTABLE,
-            );
-            set.harnesses
-                .entry("dsh".into())
-                .or_insert_with(|| crate::settings::HarnessEntry::new(true, "dsh"))
-                .executable = executable(
-                &self.dsh_executable,
-                crate::settings::DEFAULT_DSH_EXECUTABLE,
-            );
-            set.harnesses
-                .entry("opencode-v2".into())
-                .or_insert_with(|| crate::settings::HarnessEntry::new(false, "opencode"))
-                .executable = executable(&self.v2_executable, crate::settings::DEFAULT_EXECUTABLE);
-            if !crate::settings::HarnessKind::ALL
+            for descriptor in crate::harness::HarnessRegistry::builtin().iter() {
+                let id = descriptor.id.as_str();
+                let entry = set
+                    .harnesses
+                    .entry(id.to_string())
+                    .or_insert_with(|| crate::settings::HarnessEntry::new(true, ""));
+                entry.executable = executable(&entry.executable, descriptor.default_executable);
+            }
+            if !crate::harness::HarnessId::all()
                 .iter()
-                .any(|harness| set.harness_enabled(harness.label()))
+                .any(|harness| set.harness_enabled(harness.as_str()))
                 && let Some(entry) = set.harnesses.get_mut("opencode")
             {
                 entry.enabled = true;
             }
-            set.default_harness = if set.harness_enabled(self.default_harness.label()) {
-                self.default_harness
+            set.default_harness = if set.harness_enabled(self.default_harness.as_str()) {
+                self.default_harness.clone()
             } else {
-                set.default_harness_kind()
+                set.default_harness_id()
             };
             let null_if_blank = |v: &String| {
                 let t = v.trim();

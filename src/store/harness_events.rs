@@ -1,10 +1,11 @@
 //! Typed harness-event ingestion.
 //!
-//! The expand phase keeps the old opencode-shaped stream authoritative. This
-//! module takes the typed [`HarnessEvent`] vocabulary and feeds the same store
-//! handlers through their existing stream frames, so the transcript, tool and
-//! approval state is exercised without a second state machine. The contract
-//! ticket replaces the bridge with the typed path end to end.
+//! The attached adapter's typed [`HarnessEvent`] stream lands here and feeds
+//! the store's existing handlers through their stream frames, so the
+//! transcript, tool, approval and catalog state has one state machine rather
+//! than a second one per harness. The legacy net thread still delivers
+//! opencode v1 and dsh traffic as [`crate::oc::UiEvent`]s; both paths converge
+//! on the same handlers.
 
 use std::path::Path;
 
@@ -13,8 +14,7 @@ use crate::harness::{
     FormFieldKind, HarnessError, HarnessEvent, HarnessId, PartPayload, SessionId, SessionState,
     ToolSnapshot, ToolState,
 };
-use crate::oc::{AgentInfo, CommandInfo, DSH_SERVER_KEY, ModelInfo, UiEvent};
-use crate::settings::HarnessKind;
+use crate::oc::{AgentInfo, CommandInfo, ModelInfo, UiEvent};
 use gpui::Context;
 use serde_json::{Value, json};
 
@@ -230,11 +230,12 @@ impl Store {
             }
             HarnessEvent::PermissionAsked { request } => {
                 let ws_key = self.harness_ws_key(harness, Some(&request.session), None)?;
-                let event_type = if matches!(harness_kind(harness), Ok(HarnessKind::OpenCodeV2)) {
-                    "permission.v2.asked"
-                } else {
-                    "permission.asked"
-                };
+                let event_type =
+                    if harness_kind(harness).is_ok_and(|id| crate::harness::attached(&id)) {
+                        "permission.v2.asked"
+                    } else {
+                        "permission.asked"
+                    };
                 // the legacy v1 card reads `permission`/`patterns`; the exact
                 // action/resources shape lands with the v2 adapter
                 let mut event = json!({
@@ -307,7 +308,7 @@ impl Store {
                     Err(error) => Err(anyhow::anyhow!(error)),
                 };
                 self.on_net_event(
-                    UiEvent::DshCommandExecuted {
+                    UiEvent::CommandExecuted {
                         session_id: session.as_str().to_string(),
                         result,
                     },
@@ -321,7 +322,7 @@ impl Store {
                     .into_iter()
                     .map(|model| ModelInfo {
                         key: model.key,
-                        harness,
+                        harness: harness.clone(),
                         variants: model.variants,
                         context_limit: model.context_limit,
                     })
@@ -430,58 +431,36 @@ impl Store {
         session: Option<&SessionId>,
         directory: Option<&Path>,
     ) -> Result<String, HarnessError> {
-        match harness_kind(harness)? {
-            HarnessKind::Dsh => Ok(DSH_SERVER_KEY.to_string()),
-            HarnessKind::OpenCodeV2 => {
-                if let Some(directory) = directory {
-                    return Ok(directory.to_string_lossy().into_owned());
-                }
-                if let Some(session) = session {
-                    return self
-                        .workspace_by_session
-                        .get(session.as_str())
-                        .cloned()
-                        .ok_or_else(|| {
-                            HarnessError::Unavailable(format!(
-                                "session {} has no workspace",
-                                session.as_str()
-                            ))
-                        });
-                }
-                Ok(String::new())
-            }
-            HarnessKind::OpenCode => {
-                if let Some(directory) = directory {
-                    return Ok(directory.to_string_lossy().into_owned());
-                }
-                if let Some(session) = session {
-                    return self
-                        .workspace_by_session
-                        .get(session.as_str())
-                        .cloned()
-                        .ok_or_else(|| {
-                            HarnessError::Unavailable(format!(
-                                "unknown workspace for session {session}"
-                            ))
-                        });
-                }
-                self.selected_workspace
-                    .clone()
-                    .or_else(|| {
-                        self.workspaces
-                            .first()
-                            .map(|workspace| workspace.folder_path().to_string())
-                    })
-                    .ok_or_else(|| {
-                        HarnessError::Unavailable("no workspace for a harness event".into())
-                    })
-            }
+        let harness = harness_kind(harness)?;
+        if crate::harness::shared_server(&harness) {
+            return Ok(harness.as_str().to_string());
         }
+        if let Some(directory) = directory {
+            return Ok(directory.to_string_lossy().into_owned());
+        }
+        if let Some(session) = session {
+            return self
+                .workspace_by_session
+                .get(session.as_str())
+                .cloned()
+                .ok_or_else(|| {
+                    HarnessError::Unavailable(format!("unknown workspace for session {session}"))
+                });
+        }
+        self.selected_workspace
+            .clone()
+            .or_else(|| {
+                self.workspaces
+                    .iter()
+                    .find(|workspace| !workspace.folder_path().is_empty())
+                    .map(|workspace| workspace.folder_path().to_string())
+            })
+            .ok_or_else(|| HarnessError::Unavailable("no workspace for the event".into()))
     }
 }
 
-fn harness_kind(harness: &HarnessId) -> Result<HarnessKind, HarnessError> {
-    HarnessKind::from_wire(harness.as_str()).ok_or_else(|| {
+fn harness_kind(harness: &HarnessId) -> Result<HarnessId, HarnessError> {
+    HarnessId::from_wire(harness.as_str()).ok_or_else(|| {
         HarnessError::Unavailable(format!(
             "harness {} is not in the legacy store yet",
             harness.as_str()
@@ -526,7 +505,6 @@ mod tests {
         ToolState,
     };
     use crate::oc::UiEvent;
-    use crate::settings::HarnessKind;
     use crate::store::ChatItem;
     use crate::store::test_support::{HomeGuard, lock_home};
 
@@ -731,7 +709,7 @@ mod tests {
 
             assert!(
                 store
-                    .model_keys_for(HarnessKind::OpenCode)
+                    .model_keys_for(&crate::harness::workspace_harness().unwrap_or_default())
                     .contains(&"test/model".to_string())
             );
             let commands = store.commands.get(&folder).expect("the catalog landed");

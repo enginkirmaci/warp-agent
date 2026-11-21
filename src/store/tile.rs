@@ -43,7 +43,7 @@ pub struct ChatTile {
     pub input: String,
     /// Backend this chat runs on; a draft carries the choice until its first
     /// send creates the session on that server.
-    pub harness: HarnessKind,
+    pub harness: HarnessId,
     pub selected_model: Option<String>,
     pub selected_variant: Option<String>,
     pub selected_agent: Option<String>,
@@ -155,7 +155,7 @@ impl ChatTile {
             session_id: None,
             title: DRAFT_TITLE.into(),
             input: String::new(),
-            harness: HarnessKind::default(),
+            harness: HarnessId::default(),
             selected_model: seed_model,
             selected_variant,
             selected_agent: seed_agent,

@@ -22,12 +22,38 @@ use crate::dsh::{
     DshHandle, agent_presets, commands as dsh_commands, create_session, execute_command,
     list_sessions as dsh_list_sessions, model_catalog, send_message as dsh_send_message,
 };
-use crate::oc::{
-    DSH_SERVER_KEY, ServerProcess, StreamStatus, UiEvent, child_exited, find_free_port,
-};
-use crate::settings::HarnessKind;
+use crate::oc::{ServerProcess, StreamStatus, UiEvent, child_exited, find_free_port};
 
 const HEALTH_POLL: Duration = Duration::from_secs(10);
+
+/// How the managed `dsh web` child is launched; the registry carries this spec.
+pub(crate) fn launch_spec() -> LaunchSpec {
+    LaunchSpec {
+        args: launch_args,
+        env: launch_env,
+        readiness: Readiness::LaunchCredential,
+        timeout: Duration::from_secs(40),
+        attach_healthy: false,
+        capture_line: Some(|line| crate::dsh::token_from_line(line).map(str::to_string)),
+        timeout_message: "dsh web did not print its URL within 40 s.",
+    }
+}
+
+fn launch_args(port: u16) -> Vec<String> {
+    [
+        "web".to_string(),
+        "--no-open".to_string(),
+        "--host".to_string(),
+        "127.0.0.1".to_string(),
+        "--port".to_string(),
+        port.to_string(),
+    ]
+    .to_vec()
+}
+
+fn launch_env() -> Vec<(&'static str, &'static str)> {
+    Vec::new()
+}
 
 /// The managed dsh adapter.
 pub struct DshHarness {
@@ -229,7 +255,7 @@ impl Harness for DshHarness {
             .unwrap_or_else(|| ".".into());
         let port = find_free_port().map_err(|err| HarnessError::Failed(format!("{err:#}")))?;
         let result = self.runtime.block_on(ServerProcess::start(
-            HarnessKind::Dsh,
+            launch_spec(),
             &self.config.executable,
             &folder,
             port,
@@ -258,7 +284,7 @@ impl Harness for DshHarness {
         self.set_health(HarnessHealth::ready());
         self.pump = Some(self.runtime.spawn(crate::dsh::run_pump(
             handle.clone(),
-            DSH_SERVER_KEY.to_string(),
+            self.id.as_str().to_string(),
             ui_tx,
             stop_rx.clone(),
             frame_rx,

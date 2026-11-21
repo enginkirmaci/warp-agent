@@ -15,9 +15,9 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{broadcast, oneshot};
 use warpui_kit_platform::door::{self, ANSWER_TIMEOUT, MAX_LINE, cmd, token_matches};
 
+use crate::harness::HarnessId;
 use crate::oc::UiEvent;
 use crate::paths::AppPaths;
-use crate::settings::HarnessKind;
 
 pub use warpui_kit_platform::door::PROTOCOL;
 
@@ -46,7 +46,7 @@ struct Subscription {
 #[derive(Clone, Debug, Default)]
 pub struct DoorModel {
     pub model: Option<String>,
-    pub harness: Option<HarnessKind>,
+    pub harness: Option<HarnessId>,
     pub variant: Option<String>,
 }
 
@@ -83,7 +83,7 @@ pub enum IpcCommand {
     Models {
         /// None answers with every catalog the app knows; a harness starts
         /// that backend when it has no models yet and answers when loaded.
-        harness: Option<HarnessKind>,
+        harness: Option<HarnessId>,
         /// Ask the backend for a fresh list instead of answering from the
         /// in-memory catalog. The settings refresh button sets it.
         refresh: bool,
@@ -304,10 +304,10 @@ async fn read_line(reader: &mut BufReader<OwnedReadHalf>) -> Option<String> {
     }
 }
 
-fn parse_harness(request: &Value) -> Result<Option<HarnessKind>, String> {
+fn parse_harness(request: &Value) -> Result<Option<HarnessId>, String> {
     match request.get("harness").and_then(Value::as_str) {
         None => Ok(None),
-        Some(id) => HarnessKind::from_wire(id)
+        Some(id) => HarnessId::from_wire(id)
             .map(Some)
             .ok_or_else(|| format!("unknown harness: {id}")),
     }
@@ -673,7 +673,7 @@ mod tests {
                     reply,
                 } => {
                     let _ = reply.send(Ok(json!({
-                        "harness": harness.map(|harness| harness.label()),
+                        "harness": harness.as_ref().map(|harness| harness.as_str().to_string()),
                         "refresh": refresh,
                     })));
                 }

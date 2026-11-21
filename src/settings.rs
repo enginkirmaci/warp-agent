@@ -2,6 +2,7 @@
 //! Both are versioned snake_case documents. The pre-versioning PascalCase
 //! files are imported once at the edge; the live types never see them.
 
+use crate::harness::{HarnessId, HarnessRegistry};
 use crate::paths::AppPaths;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -33,69 +34,6 @@ impl HarnessEntry {
 /// pinned rows lead, then the most recent.
 pub const DEFAULT_SIDEBAR_CHATS_PER_WORKSPACE: i64 = 20;
 
-/// Which backend a chat runs on. Sessions carry their own harness so a
-/// workspace can mix opencode and dsh tiles; dsh chats all live on one
-/// shared `dsh web` process (dsh sessions carry their own cwd).
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
-#[serde(rename_all = "lowercase")]
-pub enum HarnessKind {
-    #[default]
-    OpenCode,
-    Dsh,
-    /// The attached opencode v2 service; the bridge runs through the typed
-    /// adapter while the remaining v1/dsh paths are still on the old client.
-    #[serde(rename = "opencode-v2")]
-    OpenCodeV2,
-}
-
-impl HarnessKind {
-    /// Every harness the app can run. The door reports this list, so clients
-    /// (DevTools settings) never hardcode what warp-agent supports.
-    pub const ALL: [HarnessKind; 3] = [
-        HarnessKind::OpenCode,
-        HarnessKind::Dsh,
-        HarnessKind::OpenCodeV2,
-    ];
-
-    /// The wire id: the settings key and the door's `harness` value.
-    pub fn label(self) -> &'static str {
-        match self {
-            HarnessKind::OpenCode => "opencode",
-            HarnessKind::Dsh => "dsh",
-            HarnessKind::OpenCodeV2 => "opencode-v2",
-        }
-    }
-
-    /// What a picker calls the harness; the wire id stays stable even when
-    /// the display name is friendlier.
-    pub fn option_label(self) -> &'static str {
-        match self {
-            HarnessKind::OpenCode => "opencode",
-            HarnessKind::Dsh => "DeepSeek (dsh)",
-            HarnessKind::OpenCodeV2 => "opencode v2",
-        }
-    }
-
-    pub fn from_label(label: &str) -> Self {
-        match label {
-            "dsh" => HarnessKind::Dsh,
-            "opencode-v2" => HarnessKind::OpenCodeV2,
-            _ => HarnessKind::OpenCode,
-        }
-    }
-
-    /// Strict wire parse for the door: an unknown id is a client bug, not
-    /// something to silently route to opencode.
-    pub fn from_wire(label: &str) -> Option<Self> {
-        match label {
-            "opencode" => Some(HarnessKind::OpenCode),
-            "dsh" => Some(HarnessKind::Dsh),
-            "opencode-v2" => Some(HarnessKind::OpenCodeV2),
-            _ => None,
-        }
-    }
-}
-
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(rename_all = "snake_case", default)]
 pub struct AppSettings {
@@ -109,7 +47,7 @@ pub struct AppSettings {
     #[serde(default = "default_dsh_executable")]
     pub dsh_executable: String,
     /// Harness new chats start on (the composer pill can switch per chat).
-    pub default_harness: HarnessKind,
+    pub default_harness: HarnessId,
     pub default_model: Option<String>,
     pub default_variant: Option<String>,
     pub default_variant_highest: bool,
@@ -153,6 +91,10 @@ pub struct AppSettings {
 
 fn default_executable() -> String {
     DEFAULT_EXECUTABLE.into()
+}
+
+fn default_harness_id() -> HarnessId {
+    HarnessRegistry::builtin().default_id()
 }
 fn default_dsh_executable() -> String {
     DEFAULT_DSH_EXECUTABLE.into()
@@ -212,7 +154,7 @@ impl Default for AppSettings {
             opencode_executable: default_executable(),
             dsh_executable: default_dsh_executable(),
             harnesses: default_harnesses(),
-            default_harness: HarnessKind::default(),
+            default_harness: default_harness_id(),
             default_model: None,
             default_variant: None,
             default_variant_highest: false,
@@ -269,17 +211,17 @@ impl AppSettings {
             .collect()
     }
 
-    /// The default harness, falling back to the first enabled one. The legacy
-    /// enum cannot name v2 yet; v2 becomes selectable with the registry-fed
-    /// default in the contract ticket.
-    pub fn default_harness_kind(&self) -> HarnessKind {
-        if self.harness_enabled(self.default_harness.label()) {
-            return self.default_harness;
+    /// The default harness, falling back to the first enabled registry entry.
+    pub fn default_harness_id(&self) -> HarnessId {
+        let registry = HarnessRegistry::builtin();
+        if self.harness_enabled(self.default_harness.as_str()) {
+            return self.default_harness.clone();
         }
-        HarnessKind::ALL
-            .into_iter()
-            .find(|harness| self.harness_enabled(harness.label()))
-            .unwrap_or(HarnessKind::OpenCode)
+        registry
+            .iter()
+            .map(|descriptor| descriptor.id.clone())
+            .find(|id| self.harness_enabled(id.as_str()))
+            .unwrap_or_else(|| registry.default_id())
     }
 
     /// Fill the harness map from the defaults and the pre-map executable
@@ -327,19 +269,21 @@ impl AppSettings {
             }
             changed = true;
         }
-        if !HarnessKind::ALL
+        let registry = HarnessRegistry::builtin();
+        if !registry
             .iter()
-            .any(|harness| self.harness_enabled(harness.label()))
+            .any(|descriptor| self.harness_enabled(descriptor.id.as_str()))
         {
-            if let Some(entry) = self.harnesses.get_mut("opencode") {
+            let first = registry.default_id();
+            if let Some(entry) = self.harnesses.get_mut(first.as_str()) {
                 entry.enabled = true;
-            } else if let Some(entry) = self.harnesses.get_mut("dsh") {
+            } else if let Some(entry) = self.harnesses.values_mut().next() {
                 entry.enabled = true;
             }
             changed = true;
         }
-        if !self.harness_enabled(self.default_harness.label()) {
-            self.default_harness = self.default_harness_kind();
+        if !self.harness_enabled(self.default_harness.as_str()) {
+            self.default_harness = self.default_harness_id();
             changed = true;
         }
         self.sync_legacy_executables();
@@ -446,9 +390,9 @@ pub struct UiState {
     /// Workspace folder paths whose MCP servers the composer toggle keeps
     /// disconnected; re-applied after every server (re)start.
     pub mcp_disabled_workspaces: Vec<String>,
-    /// Session id → harness. A chat keeps the backend it was created with
-    /// across restarts, so reopening routes to the right server.
-    pub harness_by_session: KeyMap<HarnessKind>,
+    /// Session id → harness wire id. A chat keeps the backend it was created
+    /// with across restarts, so reopening routes to the right server.
+    pub harness_by_session: KeyMap<HarnessId>,
     /// Chat ids the user deleted. dsh archives are per-process, so an archived
     /// chat still rides `session/list` after the app restarts; these ids keep
     /// it out of every list instead of letting it reappear.
@@ -571,6 +515,14 @@ pub fn load_models_cache() -> Vec<crate::oc::ModelInfo> {
     }
 }
 
+/// The released model cache predates harness ids: its entries are the
+/// per-workspace harness's.
+fn legacy_harness_id() -> HarnessId {
+    HarnessRegistry::builtin()
+        .workspace_id()
+        .unwrap_or_else(|| HarnessRegistry::builtin().default_id())
+}
+
 fn parse_legacy_models(text: &str) -> Option<Vec<crate::oc::ModelInfo>> {
     if let Ok(models) = serde_json::from_str::<Vec<crate::oc::ModelInfo>>(text) {
         return Some(models);
@@ -582,7 +534,7 @@ fn parse_legacy_models(text: &str) -> Option<Vec<crate::oc::ModelInfo>> {
                 let key = key.trim().to_string();
                 (!key.is_empty() && !key.starts_with('(')).then_some(crate::oc::ModelInfo {
                     key,
-                    harness: HarnessKind::OpenCode,
+                    harness: legacy_harness_id(),
                     variants: Vec::new(),
                     context_limit: 0,
                 })
@@ -671,7 +623,7 @@ mod tests {
         assert!(old.migrate_harnesses());
         assert_eq!(old.harness_executable("opencode"), "/tmp/oc");
         assert_eq!(old.harness_executable("dsh"), "/tmp/dsh");
-        assert_eq!(old.default_harness, HarnessKind::Dsh);
+        assert_eq!(old.default_harness, HarnessId::new("dsh"));
         assert!(!old.harness_enabled("opencode-v2"));
     }
 
@@ -686,26 +638,24 @@ mod tests {
 
         let mut settings = AppSettings::default();
         settings.harnesses.get_mut("opencode").unwrap().enabled = false;
-        settings.default_harness = HarnessKind::OpenCode;
+        settings.default_harness = HarnessId::new("opencode");
         assert!(settings.migrate_harnesses());
-        assert_eq!(settings.default_harness, HarnessKind::Dsh);
+        assert_eq!(settings.default_harness, HarnessId::new("dsh"));
     }
 
     #[test]
     fn opencode_v2_is_a_first_class_harness_id() {
-        assert_eq!(
-            HarnessKind::from_wire("opencode-v2"),
-            Some(HarnessKind::OpenCodeV2)
-        );
-        assert_eq!(HarnessKind::OpenCodeV2.label(), "opencode-v2");
-        assert_eq!(HarnessKind::OpenCodeV2.option_label(), "opencode v2");
-        assert_eq!(HarnessKind::ALL.len(), 3);
+        let registry = HarnessRegistry::builtin();
+        let id = HarnessId::new("opencode-v2");
+        assert_eq!(registry.resolve(id.as_str()).unwrap().id, id);
+        assert_eq!(registry.label_for(&id), "opencode v2");
+        assert_eq!(registry.iter().count(), 3);
 
         let mut settings = AppSettings::default();
         assert!(!settings.harness_enabled("opencode-v2"));
         settings.harnesses.get_mut("opencode-v2").unwrap().enabled = true;
-        settings.default_harness = HarnessKind::OpenCodeV2;
-        assert_eq!(settings.default_harness_kind(), HarnessKind::OpenCodeV2);
+        settings.default_harness = id.clone();
+        assert_eq!(settings.default_harness_id(), id);
     }
 
     #[test]
@@ -728,7 +678,7 @@ mod tests {
 
         let settings = import_settings(&path).expect("imports");
         assert_eq!(settings.opencode_executable, "/bin/opencode");
-        assert_eq!(settings.default_harness, HarnessKind::Dsh);
+        assert_eq!(settings.default_harness, HarnessId::new("dsh"));
         assert_eq!(settings.default_model.as_deref(), Some("opencode-go/x"));
         assert_eq!(settings.server_idle_stop_minutes, 25);
         assert_eq!(settings.text_size.as_deref(), Some("large"));
@@ -758,7 +708,7 @@ mod tests {
 
         let store = Store::<AppSettings>::new(path.clone()).preserving_unknown();
         let mut settings = store.load().expect("a newer file still loads");
-        assert_eq!(settings.default_harness, HarnessKind::Dsh);
+        assert_eq!(settings.default_harness, HarnessId::new("dsh"));
         settings.text_size = Some("large".into());
         store.save(&settings).unwrap();
 
@@ -795,7 +745,7 @@ mod tests {
         );
         assert_eq!(
             ui.harness_by_session.get("ses_HARNESS"),
-            Some(&HarnessKind::Dsh)
+            Some(&HarnessId::new("dsh"))
         );
         assert_eq!(ui.mcp_disabled_workspaces, vec!["/mnt/Repo"]);
         assert_eq!(ui.workspaces[0].path, "/mnt/Repo");
@@ -809,13 +759,47 @@ mod tests {
     }
 
     #[test]
+    fn every_legacy_harness_value_still_loads() {
+        let ui: UiState = serde_json::from_str(
+            r#"{
+                "harness_by_session": {
+                    "ses_one": "opencode",
+                    "ses_two": "dsh",
+                    "ses_three": "opencode-v2"
+                },
+                "default_harness": "opencode-v2"
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(
+            ui.harness_by_session.get("ses_one"),
+            Some(&HarnessId::new("opencode"))
+        );
+        assert_eq!(
+            ui.harness_by_session.get("ses_two"),
+            Some(&HarnessId::new("dsh"))
+        );
+        assert_eq!(
+            ui.harness_by_session.get("ses_three"),
+            Some(&HarnessId::new("opencode-v2"))
+        );
+        let settings: AppSettings =
+            serde_json::from_str(r#"{"default_harness": "opencode-v2"}"#).unwrap();
+        assert_eq!(settings.default_harness, HarnessId::new("opencode-v2"));
+
+        let saved = serde_json::to_string(&ui).unwrap();
+        assert!(saved.contains("\"opencode-v2\""));
+        assert!(saved.contains("\"dsh\""));
+    }
+
+    #[test]
     fn the_flat_model_list_loads_as_opencode_entries() {
         let models = parse_legacy_models(r#"["a/x", "b/y", ""]"#).expect("legacy list");
         assert_eq!(models.len(), 2);
         assert!(
             models
                 .iter()
-                .all(|model| model.harness == HarnessKind::OpenCode)
+                .all(|model| model.harness == legacy_harness_id())
         );
         assert!(models.iter().all(|model| model.variants.is_empty()));
     }

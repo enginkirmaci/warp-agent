@@ -1,8 +1,8 @@
 //! One chat tile in the grid: transcript, composer and stream state for a
 //! single session — the ChatTile view port.
 
+use crate::harness::HarnessId;
 use crate::oc::CommandInfo;
-use crate::settings::HarnessKind;
 use crate::store::{
     ChatItem, DEFAULT_MODEL_ENTRY, QuestionEntry, Store, TokenPace, ToolItem, at_token_start,
 };
@@ -2613,6 +2613,7 @@ struct TileSnap {
     has_agents: bool,
     /// Backend of this chat: label for the harness pill, disabled once the
     /// session exists (a chat is bound to the server it was created on).
+    harness: HarnessId,
     harness_label: &'static str,
     harness_locked: bool,
     has_tasks_or_agents: bool,
@@ -3208,11 +3209,11 @@ impl TileView {
             .overflow_hidden();
         // harness pill: click cycles to the next enabled harness on a draft; a
         // chat that already has a session is bound to its server
-        let current_harness = HarnessKind::from_label(snap.harness_label);
+        let current_harness = snap.harness.clone();
         let next_harness = self
             .store
             .read(cx)
-            .next_enabled_harness(current_harness)
+            .next_enabled_harness(&current_harness)
             .map(|harness| harness.label())
             .unwrap_or(snap.harness_label);
         pills = pills.child(
@@ -3457,12 +3458,12 @@ impl TileView {
         let current = store
             .read(cx)
             .tile_by_key(&key)
-            .map(|t| t.harness)
-            .unwrap_or(HarnessKind::OpenCode);
-        let Some(next) = store.read(cx).next_enabled_harness(current) else {
+            .map(|t| t.harness.clone())
+            .unwrap_or_else(|| crate::harness::workspace_harness().unwrap_or_default());
+        let Some(next) = store.read(cx).next_enabled_harness(&current) else {
             return;
         };
-        store.update(cx, |s, cx| s.set_tile_harness(&key, next, cx));
+        store.update(cx, |s, cx| s.set_tile_harness(&key, next.clone(), cx));
         // the kit placeholder was baked in at construction; the flip rewrites
         // it (the leaf's aria_placeholder follows via notify)
         let label = next.label();
@@ -4667,6 +4668,7 @@ impl Render for TileView {
                 selected_model_short: tile.selected_model_short(),
                 selected_agent: tile.selected_agent.clone().unwrap_or_default(),
                 has_agents: store.has_agents(),
+                harness: tile.harness.clone(),
                 harness_label: tile.harness.label(),
                 harness_locked: tile.session_id.is_some(),
                 has_tasks_or_agents: tile.has_tasks_or_agents(),
@@ -5635,11 +5637,11 @@ fn composer_model_data(
     let harness = store
         .read(cx)
         .tile_by_key(key)
-        .map(|tile| tile.harness)
+        .map(|tile| tile.harness.clone())
         .unwrap_or_default();
     let mut models: Vec<String> = store
         .read(cx)
-        .model_keys_for(harness)
+        .model_keys_for(&harness)
         .into_iter()
         .filter(|model| {
             let model = model.trim();

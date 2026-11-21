@@ -1,7 +1,10 @@
 //! The app-level harness interface, registry, host and the compiled-in
-//! opencode v1, dsh and opencode v2 adapters. The old net paths still run the
-//! app during the expand phase; the settings/UI/door wiring and the contract
-//! cleanup land in the following tickets.
+//! opencode v1, dsh and opencode v2 adapters. The registry is the one list of
+//! harnesses the settings page, the composer pill, the door and the model
+//! pickers read; ids are wire strings ([`HarnessId`]), never an enum. Chat
+//! traffic for opencode v1 and dsh still runs on the legacy net thread, which
+//! launches its managed child from the descriptor's [`LaunchSpec`]; the
+//! attached adapter (opencode v2) is routed through the host.
 
 mod dsh;
 mod host;
@@ -25,6 +28,76 @@ pub use opencode_v2::OpenCodeV2Harness;
 pub use registry::{HarnessDescriptor, HarnessRegistry};
 pub use types::*;
 
+/// The compiled-in registry, built once.
+pub fn registry() -> &'static HarnessRegistry {
+    static REGISTRY: std::sync::OnceLock<HarnessRegistry> = std::sync::OnceLock::new();
+    REGISTRY.get_or_init(HarnessRegistry::builtin)
+}
+
+/// The display name of a harness id.
+pub fn label(id: &HarnessId) -> &'static str {
+    registry().label_for(id)
+}
+
+/// The harness's one managed app-wide process (dsh), if it has one.
+pub fn shared_server(id: &HarnessId) -> bool {
+    registry().is_shared_server(id)
+}
+
+/// The harness attaches to a service the app does not own (opencode v2).
+pub fn attached(id: &HarnessId) -> bool {
+    registry().is_attached(id)
+}
+
+/// The harness has one app-wide instance rather than one per workspace.
+pub fn app_scope(id: &HarnessId) -> bool {
+    registry().is_app_scope(id)
+}
+
+/// The harness has one instance per workspace folder (opencode v1).
+pub fn workspace_scoped(id: &HarnessId) -> bool {
+    registry().is_workspace_scope(id)
+}
+
+/// The registry's one per-workspace harness (opencode v1).
+pub fn workspace_harness() -> Option<HarnessId> {
+    registry().workspace_id()
+}
+
+/// The registry's one attached harness (opencode v2).
+pub fn attached_id() -> Option<HarnessId> {
+    registry().attached_id()
+}
+
+/// The id of the registry's one managed app-wide harness (dsh).
+pub fn shared_server_id() -> Option<HarnessId> {
+    registry().shared_server_id()
+}
+
+/// The net key of the shared app-wide server: its harness id.
+pub fn shared_server_key() -> String {
+    shared_server_id()
+        .map(|id| id.as_str().to_string())
+        .unwrap_or_default()
+}
+
+/// Whether a net key names the shared app-wide server.
+pub fn is_shared_key(key: &str) -> bool {
+    registry()
+        .shared_server_id()
+        .is_some_and(|id| id.as_str() == key)
+}
+
+/// The key a harness instance or its net server is registered under.
+pub fn instance_key(id: &HarnessId, folder: Option<&str>) -> String {
+    registry().instance_key(id, folder)
+}
+
+/// The harness a net key names.
+pub fn harness_for_key(key: &str) -> Option<HarnessId> {
+    registry().harness_for_key(key)
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -47,6 +120,7 @@ mod tests {
             connection: ConnectionKind::Managed,
             scope: InstanceScope::App,
             capabilities: HarnessCapabilities::NONE,
+            launch: None,
             factory: Some(fake_harness_factory),
         }
     }
@@ -261,6 +335,51 @@ mod tests {
             .register_instance(Box::new(FakeHarness::new(FAKE_ID)))
             .unwrap_err();
         assert!(matches!(error, HarnessError::DuplicateInstance(_)));
+    }
+
+    #[test]
+    fn instance_keys_follow_the_descriptor_scope() {
+        let registry = HarnessRegistry::builtin();
+        let workspace = HarnessId::new("opencode");
+        let shared = HarnessId::new("dsh");
+        let attached = HarnessId::new("opencode-v2");
+
+        // a per-workspace harness is keyed by its folder
+        assert_eq!(
+            registry.instance_key(&workspace, Some("/tmp/repo")),
+            "/tmp/repo"
+        );
+        // an app-wide one is keyed by its id, whatever folder it is asked for
+        assert_eq!(registry.instance_key(&shared, Some("/tmp/repo")), "dsh");
+        assert_eq!(registry.instance_key(&attached, None), "opencode-v2");
+
+        // and a net key resolves back to the harness it names
+        assert_eq!(registry.harness_for_key("dsh"), Some(shared));
+        assert_eq!(registry.harness_for_key("opencode-v2"), Some(attached));
+        assert_eq!(registry.harness_for_key("/tmp/repo"), Some(workspace));
+    }
+
+    #[test]
+    fn scope_and_connection_predicates_come_from_the_descriptors() {
+        let registry = HarnessRegistry::builtin();
+        let workspace = HarnessId::new("opencode");
+        let shared = HarnessId::new("dsh");
+        let attached = HarnessId::new("opencode-v2");
+
+        assert!(registry.is_workspace_scope(&workspace));
+        assert!(!registry.is_app_scope(&workspace));
+        assert!(registry.is_shared_server(&shared));
+        assert!(!registry.is_shared_server(&attached));
+        assert!(registry.is_attached(&attached));
+        assert!(!registry.is_attached(&shared));
+        assert_eq!(registry.shared_server_id(), Some(shared));
+        assert_eq!(registry.workspace_id(), Some(workspace));
+        assert_eq!(registry.attached_id(), Some(attached.clone()));
+        assert_eq!(registry.label_for(&attached), "opencode v2");
+        assert_eq!(
+            registry.label_for(&HarnessId::new("no-such-harness")),
+            "unknown harness"
+        );
     }
 
     #[test]

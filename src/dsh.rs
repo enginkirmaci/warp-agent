@@ -19,11 +19,11 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
+use crate::harness::HarnessId;
 use crate::oc::{
     AgentInfo, ApiRequest, CommandInfo, ModelInfo, QuestionOptionInfo, QuestionPromptInfo,
     SessionInfo, StoredMessage, StreamStatus, UiEvent,
 };
-use crate::settings::HarnessKind;
 
 /// How long a single follow snapshot may take to arrive before GetMessages
 /// gives up (the pump may still be reconnecting).
@@ -36,6 +36,11 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(8);
 
 /// Waits for the `dsh web: http://…/?token=…` line and exchanges the token
 /// for an API cookie. Returns the cookie (bare `name=value` pair).
+/// This module is the dsh harness's protocol client; the registry owns the id.
+fn harness_id() -> HarnessId {
+    HarnessId::new("dsh")
+}
+
 pub async fn connect_with_token(base_url: &str, token: &str) -> Result<String> {
     let http = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
@@ -533,12 +538,12 @@ fn question_key(question: &QuestionPromptInfo) -> String {
 // ---- request mapping ------------------------------------------------------
 
 /// Runs one ApiRequest against the dsh web API and shapes the reply the store
-/// already knows. `ws_key` is DSH_KEY; `folder` is the real workspace folder
-/// for the requests whose reply events key off the workspace.
+/// already knows. `ws_key` is the shared server's key; `folder` is the real
+/// workspace folder for the requests whose reply events key off the workspace.
 pub async fn run_request(handle: &DshHandle, ws_key: String, request: ApiRequest) -> UiEvent {
     match request {
         ApiRequest::ListSessions | ApiRequest::ListMcpNames => {
-            // dsh sessions are listed per workspace folder (ListDshSessions)
+            // dsh sessions are listed per workspace folder (ListSessionsIn)
             // and MCP has no dsh equivalent; neither can be answered here —
             // an empty list would read as "everything gone" and prune real
             // chats, so log the misrouting instead
@@ -547,16 +552,16 @@ pub async fn run_request(handle: &DshHandle, ws_key: String, request: ApiRequest
                 line: "request without a dsh equivalent hit the dsh runner".into(),
             }
         }
-        ApiRequest::ListDshSessions { folder } => {
+        ApiRequest::ListSessionsIn { folder } => {
             let result = list_sessions_filtered(handle, &folder).await;
             UiEvent::SessionsLoaded {
                 ws_key: folder,
-                dsh: true,
+                shared: true,
                 result,
             }
         }
         ApiRequest::ListModels => UiEvent::ModelsLoaded {
-            harness: HarnessKind::Dsh,
+            harness: harness_id(),
             result: model_catalog(handle).await,
         },
         ApiRequest::ListAgents => UiEvent::AgentsLoaded {
@@ -566,21 +571,21 @@ pub async fn run_request(handle: &DshHandle, ws_key: String, request: ApiRequest
             let result = commands(handle, None).await;
             UiEvent::CommandsLoaded { ws_key, result }
         }
-        ApiRequest::ListDshCommands { session_id } => {
+        ApiRequest::ListAgentCommands { session_id } => {
             let result = commands(handle, session_id.as_deref()).await;
             UiEvent::CommandsLoaded { ws_key, result }
         }
-        ApiRequest::CreateDshCommandSession { tile_key, folder } => {
+        ApiRequest::CreateCommandSession { tile_key, folder } => {
             let result = create_session(handle, Some(&folder), "New chat").await;
-            UiEvent::DshCommandSessionCreated {
+            UiEvent::CommandSessionCreated {
                 tile_key,
                 ws_key: folder,
                 result,
             }
         }
-        ApiRequest::ExecuteDshCommand { session_id, line } => {
+        ApiRequest::ExecuteCommand { session_id, line } => {
             let result = execute_command(handle, &session_id, &line).await;
-            UiEvent::DshCommandExecuted { session_id, result }
+            UiEvent::CommandExecuted { session_id, result }
         }
         ApiRequest::CompactSession { .. } => UiEvent::Log {
             ws_key,
@@ -600,14 +605,14 @@ pub async fn run_request(handle: &DshHandle, ws_key: String, request: ApiRequest
             let result = create_session(handle, None, &title).await;
             UiEvent::SessionCreated { ws_key, result }
         }
-        ApiRequest::CreateDshSession { folder, title } => {
+        ApiRequest::CreateSessionIn { folder, title } => {
             let result = create_session(handle, Some(&folder), &title).await;
             UiEvent::SessionCreated {
                 ws_key: folder,
                 result,
             }
         }
-        ApiRequest::CreateDshForkSession {
+        ApiRequest::CreateForkSessionIn {
             folder,
             title,
             context,
@@ -679,10 +684,6 @@ pub async fn run_request(handle: &DshHandle, ws_key: String, request: ApiRequest
             permission_id,
             response,
             ..
-        }
-        | ApiRequest::ReplyV2 {
-            request_id: permission_id,
-            response,
         } => {
             let result = handle.answer_approval(&permission_id, &response).await;
             UiEvent::PermissionReplied {
@@ -895,7 +896,7 @@ pub(crate) async fn model_catalog(handle: &DshHandle) -> Result<Vec<ModelInfo>> 
             variants.sort_by_key(|v| (crate::store::variant_rank(v), v.to_lowercase()));
             models.push(ModelInfo {
                 key: format!("{provider}/{name}"),
-                harness: HarnessKind::Dsh,
+                harness: harness_id(),
                 variants,
                 context_limit: 0,
             });

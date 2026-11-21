@@ -9,13 +9,13 @@ impl Store {
     pub(super) fn create_tile(&mut self, cx: &mut Context<Self>) -> &mut ChatTile {
         let key = format!("t{}", self.next_tile_key);
         self.next_tile_key += 1;
-        let harness = self.settings.default_harness_kind();
-        let model = self.seed_model_for(harness);
+        let harness = self.settings.default_harness_id();
+        let model = self.seed_model_for(harness.clone());
         // a variant only makes sense next to a model; the model's own list
         // decides the rest when the tile is built
         let variant = model.as_ref().and_then(|_| self.seed_variant());
         let mut tile = ChatTile::new(key.clone(), model, self.seed_agent(), variant);
-        tile.harness = harness;
+        tile.harness = harness.clone();
         tile.apply_variant_list(
             &self.variants_by_model,
             self.settings.default_variant_highest,
@@ -23,11 +23,11 @@ impl Store {
         tile.rev = Some(cx.new(|_| ()));
         // switching a draft to dsh warms the shared server so the picker can
         // list its catalog by the time it opens
-        if harness == HarnessKind::Dsh {
-            self.ensure_dsh(cx);
+        if crate::harness::shared_server(&harness) {
+            self.ensure_shared_server(cx);
         }
-        if harness == HarnessKind::OpenCodeV2 {
-            self.ensure_v2(cx);
+        if crate::harness::attached(&harness) {
+            self.ensure_attached(&harness, cx);
         }
         self.open_tiles.push(tile);
         // the composer's worktree toggle is offered only where it can work
@@ -39,12 +39,12 @@ impl Store {
     /// default, but only when the chosen harness lists it. The UI remembers
     /// one last-used key across both backends, and an opencode key means
     /// nothing to dsh.
-    fn seed_model_for(&self, harness: HarnessKind) -> Option<String> {
+    fn seed_model_for(&self, harness: HarnessId) -> Option<String> {
         seed_model_for_harness(
             self.ui.model.as_deref(),
             self.settings.default_model.as_deref(),
             &self.model_infos,
-            harness,
+            &harness,
         )
     }
 
@@ -54,8 +54,8 @@ impl Store {
     /// the old harness.
     pub fn retarget_untouched_drafts(
         &mut self,
-        from: HarnessKind,
-        to: HarnessKind,
+        from: HarnessId,
+        to: HarnessId,
         cx: &mut Context<Self>,
     ) {
         if from == to {
@@ -66,17 +66,17 @@ impl Store {
             if tile.background || !tile.is_untouched() || tile.harness != from {
                 continue;
             }
-            tile.harness = to;
+            tile.harness = to.clone();
             tile.selected_model = None;
             tile.selected_variant = None;
             changed = true;
         }
         if changed {
-            if to == HarnessKind::Dsh {
-                self.ensure_dsh(cx);
+            if crate::harness::shared_server(&to) {
+                self.ensure_shared_server(cx);
             }
-            if to == HarnessKind::OpenCodeV2 {
-                self.ensure_v2(cx);
+            if crate::harness::attached(&to) {
+                self.ensure_attached(&to, cx);
             }
             self.repaint(cx);
         }
@@ -115,20 +115,15 @@ impl Store {
 
     /// Switches a draft's harness. Only drafts: a chat with a session is
     /// bound to the server it was created on.
-    pub fn set_tile_harness(
-        &mut self,
-        tile_key: &str,
-        harness: HarnessKind,
-        cx: &mut Context<Self>,
-    ) {
-        if !self.harness_enabled(harness) {
+    pub fn set_tile_harness(&mut self, tile_key: &str, harness: HarnessId, cx: &mut Context<Self>) {
+        if !self.harness_enabled(&harness) {
             return;
         }
         if let Some(tile) = self.tile_by_key_mut(tile_key)
             && tile.session_id.is_none()
             && tile.harness != harness
         {
-            tile.harness = harness;
+            tile.harness = harness.clone();
             // the two catalogs name different models (dsh's deepseek-flash is
             // not opencode's deepseek-v4.1-flash) — a draft must not carry a
             // model the new harness never listed; back to server default
@@ -137,11 +132,11 @@ impl Store {
         }
         // switching a draft to dsh warms the shared server so the model
         // picker can list its catalog by the time the pill opens
-        if harness == HarnessKind::Dsh {
-            self.ensure_dsh(cx);
+        if crate::harness::shared_server(&harness) {
+            self.ensure_shared_server(cx);
         }
-        if harness == HarnessKind::OpenCodeV2 {
-            self.ensure_v2(cx);
+        if crate::harness::attached(&harness) {
+            self.ensure_attached(&harness, cx);
         }
         let _ = cx;
     }
@@ -281,8 +276,8 @@ impl Store {
         if text.is_empty() && attachment_count == 0 {
             return;
         }
-        if let Some(harness) = self.tile_by_key(tile_key).map(|tile| tile.harness)
-            && !self.harness_enabled(harness)
+        if let Some(harness) = self.tile_by_key(tile_key).map(|tile| tile.harness.clone())
+            && !self.harness_enabled(&harness)
         {
             self.tile_note(
                 tile_key,
@@ -298,9 +293,9 @@ impl Store {
         }
         if self
             .tile_by_key(tile_key)
-            .is_some_and(|tile| tile.harness == HarnessKind::OpenCodeV2)
+            .is_some_and(|tile| crate::harness::attached(&tile.harness))
         {
-            self.send_v2_from_tile(tile_key, cx);
+            self.send_attached_from_tile(tile_key, cx);
             return;
         }
         if let Some(key) = self.tile_net_key_or(tile_key) {
@@ -319,7 +314,8 @@ impl Store {
             return;
         };
         let existing_session = tile.session_id.clone();
-        let is_dsh_draft = existing_session.is_none() && tile.harness == HarnessKind::Dsh;
+        let is_shared_draft =
+            existing_session.is_none() && crate::harness::shared_server(&tile.harness);
         // an untouched opencode draft has nothing to summarize; do not create
         // a session just to tell the user that. A custom server `compact`
         // keeps the normal create-then-/command path.
@@ -328,7 +324,7 @@ impl Store {
             .iter()
             .any(|command| command.name == "compact" && command.source != "local");
         if existing_session.is_none()
-            && tile.harness == HarnessKind::OpenCode
+            && crate::harness::workspace_scoped(&tile.harness)
             && !server_compact
             && text
                 .strip_prefix('/')
@@ -378,13 +374,14 @@ impl Store {
                 self.repaint(cx);
                 return;
             }
-        } else if is_dsh_draft {
-            // a dsh draft needs the shared dsh server, not the workspace's
-            if !self.runtimes.contains_key(DSH_SERVER_KEY) {
+        } else if is_shared_draft {
+            // a shared-server draft needs that server, not the workspace's
+            let shared = self.shared_key();
+            if !self.runtimes.contains_key(&shared) {
                 let folder = draft_ws.clone().unwrap_or_default();
                 let attachments =
                     std::mem::take(&mut self.tile_by_key_mut(tile_key).unwrap().attachments);
-                self.pending_dsh_drafts.push((
+                self.pending_shared_drafts.push((
                     tile_key.to_string(),
                     text.clone(),
                     attachments,
@@ -396,7 +393,7 @@ impl Store {
                 tile.input.clear();
                 tile.history_index = 0;
                 self.record_prompt(&text);
-                self.ensure_dsh(cx);
+                self.ensure_shared_server(cx);
                 self.repaint(cx);
                 return;
             }
@@ -450,47 +447,48 @@ impl Store {
             let ws_key = draft_ws.expect("the draft's server was checked above");
             let harness = self
                 .tile_by_key(tile_key)
-                .map(|tile| tile.harness)
+                .map(|tile| tile.harness.clone())
                 .unwrap_or_default();
             self.pending_sends
                 .push((tile_key.to_string(), text, attachments));
-            match harness {
-                HarnessKind::Dsh => {
-                    self.pending_create_harness
-                        .push_back((ws_key.clone(), HarnessKind::Dsh));
-                    self.net.send(NetCommand::Request {
-                        ws_key: DSH_SERVER_KEY.into(),
-                        request: ApiRequest::CreateDshSession {
-                            folder: ws_key,
-                            title: DRAFT_TITLE.into(),
-                        },
-                    });
-                }
-                HarnessKind::OpenCode => {
-                    self.pending_create_harness
-                        .push_back((ws_key.clone(), HarnessKind::OpenCode));
-                    self.net.send(NetCommand::Request {
-                        ws_key,
-                        request: ApiRequest::CreateSession {
-                            title: DRAFT_TITLE.into(),
-                        },
-                    });
-                }
-                HarnessKind::OpenCodeV2 => {
-                    // the v2 bridge creates its own session when the prompt is
-                    // dispatched; drain the placeholder so nothing parks
-                    self.pending_sends.pop();
-                }
+            if crate::harness::shared_server(&harness) {
+                self.pending_create_harness
+                    .push_back((ws_key.clone(), harness));
+                let shared = self.shared_key();
+                self.net.send(NetCommand::Request {
+                    ws_key: shared,
+                    request: ApiRequest::CreateSessionIn {
+                        folder: ws_key,
+                        title: DRAFT_TITLE.into(),
+                    },
+                });
+            } else if crate::harness::workspace_scoped(&harness) {
+                self.pending_create_harness
+                    .push_back((ws_key.clone(), harness));
+                self.net.send(NetCommand::Request {
+                    ws_key,
+                    request: ApiRequest::CreateSession {
+                        title: DRAFT_TITLE.into(),
+                    },
+                });
+            } else {
+                // the attached adapter creates its own session when the prompt
+                // is dispatched; drain the placeholder so nothing parks
+                self.pending_sends.pop();
             }
             return;
         }
         self.send_core(&session_id.unwrap(), text, attachments, cx);
     }
 
-    /// The v2 send path: the adapter owns the session and its event stream, so
-    /// this only creates the session when needed, appends the optimistic user
-    /// turn and hands the prompt to the adapter.
-    fn send_v2_from_tile(&mut self, tile_key: &str, cx: &mut Context<Self>) {
+    /// The attached-harness send path: the adapter owns the session and its
+    /// event stream, so this only creates the session when needed, appends the
+    /// optimistic user turn and hands the prompt to the adapter.
+    fn send_attached_from_tile(&mut self, tile_key: &str, cx: &mut Context<Self>) {
+        let Some(harness) = self.tile_by_key(tile_key).map(|tile| tile.harness.clone()) else {
+            return;
+        };
+        let label = crate::harness::label(&harness);
         let Some(tile) = self.tile_by_key(tile_key) else {
             return;
         };
@@ -499,15 +497,16 @@ impl Store {
             return;
         }
         let attachments = std::mem::take(&mut self.tile_by_key_mut(tile_key).unwrap().attachments);
-        self.ensure_v2(cx);
-        if self.v2.is_none() {
+        self.ensure_attached(&harness, cx);
+        if !self.attached.contains_key(&harness) {
             let detail = self
-                .v2_status
-                .clone()
+                .attached_status
+                .get(&harness)
+                .cloned()
                 .unwrap_or_else(|| "not attached".into());
             self.tile_note(
                 tile_key,
-                &format!("opencode v2 is unavailable: {detail}"),
+                &format!("{label} is unavailable: {detail}"),
                 true,
                 cx,
             );
@@ -517,7 +516,7 @@ impl Store {
         if !attachments.is_empty() {
             self.tile_note(
                 tile_key,
-                "opencode v2 file attachments are not wired yet; sending the text only.",
+                &format!("{label} file attachments are not wired yet; sending the text only."),
                 false,
                 cx,
             );
@@ -534,7 +533,9 @@ impl Store {
         let session_id = match existing {
             Some(session) => session,
             None => {
-                let adapter = self.v2.as_mut().expect("checked above");
+                let Some(adapter) = self.attached.get_mut(&harness) else {
+                    return;
+                };
                 let created = adapter.create_session(crate::harness::NewSession {
                     title: Some(DRAFT_TITLE.into()),
                     parent: None,
@@ -547,10 +548,10 @@ impl Store {
                 });
                 let Ok(summary) = created else {
                     let detail = created.unwrap_err().to_string();
-                    self.v2_status = Some(detail.clone());
+                    self.set_attached_status(&harness, detail.clone());
                     self.tile_note(
                         tile_key,
-                        &format!("opencode v2 could not create a session: {detail}"),
+                        &format!("{label} could not create a session: {detail}"),
                         true,
                         cx,
                     );
@@ -568,7 +569,7 @@ impl Store {
                     .insert(session.clone(), summary.title.clone());
                 self.ui
                     .harness_by_session
-                    .insert(session.clone(), HarnessKind::OpenCodeV2);
+                    .insert(session.clone(), harness.clone());
                 if let Some(tile) = self.tile_by_key_mut(tile_key) {
                     tile.session_id = Some(session.clone());
                     tile.input.clear();
@@ -589,7 +590,10 @@ impl Store {
             tile.history_index = 0;
         }
         self.record_prompt(&text);
-        let result = self.v2.as_mut().expect("checked above").send_prompt(
+        let Some(adapter) = self.attached.get_mut(&harness) else {
+            return;
+        };
+        let result = adapter.send_prompt(
             &crate::harness::SessionId::new(session_id.clone()),
             crate::harness::Prompt {
                 text,
@@ -605,10 +609,10 @@ impl Store {
             }
             Err(err) => {
                 let detail = err.to_string();
-                self.v2_status = Some(detail.clone());
+                self.set_attached_status(&harness, detail.clone());
                 self.tile_note(
                     tile_key,
-                    &format!("opencode v2 refused the prompt: {detail}"),
+                    &format!("{label} refused the prompt: {detail}"),
                     true,
                     cx,
                 );
@@ -638,22 +642,20 @@ impl Store {
         self.tile_note(&tile_key, &format!("Worktree ready: {branch}"), false, cx);
         let harness = self
             .tile_by_key(&tile_key)
-            .map(|tile| tile.harness)
+            .map(|tile| tile.harness.clone())
             .unwrap_or_default();
-        match harness {
-            // an opencode server belongs to its folder: start the worktree's
+        if crate::harness::workspace_scoped(&harness) {
+            // a workspace server belongs to its folder: start the worktree's
             // and let `ServerStarted` resume the parked send
-            HarnessKind::OpenCode => self.start_workspace(&folder, cx),
-            // the shared dsh server takes the folder per session, so the send
-            // can flow now (or park on the shared server's own start)
-            HarnessKind::Dsh => {
-                self.ensure_dsh(cx);
-                self.send_from_tile(&tile_key, cx);
-            }
-            HarnessKind::OpenCodeV2 => {
-                self.ensure_v2(cx);
-                self.send_from_tile(&tile_key, cx);
-            }
+            self.start_workspace(&folder, cx);
+        } else if crate::harness::shared_server(&harness) {
+            // the shared server takes the folder per session, so the send can
+            // flow now (or park on the shared server's own start)
+            self.ensure_shared_server(cx);
+            self.send_from_tile(&tile_key, cx);
+        } else {
+            self.ensure_attached(&harness, cx);
+            self.send_from_tile(&tile_key, cx);
         }
         self.save_state();
         self.repaint(cx);
@@ -804,7 +806,8 @@ impl Store {
                     .iter()
                     .any(|command| command.name == "compact" && command.source != "local")
             });
-        if harness == HarnessKind::OpenCode && slash_name == "compact" && !server_compact {
+        if crate::harness::workspace_scoped(&harness) && slash_name == "compact" && !server_compact
+        {
             self.compact_opencode_session(session_id, slash_args, cx);
             return;
         }
@@ -822,8 +825,9 @@ impl Store {
                         .any(|c| c.name == *name && c.source == "command")
                 })
         });
-        if harness == HarnessKind::Dsh && (is_listed_command || slash_name == "compact") {
-            self.execute_dsh_command(session_id, text, cx);
+        if crate::harness::shared_server(&harness) && (is_listed_command || slash_name == "compact")
+        {
+            self.execute_harness_command(session_id, text, cx);
             return;
         }
         // a leading `/name args` matching a server command/skill goes to the
@@ -1251,15 +1255,17 @@ impl Store {
             .unwrap_or_default();
         let harness = self.session_harness(&session_id);
         self.pending_create_harness
-            .push_back((folder.clone(), harness));
-        let request = match harness {
-            HarnessKind::Dsh => ApiRequest::CreateDshForkSession {
+            .push_back((folder.clone(), harness.clone()));
+        let request = if crate::harness::shared_server(&harness) {
+            ApiRequest::CreateForkSessionIn {
                 folder,
                 title,
                 context,
-            },
-            HarnessKind::OpenCode => ApiRequest::CreateForkSession { title, context },
-            HarnessKind::OpenCodeV2 => return,
+            }
+        } else if crate::harness::workspace_scoped(&harness) {
+            ApiRequest::CreateForkSession { title, context }
+        } else {
+            return;
         };
         self.net.send(NetCommand::Request { ws_key, request });
         let _ = cx;
@@ -1296,13 +1302,13 @@ fn seed_model_for_harness(
     last_used: Option<&str>,
     default: Option<&str>,
     infos: &[crate::oc::ModelInfo],
-    harness: HarnessKind,
+    harness: &HarnessId,
 ) -> Option<String> {
     let fits = |key: &str| {
         infos.is_empty()
             || infos
                 .iter()
-                .any(|model| model.harness == harness && model.key == key)
+                .any(|model| &model.harness == harness && model.key == key)
     };
     last_used
         .filter(|model| fits(model))
@@ -1313,10 +1319,10 @@ fn seed_model_for_harness(
 #[cfg(test)]
 mod seed_tests {
     use super::seed_model_for_harness;
+    use crate::harness::HarnessId;
     use crate::oc::ModelInfo;
-    use crate::settings::HarnessKind;
 
-    fn info(key: &str, harness: HarnessKind) -> ModelInfo {
+    fn info(key: &str, harness: HarnessId) -> ModelInfo {
         ModelInfo {
             key: key.into(),
             harness,
@@ -1328,8 +1334,8 @@ mod seed_tests {
     #[test]
     fn the_last_used_model_only_wins_when_the_new_harness_lists_it() {
         let infos = [
-            info("opencode/a", HarnessKind::OpenCode),
-            info("deepseek/b", HarnessKind::Dsh),
+            info("opencode/a", HarnessId::from("opencode")),
+            info("deepseek/b", HarnessId::from("dsh")),
         ];
 
         // same harness: the last-used key stays
@@ -1338,7 +1344,7 @@ mod seed_tests {
                 Some("opencode/a"),
                 Some("opencode/c"),
                 &infos,
-                HarnessKind::OpenCode
+                &HarnessId::from("opencode")
             )
             .as_deref(),
             Some("opencode/a")
@@ -1349,19 +1355,20 @@ mod seed_tests {
                 Some("opencode/a"),
                 Some("deepseek/b"),
                 &infos,
-                HarnessKind::Dsh
+                &HarnessId::from("dsh")
             )
             .as_deref(),
             Some("deepseek/b")
         );
         // neither candidate is a dsh model: the server default is safer
         assert_eq!(
-            seed_model_for_harness(Some("opencode/a"), None, &infos, HarnessKind::Dsh),
+            seed_model_for_harness(Some("opencode/a"), None, &infos, &HarnessId::from("dsh")),
             None
         );
         // an empty catalog cannot validate; keep the candidate
         assert_eq!(
-            seed_model_for_harness(Some("opencode/a"), None, &[], HarnessKind::Dsh).as_deref(),
+            seed_model_for_harness(Some("opencode/a"), None, &[], &HarnessId::from("dsh"))
+                .as_deref(),
             Some("opencode/a")
         );
     }

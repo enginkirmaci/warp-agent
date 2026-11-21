@@ -1650,6 +1650,12 @@ pub enum UiEvent {
         call_id: u64,
         result: Result<Value, String>,
     },
+    /// One event from warp-flow's door client (`crate::flow`): the board, a
+    /// pushed host run, the door's standing, or the answer to this person's
+    /// answer / run action.
+    Flow {
+        event: crate::flow::FlowEvent,
+    },
 }
 
 // ---- the net thread -------------------------------------------------------
@@ -1684,6 +1690,7 @@ pub fn spawn_net_thread() -> (
     std::thread::JoinHandle<()>,
     NetSender,
     async_channel::Receiver<UiEvent>,
+    crate::flow::FlowSender,
 ) {
     spawn_net_thread_with(crate::harness::HarnessRegistry::builtin())
 }
@@ -1697,9 +1704,14 @@ pub fn spawn_net_thread_with(
     std::thread::JoinHandle<()>,
     NetSender,
     async_channel::Receiver<UiEvent>,
+    crate::flow::FlowSender,
 ) {
     let (command_tx, command_rx) = async_channel::unbounded::<NetCommand>();
     let (event_tx, event_rx) = async_channel::unbounded::<UiEvent>();
+    // The Flow client's command lane. The driver itself is spawned inside the
+    // runtime below, so warp-flow's door rides the net thread's one runtime and
+    // reports through the one event pump; the UI gets the sending end here.
+    let (flow_tx, flow_rx) = async_channel::unbounded::<crate::flow::FlowCommand>();
     let handle = std::thread::Builder::new()
         .name("net".into())
         .spawn(move || {
@@ -1707,17 +1719,42 @@ pub fn spawn_net_thread_with(
                 .enable_all()
                 .build()
                 .expect("tokio runtime");
-            rt.block_on(net_main(registry, command_rx, event_tx));
+            rt.block_on(net_main(registry, command_rx, event_tx, flow_rx));
         })
         .expect("net thread");
-    (handle, NetSender(command_tx), event_rx)
+    (
+        handle,
+        NetSender(command_tx),
+        event_rx,
+        crate::flow::FlowSender(flow_tx),
+    )
 }
 
 async fn net_main(
     registry: crate::harness::HarnessRegistry,
     command_rx: async_channel::Receiver<NetCommand>,
     event_tx: async_channel::Sender<UiEvent>,
+    flow_rx: async_channel::Receiver<crate::flow::FlowCommand>,
 ) {
+    // warp-flow's door client: one task on this runtime, one ask every few
+    // seconds, its events forwarded into the app's existing pump as UiEvents.
+    let (flow_events_tx, flow_events_rx) = async_channel::unbounded::<crate::flow::FlowEvent>();
+    {
+        let event_tx = event_tx.clone();
+        tokio::spawn(async move {
+            while let Ok(event) = flow_events_rx.recv().await {
+                if event_tx.send(UiEvent::Flow { event }).await.is_err() {
+                    break;
+                }
+            }
+        });
+    }
+    tokio::spawn(crate::flow::drive(
+        crate::flow::endpoint_dir(),
+        flow_events_tx,
+        flow_rx,
+    ));
+
     // the DevTools door rides this runtime; a bind failure logs and the app
     // keeps working — the door is an integration, not a dependency
     let (door_tx, _) = tokio::sync::broadcast::channel::<String>(64);

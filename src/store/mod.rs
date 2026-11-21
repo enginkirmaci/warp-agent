@@ -7,6 +7,7 @@ use crate::oc::{self, ApiRequest, CommandInfo, ModelInfo, NetCommand, SessionInf
 // the store's event intake is public, so its event type is reachable from here
 pub use crate::oc::UiEvent;
 use crate::settings::{AppSettings, UiState, WorkspaceState};
+mod flow;
 pub mod ipc;
 // the impl Store continuation modules, one per section
 mod chat_flow;
@@ -23,6 +24,7 @@ mod streaming;
 mod tile;
 use crate::theme::{self, AccentColors, FontTokens};
 use chrono::{Local, TimeZone, Timelike};
+pub use flow::*;
 use gpui::prelude::*;
 use gpui::{App, Context, Entity};
 pub use items::*;
@@ -309,6 +311,10 @@ pub struct Store {
     pub accent: AccentColors,
     pub fonts: FontTokens,
     pub tool_tips_visible: bool,
+    /// warp-flow's door as the Flow sheet sees it: the board, the moving runs
+    /// and this person's answers and run actions. Fed by the net thread's
+    /// `UiEvent` pump; the sheet only reads it.
+    pub flow: FlowData,
 
     pub workspaces: Vec<WorkspaceItem>,
     pub selected_workspace: Option<String>, // folder path
@@ -347,6 +353,9 @@ pub struct Store {
 
     // event handling maps (MainViewModel fields)
     net: crate::oc::NetSender,
+    /// The UI's end of the Flow client on the net thread. Commands are
+    /// non-blocking sends; every answer comes back through `UiEvent::Flow`.
+    flow_tx: crate::flow::FlowSender,
     runtimes: HashMap<String, WorkspaceRuntime>,
     workspace_by_session: HashMap<String, String>,
     title_by_session: HashMap<String, String>,
@@ -494,7 +503,11 @@ pub struct FileSuggest {
 }
 
 impl Store {
-    pub fn new(cx: &mut App, net: crate::oc::NetSender) -> Entity<Self> {
+    pub fn new(
+        cx: &mut App,
+        net: crate::oc::NetSender,
+        flow_tx: crate::flow::FlowSender,
+    ) -> Entity<Self> {
         let mut settings = AppSettings::load();
         let mut ui = UiState::load();
         // one-time migration: the pre-settings auto-allow choice moves into
@@ -556,6 +569,7 @@ impl Store {
             accent: theme::accent_colors(),
             fonts,
             tool_tips_visible: settings.show_tooltips,
+            flow: FlowData::default(),
             workspaces: Vec::new(),
             selected_workspace: None,
             sessions: Vec::new(),
@@ -585,6 +599,7 @@ impl Store {
             next_key: 1,
             next_tile_key: 1,
             net,
+            flow_tx,
             runtimes: HashMap::new(),
             workspace_by_session: HashMap::new(),
             title_by_session: HashMap::new(),
@@ -762,7 +777,12 @@ impl Store {
     #[doc(hidden)]
     pub fn for_probe(cx: &mut App) -> Entity<Self> {
         let (tx, _rx) = async_channel::unbounded();
-        Self::new(cx, crate::oc::NetSender(tx))
+        let (flow_tx, _flow_rx) = async_channel::unbounded();
+        Self::new(
+            cx,
+            crate::oc::NetSender(tx),
+            crate::flow::FlowSender(flow_tx),
+        )
     }
 
     /// The same dead store, with its net channel handed to the test: a probe
@@ -772,7 +792,36 @@ impl Store {
         cx: &mut App,
     ) -> (Entity<Self>, async_channel::Receiver<crate::oc::NetCommand>) {
         let (tx, rx) = async_channel::unbounded();
-        (Self::new(cx, crate::oc::NetSender(tx)), rx)
+        let (flow_tx, _flow_rx) = async_channel::unbounded();
+        (
+            Self::new(
+                cx,
+                crate::oc::NetSender(tx),
+                crate::flow::FlowSender(flow_tx),
+            ),
+            rx,
+        )
+    }
+
+    /// A store whose Flow commands ride a channel the probe owns, so a real
+    /// view's click can be driven through the real client against a fake door.
+    #[doc(hidden)]
+    pub fn for_probe_with_flow(
+        cx: &mut App,
+    ) -> (
+        Entity<Self>,
+        async_channel::Receiver<crate::flow::FlowCommand>,
+    ) {
+        let (tx, _rx) = async_channel::unbounded();
+        let (flow_tx, flow_rx) = async_channel::unbounded();
+        (
+            Self::new(
+                cx,
+                crate::oc::NetSender(tx),
+                crate::flow::FlowSender(flow_tx),
+            ),
+            flow_rx,
+        )
     }
 
     // ---- seeds / persistence ----
@@ -3404,7 +3453,14 @@ mod command_flow_tests {
         let _lock = super::test_support::lock_home();
         let home = HomeGuard::new();
         let (tx, rx) = async_channel::unbounded();
-        let store = cx.update(|cx| Store::new(cx, crate::oc::NetSender(tx)));
+        let (flow_tx, _flow_rx) = async_channel::unbounded();
+        let store = cx.update(|cx| {
+            Store::new(
+                cx,
+                crate::oc::NetSender(tx),
+                crate::flow::FlowSender(flow_tx),
+            )
+        });
         let folder = home.home.join("workspace");
         std::fs::create_dir_all(&folder).expect("workspace");
         let folder = folder.to_string_lossy().to_string();
@@ -3551,7 +3607,14 @@ mod command_flow_tests {
         let _lock = super::test_support::lock_home();
         let home = HomeGuard::new();
         let (tx, rx) = async_channel::unbounded();
-        let store = cx.update(|cx| Store::new(cx, crate::oc::NetSender(tx)));
+        let (flow_tx, _flow_rx) = async_channel::unbounded();
+        let store = cx.update(|cx| {
+            Store::new(
+                cx,
+                crate::oc::NetSender(tx),
+                crate::flow::FlowSender(flow_tx),
+            )
+        });
         let folder = home.home.join("workspace");
         std::fs::create_dir_all(&folder).expect("workspace");
         let folder = folder.to_string_lossy().to_string();

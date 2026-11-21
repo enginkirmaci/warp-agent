@@ -21,6 +21,7 @@ pub fn groups() -> Vec<Group> {
         "Window",
         vec![
             row("? / Ctrl /", "Show or hide this shortcut sheet"),
+            row("Ctrl Shift F", "Show or hide the Flow sheet"),
             row("Ctrl \\", "Show or hide the sidebar"),
             row("Ctrl C", "Copy the selected read-only text"),
             row("Esc", "Close this shortcut sheet"),
@@ -66,7 +67,20 @@ pub fn groups() -> Vec<Group> {
             row("Esc", "Close the menu"),
         ],
     );
-    vec![window, sidebar, transcript, composer, command_menu]
+    // The Flow sheet is the one other surface with its own keys: it owns the
+    // arrows while it is up and answers Enter, `r` and Escape.
+    let flow = Group::new(
+        "Flow sheet",
+        vec![
+            row("↑ / ↓", "Move the row cursor"),
+            row("Home / End", "First or last row"),
+            row("PageUp / PageDown", "Move a page"),
+            row("Enter", "Run the selected row"),
+            row("R", "Retry an absent warp-flow"),
+            row("Esc", "Close the Flow sheet"),
+        ],
+    );
+    vec![window, sidebar, transcript, composer, command_menu, flow]
 }
 
 #[cfg(test)]
@@ -124,8 +138,23 @@ mod tests {
     #[test]
     fn the_window_chords_are_listed() {
         let window = keys(&groups(), "Window");
-        for key in ["? / Ctrl /", "Ctrl \\", "Ctrl C", "Esc"] {
+        for key in ["? / Ctrl /", "Ctrl Shift F", "Ctrl \\", "Ctrl C", "Esc"] {
             assert!(window.iter().any(|row| row == key), "{key} is missing");
+        }
+    }
+
+    #[test]
+    fn the_flow_sheets_keys_are_listed() {
+        let flow = keys(&groups(), "Flow sheet");
+        for key in [
+            "↑ / ↓",
+            "Home / End",
+            "PageUp / PageDown",
+            "Enter",
+            "R",
+            "Esc",
+        ] {
+            assert!(flow.iter().any(|row| row == key), "{key} is missing");
         }
     }
 

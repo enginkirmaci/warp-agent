@@ -295,6 +295,7 @@ impl Store {
                 event,
             } => self.on_harness_event(&harness, directory.as_deref(), event, cx),
             UiEvent::Ipc { command } => self.handle_ipc(command, cx),
+            UiEvent::Flow { event } => self.on_flow_event(event, cx),
             UiEvent::HarnessCallResult { call_id, result } => {
                 self.ipc_harness_result(call_id, result);
             }

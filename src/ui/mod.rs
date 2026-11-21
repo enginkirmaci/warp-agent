@@ -1,6 +1,7 @@
 //! ui module: shared helpers + the main window.
 
 pub mod about;
+pub mod flow;
 pub mod markdown;
 pub mod settings;
 pub mod tile;

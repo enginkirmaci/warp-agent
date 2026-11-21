@@ -492,6 +492,13 @@ pub struct WarpWindow {
     /// then each mounted tile's transcript. Cleared at the top of the frame
     /// and shared with the views that draw them.
     pane_nav: Rc<PaneNav>,
+    /// warp-flow's Flow sheet: the runs that wait on a person and the ones
+    /// that move. The sheet owns its focus and cursor; the window owns whether
+    /// it is up, so a close can hand the keyboard back to the root.
+    flow: Entity<crate::ui::flow::FlowSheet>,
+    /// E2E hook: WARP_AGENT_FLOW=1 raises the Flow sheet on launch (a hidden
+    /// window takes no pointer, so a capture needs the card to open itself).
+    open_flow_on_first_render: bool,
 }
 
 impl WarpWindow {
@@ -507,6 +514,14 @@ impl WarpWindow {
         // E2E hook: WARP_AGENT_SHORTCUTS=1 opens the sheet on launch (a hidden
         // window takes no pointer, so a capture needs the card to open itself).
         let open_shortcuts = matches!(std::env::var("WARP_AGENT_SHORTCUTS").as_deref(), Ok("1"));
+        // E2E hook: WARP_AGENT_FLOW=1 raises the Flow sheet on launch, for the
+        // same reason.
+        let open_flow = matches!(std::env::var("WARP_AGENT_FLOW").as_deref(), Ok("1"));
+        // the root's handle and the sheet's return target are one handle: the
+        // sheet hands the keys back here when it closes
+        let root_focus = cx.focus_handle();
+        let flow =
+            cx.new(|cx| crate::ui::flow::FlowSheet::new(store.clone(), root_focus.clone(), cx));
         Self {
             store,
             tile_views: HashMap::new(),
@@ -561,12 +576,14 @@ impl WarpWindow {
             sidebar_scroll: UniformListScrollHandle::default(),
             window_title: String::new(),
             running_open: false,
-            root_focus: cx.focus_handle(),
+            root_focus,
             shortcuts_open: false,
             shortcuts_focus: cx.focus_handle(),
             open_shortcuts_on_first_render: open_shortcuts,
             root_focus_pending: true,
             pane_nav: Rc::new(PaneNav::new()),
+            flow,
+            open_flow_on_first_render: open_flow,
         }
     }
 }
@@ -631,6 +648,10 @@ impl Render for WarpWindow {
         // back to the lists behind it.
         if self.shortcuts_open && !self.shortcuts_focus.is_focused(window) {
             window.focus(&self.shortcuts_focus, cx);
+        }
+        if self.open_flow_on_first_render {
+            self.open_flow_on_first_render = false;
+            self.open_flow(window, cx);
         }
         if let Some(section) = self.open_settings_on_first_render.take() {
             self.open_settings(window, cx);
@@ -724,6 +745,23 @@ impl Render for WarpWindow {
                     if key == "escape" || help_key {
                         this.close_shortcuts(window, cx);
                     }
+                    cx.stop_propagation();
+                    return;
+                }
+                // The Flow sheet is modal too: Ctrl+Shift+F toggles it, and
+                // while it is up only read-only Copy belongs to the window —
+                // every other chord must not reach the lists behind the card.
+                let flow_open = this.flow.read(cx).is_open();
+                if modifiers.control && modifiers.shift && key == "f" {
+                    if flow_open {
+                        this.close_flow(window, cx);
+                    } else {
+                        this.open_flow(window, cx);
+                    }
+                    cx.stop_propagation();
+                    return;
+                }
+                if flow_open && !(modifiers.control && !modifiers.shift && key == "c") {
                     cx.stop_propagation();
                     return;
                 }
@@ -901,6 +939,9 @@ impl Render for WarpWindow {
             ));
         }
 
+        // the Flow sheet hangs over the panes, under the tooltips
+        root = root.child(self.flow.clone());
+
         // tooltips paint above everything, menus included
         root.child(self.tooltip_overlay.clone())
     }
@@ -1023,6 +1064,37 @@ impl WarpWindow {
         cx.notify();
     }
 
+    /// Raises the Flow sheet over the grid, the way the keyboard card rises:
+    /// the card takes the keyboard, and opening it is also the retry — the
+    /// store asks the door for a fresh board on the same click.
+    pub(crate) fn open_flow(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.flow.read(cx).is_open() {
+            return;
+        }
+        // the pages replace the grid; the sheet hangs over whatever is there
+        self.close_settings(cx);
+        self.close_about(cx);
+        self.flow.update(cx, |sheet, cx| sheet.open(window, cx));
+        self.store.update(cx, |store, cx| store.flow_refresh(cx));
+        cx.notify();
+    }
+
+    /// Dismisses the Flow sheet; the sheet hands the keys back to the root.
+    pub(crate) fn close_flow(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.flow.read(cx).is_open() {
+            return;
+        }
+        self.flow.update(cx, |sheet, cx| sheet.close(window, cx));
+        cx.notify();
+    }
+
+    /// The Flow sheet entity, for the real-view probe: its cursor, its focus
+    /// and its open state are the sheet's, never a second copy in the window.
+    #[doc(hidden)]
+    pub fn flow_sheet_for_probe(&self) -> Entity<crate::ui::flow::FlowSheet> {
+        self.flow.clone()
+    }
+
     /// Leaving the page flushes a pending field commit — the page has no
     /// Save, so the debounced write must not be lost to the section switch.
     pub(crate) fn close_settings(&mut self, cx: &mut Context<Self>) {
@@ -1038,11 +1110,12 @@ impl WarpWindow {
     }
 
     fn render_rail(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
-        let (in_settings, in_about, ink, attention) = {
+        let (in_settings, in_about, in_flow, ink, attention) = {
             let store = self.store.read(cx);
             (
                 store.is_settings_open,
                 store.is_about_open,
+                self.flow.read(cx).is_open(),
                 store.accent.text,
                 store.has_attention_needed(),
             )
@@ -1076,6 +1149,11 @@ impl WarpWindow {
                 }),
             )
             .child(div().flex_1())
+            .child(
+                shell::rail_item_inked("open-flow", "icons/flow.svg", "Flow", in_flow, ink)
+                    .debug_selector(|| "rail-flow".into())
+                    .on_click(cx.listener(|this, _, window, cx| this.open_flow(window, cx))),
+            )
             .child(
                 shell::rail_item_inked("open-about", "icons/about.svg", "About", in_about, ink)
                     .debug_selector(|| "rail-about".into())

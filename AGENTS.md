@@ -34,7 +34,11 @@ through a bold run.
   into the typed `HarnessEvent` vocabulary.
 - `src/ipc.rs` — the warp-agent door: token-authenticated NDJSON on the net
   thread's runtime.
-- `src/ui/` — the window, sidebar, tile grid, settings and markdown view.
+- `src/flow.rs` — warp-flow's door client: two NDJSON connections (verbs,
+  subscribe) on the net thread's runtime, typed payloads, `absent` as a
+  first-class answer and a slow reconnect. No UI.
+- `src/ui/` — the window, sidebar, tile grid, settings, the Flow sheet and
+  markdown view.
 - `src/settings.rs`, `paths.rs`, `logging.rs`, `services.rs`, `theme.rs`.
 
 Settings and UI state are versioned snake_case documents; the contract is
@@ -133,6 +137,29 @@ server and Warp Station is the client. Endpoint files are
 - The app works fully standalone. A missing client changes nothing.
 - Changing a command, a field, the endpoint file names or their location is a
   cross-app contract change: update Warp Station in the same commit.
+
+## The Flow surface (warp-flow's door, as its client)
+
+`src/flow.rs` is the app's client of warp-flow's own loopback door
+(`~/.warp/flow/ipc.port` + `ipc.token`, protocol 1); the contract is
+[`../../README.md#cross-app-contracts`](../../README.md#cross-app-contracts)
+and [ADR-0012](../../docs/adr/0012-warp-flow-publishes-a-door-of-its-own.md),
+and warp-flow owns it. Two connections: one for `runs`, `run`, `answer`,
+`pause`, `resume`, `abandon`; one subscribed connection for `subscribe`'s
+pushes. `runs` is pull-only, so it is polled every 3 s; a `{"push": "board"}`
+is a re-ask, and a `{"push": "run"}` carries the host run whole. The token is
+regenerated every launch, so the endpoint files are re-read on every attempt
+and an absent door (no files, refused connection, auth refusal) is a normal,
+named state — never a panic, never a blocked UI.
+
+`src/store/flow.rs` holds what the net thread delivered (`Store::flow`), and
+`src/ui/flow.rs` draws it as a sheet raised from the rail, `Ctrl+Shift+F`,
+`WARP_AGENT_FLOW=1` (the capture hook) or the store's `Refresh`: what waits on
+a person, and what moves. Answers and run actions are the only writes, both
+through the store's command channel; **starting a run has no verb on purpose**
+— it stays warp-flow's own action. Do not add a start verb, do not add a tile
+kind, and do not build a second board here: ADR-0012's reason for the door is
+that both UIs answer one writer.
 
 ## Harnesses
 
@@ -234,9 +261,21 @@ cargo build -p warp-agent
   through `warpui_kit_core::pane_nav` and proves the grid order, the row ends
   (no wrapping), a hidden sidebar not being a stop, transcript scrolling
   surviving the shared keys, and the focused composer keeping its own keys.
+- `tests/flow_client_probe.rs` drives the real Flow client against the fake
+  warp-flow door in `tests/flow_support/` (std threads speaking the published
+  contract): absent endpoint, auth refusal, `runs`/`run`, `answer` outcomes,
+  action refusals, a `run` push, a `board` notification's re-ask, and a
+  reconnect after the door closes and a new launch publishes new files.
+- `tests/flow_sheet_probe.rs` opens the real window with the Flow sheet up
+  (`WARP_AGENT_FLOW=1`) over that fake door: the waiting card renders the
+  question and its options, the list's cursor walks the rows, a click sends
+  `answer` and the door's outcome shows, the run leaves the band when the next
+  poll says it no longer waits, the moving card offers only the verb its phase
+  allows, Escape closes the card, and an absent door is one line whose Retry
+  reconnects without a restart.
 - The capture hooks are `WARP_AGENT_PAGE`: `settings`, `settings-chat`,
-  `settings-permissions`, `settings-server`; and `WARP_AGENT_SHORTCUTS=1`
-  opens the keyboard sheet on launch.
+  `settings-permissions`, `settings-server`; `WARP_AGENT_SHORTCUTS=1` opens the
+  keyboard sheet on launch; and `WARP_AGENT_FLOW=1` raises the Flow sheet.
 
 ## Platform notes
 

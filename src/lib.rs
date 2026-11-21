@@ -5,6 +5,7 @@
 
 mod assets;
 mod dsh;
+pub mod flow;
 pub mod harness;
 mod ipc;
 mod logging;
@@ -56,8 +57,8 @@ pub fn run() {
     application()
         .with_assets(assets::EmbedAssets::new())
         .run(|cx: &mut App| {
-            let (_net_handle, net_sender, event_rx) = oc::spawn_net_thread();
-            let store = Store::new(cx, net_sender);
+            let (_net_handle, net_sender, event_rx, flow_sender) = oc::spawn_net_thread();
+            let store = Store::new(cx, net_sender, flow_sender);
 
             // the shared startup: kit init, the shared text size (seeded from
             // this app's old setting) and palette, follow hooks, the first
@@ -111,6 +112,11 @@ pub fn run() {
                     ui::tile::ComposerSlashEscape,
                     Some("Composer > Input"),
                 ),
+                // the Flow sheet's Escape: bound over the card's own context so
+                // it wins the "Input" tie a focused answer field would
+                // otherwise take, and closes the sheet from anywhere inside it
+                gpui::KeyBinding::new("escape", ui::flow::FlowClose, Some("Flow")),
+                gpui::KeyBinding::new("escape", ui::flow::FlowClose, Some("Flow > Input")),
             ]);
 
             // workspaces named on the launch command open right away

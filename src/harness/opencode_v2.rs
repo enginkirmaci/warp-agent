@@ -1368,6 +1368,18 @@ fn translate_v2_event(value: &Value, state: &mut V2StreamState) -> Option<Harnes
             };
             Some(HarnessEvent::CommandOutput { session, result })
         }
+        "session.skill.activated" => {
+            let session = event_session(data)?;
+            let name = data
+                .get("name")
+                .and_then(Value::as_str)
+                .or_else(|| data.get("id").and_then(Value::as_str))
+                .unwrap_or("skill");
+            Some(HarnessEvent::CommandOutput {
+                session,
+                result: Ok(format!("Skill activated: {name}")),
+            })
+        }
         _ => None,
     }
 }
@@ -2328,6 +2340,23 @@ mod tests {
                 title: Some("Child".into()),
                 parent: Some(SessionId::new("s1")),
                 agent: Some("build".into()),
+            })
+        );
+
+        let skill = json!({
+            "type": "session.skill.activated",
+            "data": {
+                "sessionID": "s1",
+                "id": "sk1",
+                "name": "deploy",
+                "text": "activated"
+            }
+        });
+        assert_eq!(
+            translate_v2_event(&skill, &mut state),
+            Some(HarnessEvent::CommandOutput {
+                session: SessionId::new("s1"),
+                result: Ok("Skill activated: deploy".into()),
             })
         );
     }

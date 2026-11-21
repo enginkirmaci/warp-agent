@@ -412,7 +412,7 @@ impl Store {
             for item in &mut tile.items {
                 if let ChatItem::Question(q) = Arc::make_mut(item)
                     && q.id == request_id
-                    && q.is_pending()
+                    && question_awaits_resolution(q)
                 {
                     q.resolution = Some(summary.to_string());
                     for question in &mut q.questions {
@@ -423,7 +423,7 @@ impl Store {
         }
         for pending in self.pending_questions_by_session.values_mut() {
             for item in pending {
-                if item.id == request_id && item.is_pending() {
+                if item.id == request_id && question_awaits_resolution(item) {
                     item.resolution = Some(summary.to_string());
                     for question in &mut item.questions {
                         question.locked = true;
@@ -435,6 +435,7 @@ impl Store {
 
     pub fn submit_question(&mut self, question_id: &str, cx: &mut Context<Self>) {
         let mut answers: Option<Vec<Vec<String>>> = None;
+        let mut field_ids: Vec<String> = Vec::new();
         let mut session_id = None;
         for tile in &mut self.open_tiles {
             for item in &mut tile.items {
@@ -444,6 +445,7 @@ impl Store {
                     && q.can_submit()
                 {
                     answers = Some(q.questions.iter().map(|e| e.answer()).collect());
+                    field_ids = q.questions.iter().map(|e| e.field_id.clone()).collect();
                     q.resolution = Some(format!(
                         "sending {}…",
                         answers
@@ -477,6 +479,7 @@ impl Store {
             request: ApiRequest::ReplyQuestion {
                 session_id,
                 request_id: question_id.to_string(),
+                field_ids,
                 answers,
             },
         });
@@ -578,5 +581,15 @@ impl Store {
         {
             entry.custom_text = text;
         }
+    }
+}
+
+/// A question still waiting for the harness, including the in-flight
+/// "sending …"/"dismissing …" resolution that submit/dismiss install before
+/// the reply returns. A settled question keeps its final summary.
+fn question_awaits_resolution(question: &QuestionItem) -> bool {
+    match question.resolution.as_deref() {
+        None => true,
+        Some(text) => text.starts_with("sending ") || text.starts_with("dismissing "),
     }
 }

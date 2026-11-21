@@ -2883,6 +2883,7 @@ fn build_question_item(request: &oc::QuestionRequestInfo, next_key: &mut usize) 
             .clone()
             .into_iter()
             .map(|q| QuestionEntry {
+                field_id: q.id.clone(),
                 question: q.question,
                 header: q.header,
                 multiple: q.multiple,

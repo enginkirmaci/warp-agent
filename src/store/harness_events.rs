@@ -280,6 +280,8 @@ impl Store {
                             .map(|option| json!({ "label": option, "description": "" }))
                             .collect();
                         json!({
+                            "id": field.id,
+                            "fieldID": field.id,
                             "question": field.title,
                             "header": field.title,
                             "multiple": matches!(field.kind, FormFieldKind::Multiselect),

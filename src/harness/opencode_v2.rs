@@ -982,8 +982,11 @@ fn form_from_value(value: &Value) -> Option<FormRequest> {
 }
 
 fn form_field(value: &Value) -> Option<FormField> {
+    // v2's wire field names are `key`/`type`/`options[{value,label}]`; the
+    // older id/kind spellings stay accepted for a pre-v2 service
     let id = value
-        .get("id")
+        .get("key")
+        .or_else(|| value.get("id"))
         .or_else(|| value.get("fieldID"))
         .and_then(Value::as_str)?;
     let raw = value
@@ -1014,8 +1017,29 @@ fn form_field(value: &Value) -> Option<FormField> {
             .get("required")
             .and_then(Value::as_bool)
             .unwrap_or(false),
-        options: string_list(value.get("options")),
+        options: form_options(value.get("options")),
     })
+}
+
+/// A v2 option names its answer in `value` but shows `label`; fall back to a
+/// plain string for the pre-v2 shape.
+fn form_options(value: Option<&Value>) -> Vec<String> {
+    value
+        .and_then(Value::as_array)
+        .map(|options| {
+            options
+                .iter()
+                .filter_map(|option| {
+                    option
+                        .get("label")
+                        .or_else(|| option.get("value"))
+                        .and_then(Value::as_str)
+                        .or_else(|| option.as_str())
+                        .map(str::to_string)
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn permission_decision(value: &Value) -> Option<PermissionDecision> {
@@ -1949,6 +1973,31 @@ mod tests {
 
     fn v2_harness(cli: &str) -> OpenCodeV2Harness {
         OpenCodeV2Harness::new(HarnessConfig::new(cli))
+    }
+
+    #[test]
+    fn a_v2_form_uses_key_type_and_option_labels() {
+        let request = form_from_value(&json!({
+            "id": "form-1",
+            "sessionID": "ses-1",
+            "title": "Deploy where?",
+            "fields": [{
+                "key": "target",
+                "title": "Target",
+                "type": "multiselect",
+                "required": true,
+                "options": [
+                    {"value": "prod", "label": "Production"},
+                    {"value": "stage", "label": "Staging"}
+                ]
+            }]
+        }))
+        .expect("a v2 form parses");
+        assert_eq!(request.id, "form-1");
+        assert_eq!(request.fields.len(), 1);
+        assert_eq!(request.fields[0].id, "target");
+        assert_eq!(request.fields[0].kind, FormFieldKind::Multiselect);
+        assert_eq!(request.fields[0].options, ["Production", "Staging"]);
     }
 
     #[test]

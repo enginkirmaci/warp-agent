@@ -17,6 +17,7 @@ use anyhow::{Context as _, Result, anyhow};
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, RwLock};
+
 use std::time::Duration;
 
 use crate::harness::HarnessId;
@@ -272,8 +273,9 @@ impl DshHandle {
                 .rpc_counter
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         );
-        let mut refreshed = false;
+        let mut waited_for_cookie = false;
         for _ in 0..2 {
+            let cookie = self.cookie();
             let body = json!({
                 "type": "client-request",
                 "rpcId": id,
@@ -285,16 +287,26 @@ impl DshHandle {
                 .http
                 .post(format!("{}/api/{method}", self.inner.base_url))
                 .header("content-type", "application/json")
-                .header("cookie", self.cookie())
+                .header("cookie", cookie.clone())
                 .json(&body)
                 .send()
                 .await
                 .with_context(|| format!("dsh rpc {method} failed"))?;
-            if resp.status() == reqwest::StatusCode::UNAUTHORIZED && !refreshed {
-                refreshed = true;
-                let cookie = connect_with_token(&self.inner.base_url, &self.inner.token).await?;
-                self.set_cookie(cookie);
-                continue;
+            if resp.status() == reqwest::StatusCode::UNAUTHORIZED && !waited_for_cookie {
+                // A `/connect` here would mint a second Peer: the cookie would
+                // answer waterfalls owned by the event-stream generation and
+                // the gateway refuses it (`Remote event result belongs to
+                // another Peer`). The pump owns the one live generation, so
+                // wait for it to publish its cookie and retry on that.
+                waited_for_cookie = true;
+                let deadline = std::time::Instant::now() + Duration::from_secs(3);
+                while self.cookie() == cookie && std::time::Instant::now() < deadline {
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+                if self.cookie() != cookie {
+                    continue;
+                }
+                return Err(anyhow!("dsh rpc {method}: unauthorized"));
             }
             let value: Value = resp.json().await.context("dsh rpc response was not JSON")?;
             let result = value.pointer("/result").cloned().unwrap_or(Value::Null);
@@ -527,11 +539,18 @@ fn follow_stream_id(session_id: &str) -> String {
 /// Stable key for a question (dsh questions carry their own id; fall back to
 /// the question text so answers still correlate).
 fn question_key(question: &QuestionPromptInfo) -> String {
-    let id = question.question.trim();
-    if id.is_empty() {
-        "(empty)".to_string()
-    } else {
+    // the caller's id is what the question tool echoes back; the question
+    // text is only a last-resort correlation for a malformed request
+    let id = question.id.trim();
+    if !id.is_empty() {
         id.to_string()
+    } else {
+        let text = question.question.trim();
+        if text.is_empty() {
+            "(empty)".to_string()
+        } else {
+            text.to_string()
+        }
     }
 }
 
@@ -1485,6 +1504,7 @@ fn fold_waterfall(frame: &Value) -> Vec<Value> {
             let prompts: Vec<QuestionPromptInfo> = questions
                 .iter()
                 .map(|q| QuestionPromptInfo {
+                    id: q.get("id").and_then(Value::as_str).unwrap_or("").into(),
                     question: q
                         .get("question")
                         .and_then(Value::as_str)
@@ -1971,6 +1991,31 @@ mod tests {
     }
 
     #[test]
+    fn a_question_answer_uses_the_callers_question_id() {
+        let question = QuestionPromptInfo {
+            id: "caller-question-7".into(),
+            question: "Which directory should I inspect?".into(),
+            header: "Directory".into(),
+            multiple: false,
+            options: vec![QuestionOptionInfo {
+                label: "docs".into(),
+                description: String::new(),
+            }],
+        };
+        assert_eq!(question_key(&question), "caller-question-7");
+
+        // a malformed request with no id still correlates on its text
+        let fallback = QuestionPromptInfo {
+            id: String::new(),
+            question: "Pick one".into(),
+            header: String::new(),
+            multiple: false,
+            options: Vec::new(),
+        };
+        assert_eq!(question_key(&fallback), "Pick one");
+    }
+
+    #[test]
     fn folds_a_full_turn_into_opencode_shapes() {
         let mut state = DshSessionState::default();
         let sid = "session-1";
@@ -2311,12 +2356,14 @@ mod tests {
     fn waterfall_question_stashes_payload_for_reply() {
         let events = fold_remote_event(&json!({
             "type": "waterfall", "eventId": "evt-2", "event": "user-questions/request", "agentId": "s1",
-            "request": { "questions": [ { "question": "Which?", "multiSelect": false, "options": [
+            "request": { "questions": [ { "id": "q-7", "question": "Which?", "multiSelect": false, "options": [
                 { "label": "A", "description": "first" }, { "label": "B" },
             ] } ] },
         }));
         assert_eq!(events[0].get("type"), Some(&json!("question.asked")));
-        assert!(take_stashed_questions("evt-2").is_some());
+        let stashed = take_stashed_questions("evt-2").expect("the payload is stashed");
+        assert_eq!(stashed[0].id, "q-7");
+        assert_eq!(question_key(&stashed[0]), "q-7");
         assert!(take_stashed_questions("evt-2").is_none());
     }
 

@@ -97,6 +97,8 @@ pub struct QuestionOptionInfo {
 
 #[derive(Clone, Debug)]
 pub struct QuestionPromptInfo {
+    /// The caller-provided question id, echoed back with the answer.
+    pub id: String,
     pub question: String,
     pub header: String,
     pub multiple: bool,
@@ -1253,6 +1255,7 @@ pub fn read_question_request(r: &Value) -> Option<QuestionRequestInfo> {
             })
             .unwrap_or_default();
         questions.push(QuestionPromptInfo {
+            id: q.get("id").and_then(Value::as_str).unwrap_or("").into(),
             question: q
                 .get("question")
                 .and_then(Value::as_str)
@@ -1420,6 +1423,7 @@ pub enum ApiRequest {
     ReplyQuestion {
         session_id: String,
         request_id: String,
+        field_ids: Vec<String>,
         answers: Vec<Vec<String>>,
     },
     /// Dismiss one pending question/form.
@@ -2441,6 +2445,7 @@ fn dispatch_request(
         ApiRequest::ReplyQuestion {
             session_id,
             request_id,
+            field_ids,
             answers,
         } => {
             let summary = answers
@@ -2457,7 +2462,7 @@ fn dispatch_request(
             let result = typed(instance.reply_form(
                 &SessionId::new(session_id),
                 &request_id,
-                bridge::form_answer(answers),
+                bridge::form_answer_for_ids(&field_ids, answers),
             ));
             Some(UiEvent::QuestionReplied {
                 request_id,

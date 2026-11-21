@@ -80,6 +80,7 @@ fn a_question_selection_survives_typing_in_the_custom_answer(cx: &mut TestAppCon
             id: "qprobe-1".into(),
             session_id: "probe-chat".into(),
             questions: vec![QuestionEntry {
+                field_id: "choice".into(),
                 question: question.into(),
                 header: String::new(),
                 multiple: false,

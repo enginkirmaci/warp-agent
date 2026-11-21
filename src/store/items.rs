@@ -191,6 +191,8 @@ pub struct QuestionOptionItem {
 
 #[derive(Clone, Debug)]
 pub struct QuestionEntry {
+    /// The form field id the harness expects in the reply (v2 uses its `key`).
+    pub field_id: String,
     pub question: String,
     pub header: String,
     pub multiple: bool,

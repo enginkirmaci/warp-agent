@@ -256,6 +256,7 @@ pub(crate) fn question_requests(forms: Vec<FormRequest>) -> Vec<QuestionRequestI
                 .fields
                 .into_iter()
                 .map(|field| QuestionPromptInfo {
+                    id: field.id.clone(),
                     question: field.title.clone(),
                     header: field.title,
                     multiple: matches!(field.kind, super::types::FormFieldKind::Multiselect),
@@ -322,15 +323,48 @@ pub(crate) fn form_requests(requests: Vec<QuestionRequestInfo>) -> Vec<FormReque
 }
 
 /// The typed answer for a question card's per-question selections.
-pub(crate) fn form_answer(answers: Vec<Vec<String>>) -> super::types::FormAnswer {
+/// A form answer keyed by the field ids the question card carried.
+pub(crate) fn form_answer_for_ids(
+    field_ids: &[String],
+    answers: Vec<Vec<String>>,
+) -> super::types::FormAnswer {
     let mut values = std::collections::BTreeMap::new();
     for (index, labels) in answers.into_iter().enumerate() {
+        let key = field_ids
+            .get(index)
+            .filter(|id| !id.is_empty())
+            .cloned()
+            .unwrap_or_else(|| index.to_string());
         let value = if labels.len() == 1 {
             Value::String(labels.into_iter().next().unwrap_or_default())
         } else {
             Value::Array(labels.into_iter().map(Value::String).collect())
         };
-        values.insert(index.to_string(), value);
+        values.insert(key, value);
+    }
+    super::types::FormAnswer { values }
+}
+
+#[cfg(test)]
+pub(crate) fn form_answer_for(
+    form: Option<&FormRequest>,
+    answers: Vec<Vec<String>>,
+) -> super::types::FormAnswer {
+    let mut values = std::collections::BTreeMap::new();
+    for (index, labels) in answers.into_iter().enumerate() {
+        let key = form
+            .and_then(|form| form.fields.get(index))
+            .map(|field| field.id.clone())
+            .unwrap_or_else(|| index.to_string());
+        let multiselect = form
+            .and_then(|form| form.fields.get(index))
+            .is_some_and(|field| field.kind == crate::harness::FormFieldKind::Multiselect);
+        let value = if !multiselect && labels.len() == 1 {
+            Value::String(labels.into_iter().next().unwrap_or_default())
+        } else {
+            Value::Array(labels.into_iter().map(Value::String).collect())
+        };
+        values.insert(key, value);
     }
     super::types::FormAnswer { values }
 }
@@ -340,6 +374,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+    use crate::harness::{FormField, FormFieldKind, FormRequest};
 
     #[test]
     fn a_stored_transcript_round_trips_through_typed_history() {
@@ -405,8 +440,34 @@ mod tests {
         assert_eq!(commands[0].source, "command");
         assert_eq!(commands[1].source, "skill");
 
-        let answer = form_answer(vec![vec!["a".into(), "b".into()], vec![]]);
+        let answer = form_answer_for(None, vec![vec!["a".into(), "b".into()], vec![]]);
         assert_eq!(answer.values["0"], json!(["a", "b"]));
         assert_eq!(answer.values["1"], json!([]));
+
+        let mut form = FormRequest {
+            id: "f1".into(),
+            session: SessionId::new("s1"),
+            title: "Deploy".into(),
+            fields: Vec::new(),
+        };
+        form.fields = vec![
+            FormField {
+                id: "target".into(),
+                title: "Target".into(),
+                kind: FormFieldKind::Multiselect,
+                required: true,
+                options: vec!["prod".into()],
+            },
+            FormField {
+                id: "note".into(),
+                title: "Note".into(),
+                kind: FormFieldKind::Text,
+                required: false,
+                options: Vec::new(),
+            },
+        ];
+        let answer = form_answer_for(Some(&form), vec![vec!["prod".into()], vec![]]);
+        assert_eq!(answer.values["target"], json!(["prod"]));
+        assert_eq!(answer.values["note"], json!([]));
     }
 }

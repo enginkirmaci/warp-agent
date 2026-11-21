@@ -230,10 +230,15 @@ impl Store {
             }
             HarnessEvent::PermissionAsked { request } => {
                 let ws_key = self.harness_ws_key(harness, Some(&request.session), None)?;
+                let event_type = if matches!(harness_kind(harness), Ok(HarnessKind::OpenCodeV2)) {
+                    "permission.v2.asked"
+                } else {
+                    "permission.asked"
+                };
                 // the legacy v1 card reads `permission`/`patterns`; the exact
                 // action/resources shape lands with the v2 adapter
                 let mut event = json!({
-                    "type": "permission.asked",
+                    "type": event_type,
                     "properties": {
                         "id": request.id,
                         "sessionID": request.session.as_str(),
@@ -427,6 +432,24 @@ impl Store {
     ) -> Result<String, HarnessError> {
         match harness_kind(harness)? {
             HarnessKind::Dsh => Ok(DSH_SERVER_KEY.to_string()),
+            HarnessKind::OpenCodeV2 => {
+                if let Some(directory) = directory {
+                    return Ok(directory.to_string_lossy().into_owned());
+                }
+                if let Some(session) = session {
+                    return self
+                        .workspace_by_session
+                        .get(session.as_str())
+                        .cloned()
+                        .ok_or_else(|| {
+                            HarnessError::Unavailable(format!(
+                                "session {} has no workspace",
+                                session.as_str()
+                            ))
+                        });
+                }
+                Ok(String::new())
+            }
             HarnessKind::OpenCode => {
                 if let Some(directory) = directory {
                     return Ok(directory.to_string_lossy().into_owned());

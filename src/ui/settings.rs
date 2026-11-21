@@ -19,7 +19,7 @@ pub struct SettingsBuffers {
     pub opencode_executable: String,
     pub dsh_executable: String,
     pub v2_executable: String,
-    pub default_harness_dsh: bool,
+    pub default_harness: crate::settings::HarnessKind,
     pub default_model: String,
     pub default_variant: String,
     pub variant_highest: bool,
@@ -52,11 +52,7 @@ impl SettingsBuffers {
 
     /// The harness the buffers currently select.
     pub fn harness(&self) -> crate::settings::HarnessKind {
-        if self.default_harness_dsh {
-            crate::settings::HarnessKind::Dsh
-        } else {
-            crate::settings::HarnessKind::OpenCode
-        }
+        self.default_harness
     }
 
     pub fn from_settings(s: &crate::settings::AppSettings) -> Self {
@@ -65,7 +61,7 @@ impl SettingsBuffers {
             opencode_executable: s.harness_executable("opencode"),
             dsh_executable: s.harness_executable("dsh"),
             v2_executable: s.harness_executable("opencode-v2"),
-            default_harness_dsh: s.default_harness == crate::settings::HarnessKind::Dsh,
+            default_harness: s.default_harness,
             default_model: s.default_model.clone().unwrap_or_default(),
             default_variant: s.default_variant.clone().unwrap_or_default(),
             variant_highest: s.default_variant_highest,
@@ -135,18 +131,10 @@ impl SettingsBuffers {
             {
                 entry.enabled = true;
             }
-            set.default_harness = if self.default_harness_dsh {
-                if set.harness_enabled("dsh") {
-                    crate::settings::HarnessKind::Dsh
-                } else {
-                    set.default_harness_kind()
-                }
+            set.default_harness = if set.harness_enabled(self.default_harness.label()) {
+                self.default_harness
             } else {
-                if set.harness_enabled("opencode") {
-                    crate::settings::HarnessKind::OpenCode
-                } else {
-                    set.default_harness_kind()
-                }
+                set.default_harness_kind()
             };
             let null_if_blank = |v: &String| {
                 let t = v.trim();

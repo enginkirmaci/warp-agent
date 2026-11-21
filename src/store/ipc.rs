@@ -125,7 +125,20 @@ impl Store {
                 ),
                 // the host does not own the v2 instance until the store
                 // wiring ticket; the door reports it as not yet available
-                "opencode-v2" => ("unavailable", false),
+                "opencode-v2" => {
+                    if self.v2.is_some() {
+                        ("ready", true)
+                    } else {
+                        (
+                            if self.v2_status.is_some() {
+                                "unavailable"
+                            } else {
+                                "stopped"
+                            },
+                            false,
+                        )
+                    }
+                }
                 _ => ("stopped", false),
             };
             let connection = match descriptor.connection {
@@ -498,6 +511,19 @@ impl Store {
                 let _ = reply.send(Ok(self.models_payload(harness)));
                 return;
             }
+        }
+        if harness == Some(HarnessKind::OpenCodeV2) {
+            self.ensure_v2(cx);
+            if self.models_live.contains(&HarnessKind::OpenCodeV2) {
+                let _ = reply.send(Ok(self.models_payload(harness)));
+            } else {
+                let detail = self
+                    .v2_status
+                    .clone()
+                    .unwrap_or_else(|| "opencode v2 did not list models".into());
+                let _ = reply.send(Err(format!("unavailable: {detail}")));
+            }
+            return;
         }
         if harness == Some(HarnessKind::Dsh) {
             let running = self.runtimes.contains_key(DSH_SERVER_KEY);

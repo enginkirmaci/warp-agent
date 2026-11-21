@@ -26,6 +26,9 @@ impl Store {
         if harness == HarnessKind::Dsh {
             self.ensure_dsh(cx);
         }
+        if harness == HarnessKind::OpenCodeV2 {
+            self.ensure_v2(cx);
+        }
         self.open_tiles.push(tile);
         // the composer's worktree toggle is offered only where it can work
         self.probe_selected_repository();
@@ -71,6 +74,9 @@ impl Store {
         if changed {
             if to == HarnessKind::Dsh {
                 self.ensure_dsh(cx);
+            }
+            if to == HarnessKind::OpenCodeV2 {
+                self.ensure_v2(cx);
             }
             self.repaint(cx);
         }
@@ -133,6 +139,9 @@ impl Store {
         // picker can list its catalog by the time the pill opens
         if harness == HarnessKind::Dsh {
             self.ensure_dsh(cx);
+        }
+        if harness == HarnessKind::OpenCodeV2 {
+            self.ensure_v2(cx);
         }
         let _ = cx;
     }
@@ -285,6 +294,13 @@ impl Store {
                 cx,
             );
             self.repaint(cx);
+            return;
+        }
+        if self
+            .tile_by_key(tile_key)
+            .is_some_and(|tile| tile.harness == HarnessKind::OpenCodeV2)
+        {
+            self.send_v2_from_tile(tile_key, cx);
             return;
         }
         if let Some(key) = self.tile_net_key_or(tile_key) {
@@ -460,10 +476,145 @@ impl Store {
                         },
                     });
                 }
+                HarnessKind::OpenCodeV2 => {
+                    // the v2 bridge creates its own session when the prompt is
+                    // dispatched; drain the placeholder so nothing parks
+                    self.pending_sends.pop();
+                }
             }
             return;
         }
         self.send_core(&session_id.unwrap(), text, attachments, cx);
+    }
+
+    /// The v2 send path: the adapter owns the session and its event stream, so
+    /// this only creates the session when needed, appends the optimistic user
+    /// turn and hands the prompt to the adapter.
+    fn send_v2_from_tile(&mut self, tile_key: &str, cx: &mut Context<Self>) {
+        let Some(tile) = self.tile_by_key(tile_key) else {
+            return;
+        };
+        let text = tile.input.trim().to_string();
+        if text.is_empty() {
+            return;
+        }
+        let attachments = std::mem::take(&mut self.tile_by_key_mut(tile_key).unwrap().attachments);
+        self.ensure_v2(cx);
+        if self.v2.is_none() {
+            let detail = self
+                .v2_status
+                .clone()
+                .unwrap_or_else(|| "not attached".into());
+            self.tile_note(
+                tile_key,
+                &format!("opencode v2 is unavailable: {detail}"),
+                true,
+                cx,
+            );
+            self.repaint(cx);
+            return;
+        }
+        if !attachments.is_empty() {
+            self.tile_note(
+                tile_key,
+                "opencode v2 file attachments are not wired yet; sending the text only.",
+                false,
+                cx,
+            );
+        }
+        let tile = self.tile_by_key(tile_key).unwrap();
+        let model = tile.selected_model.clone();
+        let agent = tile.selected_agent.clone();
+        let variant = tile.selected_variant.clone();
+        let directory = self
+            .draft_workspace(tile_key)
+            .or_else(|| self.tile_ws_key(tile_key))
+            .map(std::path::PathBuf::from);
+        let existing = tile.session_id.clone();
+        let session_id = match existing {
+            Some(session) => session,
+            None => {
+                let adapter = self.v2.as_mut().expect("checked above");
+                let created = adapter.create_session(crate::harness::NewSession {
+                    title: Some(DRAFT_TITLE.into()),
+                    parent: None,
+                    directory,
+                    choice: crate::harness::ModelChoice {
+                        model,
+                        agent,
+                        variant,
+                    },
+                });
+                let Ok(summary) = created else {
+                    let detail = created.unwrap_err().to_string();
+                    self.v2_status = Some(detail.clone());
+                    self.tile_note(
+                        tile_key,
+                        &format!("opencode v2 could not create a session: {detail}"),
+                        true,
+                        cx,
+                    );
+                    self.repaint(cx);
+                    return;
+                };
+                let session = summary.id.as_str().to_string();
+                self.tile_by_session
+                    .insert(session.clone(), tile_key.to_string());
+                if let Some(directory) = summary.directory.clone() {
+                    self.workspace_by_session
+                        .insert(session.clone(), directory.to_string_lossy().into_owned());
+                }
+                self.title_by_session
+                    .insert(session.clone(), summary.title.clone());
+                self.ui
+                    .harness_by_session
+                    .insert(session.clone(), HarnessKind::OpenCodeV2);
+                if let Some(tile) = self.tile_by_key_mut(tile_key) {
+                    tile.session_id = Some(session.clone());
+                    tile.input.clear();
+                    tile.history_index = 0;
+                }
+                session
+            }
+        };
+        let key = self.next_key;
+        self.next_key += 1;
+        if let Some(tile) = self.tile_by_key_mut(tile_key) {
+            tile.items.push(Arc::new(ChatItem::UserMessage {
+                key,
+                text: text.clone(),
+                created_ms: 0,
+            }));
+            tile.input.clear();
+            tile.history_index = 0;
+        }
+        self.record_prompt(&text);
+        let result = self.v2.as_mut().expect("checked above").send_prompt(
+            &crate::harness::SessionId::new(session_id.clone()),
+            crate::harness::Prompt {
+                text,
+                choice: crate::harness::ModelChoice::default(),
+                background: false,
+            },
+        );
+        match result {
+            Ok(()) => {
+                self.set_running(Some(&session_id), true);
+                self.turn_start_by_session
+                    .insert(session_id, Instant::now());
+            }
+            Err(err) => {
+                let detail = err.to_string();
+                self.v2_status = Some(detail.clone());
+                self.tile_note(
+                    tile_key,
+                    &format!("opencode v2 refused the prompt: {detail}"),
+                    true,
+                    cx,
+                );
+            }
+        }
+        self.repaint(cx);
     }
 
     /// The worktree exists: install it as a workspace, start its server, and
@@ -497,6 +648,10 @@ impl Store {
             // can flow now (or park on the shared server's own start)
             HarnessKind::Dsh => {
                 self.ensure_dsh(cx);
+                self.send_from_tile(&tile_key, cx);
+            }
+            HarnessKind::OpenCodeV2 => {
+                self.ensure_v2(cx);
                 self.send_from_tile(&tile_key, cx);
             }
         }
@@ -1104,6 +1259,7 @@ impl Store {
                 context,
             },
             HarnessKind::OpenCode => ApiRequest::CreateForkSession { title, context },
+            HarnessKind::OpenCodeV2 => return,
         };
         self.net.send(NetCommand::Request { ws_key, request });
         let _ = cx;

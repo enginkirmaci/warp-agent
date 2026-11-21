@@ -194,6 +194,11 @@ impl ServerProcess {
                     &port.to_string(),
                 ]);
             }
+            HarnessKind::OpenCodeV2 => {
+                return Err(anyhow!(
+                    "opencode v2 is attached through the harness adapter, not a managed server"
+                ));
+            }
         }
         command
             .current_dir(std::path::Path::new(
@@ -280,6 +285,7 @@ impl ServerProcess {
         let timeout = match kind {
             HarnessKind::OpenCode => Duration::from_secs(25),
             HarnessKind::Dsh => Duration::from_secs(40),
+            HarnessKind::OpenCodeV2 => Duration::from_secs(25),
         };
         let deadline = std::time::Instant::now() + timeout;
         loop {
@@ -287,6 +293,7 @@ impl ServerProcess {
                 let what = match kind {
                     HarnessKind::OpenCode => "opencode serve did not become healthy within 25 s.",
                     HarnessKind::Dsh => "dsh web did not print its URL within 40 s.",
+                    HarnessKind::OpenCodeV2 => "opencode v2 is not a managed server.",
                 };
                 tracing::warn!("{what}");
                 return Err(anyhow!("{what}"));
@@ -312,6 +319,9 @@ impl ServerProcess {
                         process.token = Some(token);
                         return Ok(process);
                     }
+                }
+                HarnessKind::OpenCodeV2 => {
+                    return Err(anyhow!("opencode v2 is not a managed server"));
                 }
             }
             tokio::time::sleep(Duration::from_millis(300)).await;
@@ -1612,6 +1622,14 @@ async fn net_main(
                             let _ = event_tx.send(event).await;
                         });
                     }
+                    HarnessKind::OpenCodeV2 => {
+                        let _ = event_tx
+                            .send(UiEvent::Log {
+                                ws_key: ws_key.clone(),
+                                line: "opencode v2 requests go through the harness adapter".into(),
+                            })
+                            .await;
+                    }
                 }
             }
             NetCommand::SendMessage {
@@ -1689,6 +1707,14 @@ async fn net_main(
                                     .await;
                             }
                         });
+                    }
+                    HarnessKind::OpenCodeV2 => {
+                        let _ = event_tx
+                            .send(UiEvent::MessageSendFailed {
+                                session_id: session_id.clone(),
+                                error: "opencode v2 sends through the harness adapter".into(),
+                            })
+                            .await;
                     }
                 }
             }

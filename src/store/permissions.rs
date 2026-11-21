@@ -1,5 +1,4 @@
 use super::*;
-
 impl Store {
     pub(super) fn on_permission_asked(
         &mut self,
@@ -265,6 +264,31 @@ impl Store {
             }
         }
         let Some(session_id) = session_id else { return };
+        if self.session_harness(&session_id) == HarnessKind::OpenCodeV2 {
+            let decision = match response {
+                "always" => crate::harness::PermissionDecision::Always,
+                "reject" => crate::harness::PermissionDecision::Reject,
+                _ => crate::harness::PermissionDecision::Once,
+            };
+            let result = self.v2.as_mut().map_or_else(
+                || Err("opencode v2 is not attached".to_string()),
+                |adapter| {
+                    adapter
+                        .reply_permission(
+                            &crate::harness::SessionId::new(session_id.clone()),
+                            permission_id,
+                            decision,
+                        )
+                        .map_err(|err| err.to_string())
+                },
+            );
+            match result {
+                Ok(()) => self.resolve_permission(permission_id, "answered".into(), is_auto),
+                Err(err) => self.resolve_permission(permission_id, err, is_auto),
+            }
+            self.repaint(cx);
+            return;
+        }
         let Some(ws_key) = self.net_key_for_session(&session_id) else {
             self.resolve_permission(permission_id, "server unavailable".to_string(), is_auto);
             return;

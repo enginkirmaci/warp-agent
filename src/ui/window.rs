@@ -3726,8 +3726,7 @@ impl WarpWindow {
                     if was == picked {
                         return;
                     }
-                    this.settings_buffers.default_harness_dsh =
-                        picked == crate::settings::HarnessKind::Dsh;
+                    this.settings_buffers.default_harness = picked;
                     // the model and variant belong to the harness they were
                     // listed under; a switch starts at the new server default
                     for key in ["model", "variant"] {
@@ -3982,6 +3981,9 @@ fn model_data(
                 }
                 crate::settings::HarnessKind::OpenCode => {
                     "No models yet. Start a workspace or refresh.".to_string()
+                }
+                crate::settings::HarnessKind::OpenCodeV2 => {
+                    "No opencode v2 models yet. Refresh once the service is available.".to_string()
                 }
             },
         });

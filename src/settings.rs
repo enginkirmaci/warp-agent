@@ -42,18 +42,27 @@ pub enum HarnessKind {
     #[default]
     OpenCode,
     Dsh,
+    /// The attached opencode v2 service; the bridge runs through the typed
+    /// adapter while the remaining v1/dsh paths are still on the old client.
+    #[serde(rename = "opencode-v2")]
+    OpenCodeV2,
 }
 
 impl HarnessKind {
     /// Every harness the app can run. The door reports this list, so clients
     /// (DevTools settings) never hardcode what warp-agent supports.
-    pub const ALL: [HarnessKind; 2] = [HarnessKind::OpenCode, HarnessKind::Dsh];
+    pub const ALL: [HarnessKind; 3] = [
+        HarnessKind::OpenCode,
+        HarnessKind::Dsh,
+        HarnessKind::OpenCodeV2,
+    ];
 
     /// The wire id: the settings key and the door's `harness` value.
     pub fn label(self) -> &'static str {
         match self {
             HarnessKind::OpenCode => "opencode",
             HarnessKind::Dsh => "dsh",
+            HarnessKind::OpenCodeV2 => "opencode-v2",
         }
     }
 
@@ -63,12 +72,14 @@ impl HarnessKind {
         match self {
             HarnessKind::OpenCode => "opencode",
             HarnessKind::Dsh => "DeepSeek (dsh)",
+            HarnessKind::OpenCodeV2 => "opencode v2",
         }
     }
 
     pub fn from_label(label: &str) -> Self {
         match label {
             "dsh" => HarnessKind::Dsh,
+            "opencode-v2" => HarnessKind::OpenCodeV2,
             _ => HarnessKind::OpenCode,
         }
     }
@@ -79,6 +90,7 @@ impl HarnessKind {
         match label {
             "opencode" => Some(HarnessKind::OpenCode),
             "dsh" => Some(HarnessKind::Dsh),
+            "opencode-v2" => Some(HarnessKind::OpenCodeV2),
             _ => None,
         }
     }

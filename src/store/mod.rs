@@ -2,6 +2,8 @@
 //! transcripts, queues, permissions, questions and subagent tracking. A 1:1
 //! port of MainViewModel + ChatTileViewModel + the ChatItems model.
 
+use crate::harness::Harness as _;
+use crate::harness::{HarnessConfig, HarnessId, OpenCodeV2Harness};
 use crate::oc::{
     self, ApiRequest, CommandInfo, DSH_SERVER_KEY, ModelInfo, NetCommand, SessionInfo,
     StoredMessage,
@@ -327,6 +329,11 @@ pub struct Store {
     /// The typed harness-event path is inert until the adapters are wired; the
     /// old net path stays authoritative during the expand phase.
     harness_ingest: bool,
+    /// The attached v2 adapter while the app has it; its events are pumped
+    /// into the typed store path by a spawned task.
+    v2: Option<OpenCodeV2Harness>,
+    /// Last v2 attach failure, surfaced by the settings/door availability.
+    pub v2_status: Option<String>,
     pub is_settings_open: bool,
     /// The rail's About section: the family table, not a chat surface.
     pub is_about_open: bool,
@@ -552,6 +559,8 @@ impl Store {
             is_server_running: false,
             auto_allow,
             harness_ingest: false,
+            v2: None,
+            v2_status: None,
             is_settings_open: false,
             is_about_open: false,
             menu_armed: None,
@@ -1658,6 +1667,95 @@ impl Store {
         let _ = cx;
     }
 
+    /// Starts the attached v2 adapter on first use and pumps its typed event
+    /// stream into the store. The adapter stays connected until the harness is
+    /// disabled; it never stops the shared service.
+    pub fn ensure_v2(&mut self, cx: &mut Context<Self>) {
+        if !self.settings.harness_enabled("opencode-v2") {
+            self.v2_status = Some("opencode v2 is disabled".into());
+            return;
+        }
+        if self.v2.is_some() {
+            return;
+        }
+        let executable = self.settings.harness_executable("opencode-v2");
+        let mut adapter = OpenCodeV2Harness::new(HarnessConfig::new(executable));
+        match adapter.start() {
+            Ok(()) => {
+                self.harness_ingest = true;
+                let events = adapter.events();
+                self.v2 = Some(adapter);
+                self.v2_status = None;
+                self.load_v2_catalog(cx);
+                cx.spawn(async move |store, cx| {
+                    while let Ok(event) = events.recv().await {
+                        let _ = store.update(cx, |store, cx| store.on_v2_event(event, cx));
+                    }
+                })
+                .detach();
+            }
+            Err(err) => {
+                let detail = err.to_string();
+                tracing::warn!("opencode v2 attach failed: {detail}");
+                self.v2_status = Some(detail.clone());
+                if let Some(tile) = self.focused_tile.clone() {
+                    self.tile_note(
+                        &tile,
+                        &format!("opencode v2 is unavailable: {detail}"),
+                        true,
+                        cx,
+                    );
+                }
+                self.repaint(cx);
+            }
+        }
+    }
+
+    fn on_v2_event(&mut self, event: crate::harness::HarnessEvent, cx: &mut Context<Self>) {
+        let harness = HarnessId::new("opencode-v2");
+        if let Err(err) = self.ingest_harness_event(&harness, event, cx) {
+            tracing::warn!("v2 event ingest failed: {err}");
+        }
+    }
+
+    fn load_v2_catalog(&mut self, cx: &mut Context<Self>) {
+        let Some(adapter) = self.v2.as_mut() else {
+            return;
+        };
+        match adapter.models() {
+            Ok(models) => {
+                self.model_infos
+                    .retain(|model| model.harness != HarnessKind::OpenCodeV2);
+                for model in models {
+                    if !self.models.iter().any(|key| key == &model.key) {
+                        self.models.push(model.key.clone());
+                    }
+                    if !model.variants.is_empty() {
+                        self.variants_by_model
+                            .insert(model.key.clone(), model.variants.clone());
+                    }
+                    self.context_limit_by_model
+                        .insert(model.key.clone(), model.context_limit);
+                    self.model_infos.push(ModelInfo {
+                        key: model.key,
+                        harness: HarnessKind::OpenCodeV2,
+                        variants: model.variants,
+                        context_limit: model.context_limit,
+                    });
+                }
+                self.models_live.insert(HarnessKind::OpenCodeV2);
+                self.models_refreshing = None;
+                self.v2_status = None;
+                self.repaint(cx);
+            }
+            Err(err) => {
+                self.v2_status = Some(err.to_string());
+                self.models_refreshing = None;
+                self.repaint(cx);
+            }
+        }
+    }
+
     pub fn harness_enabled(&self, harness: HarnessKind) -> bool {
         self.settings.harness_enabled(harness.label())
     }
@@ -1748,6 +1846,12 @@ impl Store {
                     self.teardown_runtime(DSH_SERVER_KEY);
                 }
                 // attached opencode-v2 disconnects in the v2 connection ticket
+                "opencode-v2" => {
+                    if let Some(mut adapter) = self.v2.take() {
+                        let _ = crate::harness::Harness::stop(&mut adapter);
+                    }
+                    self.v2_status = Some("disconnected".into());
+                }
                 _ => {}
             }
             if self.settings.default_harness.label() == id {
@@ -1772,6 +1876,9 @@ impl Store {
         // the picker's refresh button spins until the catalog lands
         self.models_refreshing = Some(harness);
         match harness {
+            HarnessKind::OpenCodeV2 => {
+                self.ensure_v2(cx);
+            }
             HarnessKind::Dsh => {
                 let running = self.runtimes.contains_key(DSH_SERVER_KEY);
                 self.ensure_dsh(cx);

@@ -287,6 +287,331 @@ impl ServerProcess {
     }
 }
 
+// ---- stale managed children ----------------------------------------------
+
+/// A managed harness child recognized from its command line.
+///
+/// The two shapes are the launch argv the harness descriptors build:
+/// `dsh web --no-open --host 127.0.0.1 --port <n>` and
+/// `opencode serve --hostname 127.0.0.1 --port <n>`.
+#[cfg(unix)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ManagedChild {
+    DshWeb { port: u16 },
+    OpencodeServe { port: u16 },
+}
+
+#[cfg(unix)]
+impl ManagedChild {
+    /// The harness id, for a log line.
+    fn harness(self) -> &'static str {
+        match self {
+            Self::DshWeb { .. } => "dsh",
+            Self::OpencodeServe { .. } => "opencode",
+        }
+    }
+
+    /// The loopback port the child serves.
+    fn port(self) -> u16 {
+        match self {
+            Self::DshWeb { port } | Self::OpencodeServe { port } => port,
+        }
+    }
+}
+
+/// The launch arguments of the two managed children, in the order the
+/// descriptors write them. The token after `--port` is parsed separately.
+#[cfg(unix)]
+const DSH_WEB_ARGS: &[&str] = &["web", "--no-open", "--host", "127.0.0.1", "--port"];
+#[cfg(unix)]
+const OPENCODE_SERVE_ARGS: &[&str] = &["serve", "--hostname", "127.0.0.1", "--port"];
+
+/// JavaScript runtimes an npm/bun bin shim uses to exec the harness script.
+#[cfg(unix)]
+const JS_RUNTIMES: &[&str] = &["node", "nodejs", "bun", "deno"];
+
+/// The managed child one `/proc/<pid>/cmdline` body names, when it is exactly
+/// a shape this app spawns.
+///
+/// The executable part is not fixed to the binary's own name: the app spawns
+/// `dsh`, and an npm-installed `dsh` is a shell shim that execs
+/// `node …/@deepseek-ai/dsh/lib/bin.js`, so the kernel records the runtime and
+/// its script instead. [`managed_program`] accepts both forms. Anything else
+/// — another executable, extra or reordered flags, a different host, the
+/// user's own `dsh web --patch …` — is `None`.
+#[cfg(unix)]
+fn managed_child_from_cmdline(cmdline: &str) -> Option<ManagedChild> {
+    let argv = argv_from_cmdline(cmdline);
+    if let Some(port) = managed_port(&argv, DSH_WEB_ARGS, "dsh") {
+        return Some(ManagedChild::DshWeb { port });
+    }
+    managed_port(&argv, OPENCODE_SERVE_ARGS, "opencode")
+        .map(|port| ManagedChild::OpencodeServe { port })
+}
+
+/// Split a `/proc/<pid>/cmdline` body into its arguments. Every argument is
+/// NUL-terminated, so the one empty piece at the end is the terminator, not an
+/// argument; an empty argument before it stays in place and fails the exact
+/// shape match.
+#[cfg(unix)]
+fn argv_from_cmdline(cmdline: &str) -> Vec<&str> {
+    let mut argv: Vec<&str> = cmdline.split('\0').collect();
+    if argv.last().is_some_and(|argument| argument.is_empty()) {
+        argv.pop();
+    }
+    argv
+}
+
+/// The port of a managed child, when `argv` ends with one of the launch
+/// argument lists and the tokens before it name `harness`.
+#[cfg(unix)]
+fn managed_port(argv: &[&str], launch_args: &[&str], harness: &str) -> Option<u16> {
+    let (port, head) = argv.split_last()?;
+    let port = port_number(port)?;
+    let split = head.len().checked_sub(launch_args.len())?;
+    let (program, tail) = head.split_at(split);
+    (tail == launch_args && managed_program(program, harness)).then_some(port)
+}
+
+/// True when `program` is one of the ways `harness`'s executable appears in a
+/// command line: the binary itself (`dsh`, `opencode`, with or without
+/// `.exe`), or the JavaScript script an npm/bun bin shim execs in its place.
+/// The script path must carry the harness name, so an unrelated script run
+/// with the same arguments is not mistaken for a managed child.
+#[cfg(unix)]
+fn managed_program(program: &[&str], harness: &str) -> bool {
+    match program {
+        [binary] => program_stem(binary).eq_ignore_ascii_case(harness),
+        [runtime, script] => {
+            let runtime = program_stem(runtime);
+            JS_RUNTIMES
+                .iter()
+                .any(|known| runtime.eq_ignore_ascii_case(known))
+                && script.to_ascii_lowercase().contains(harness)
+        }
+        _ => false,
+    }
+}
+
+/// The last component of an argv token, without a `.exe` suffix:
+/// `…/bin/opencode.exe` is `opencode`.
+#[cfg(unix)]
+fn program_stem(program: &str) -> &str {
+    let name = program.rsplit('/').next().unwrap_or(program);
+    name.strip_suffix(".exe")
+        .or_else(|| name.strip_suffix(".EXE"))
+        .unwrap_or(name)
+}
+
+/// A port argument exactly as the launch args write it: canonical decimal and
+/// nonzero (the app always picks a real free port).
+#[cfg(unix)]
+fn port_number(token: &str) -> Option<u16> {
+    let port: u16 = token.parse().ok()?;
+    (port != 0 && port.to_string() == token).then_some(port)
+}
+
+/// The managed child one `/proc` snapshot describes when it is stale: an exact
+/// managed shape, parented to init (the run that spawned it is gone) and owned
+/// by this user. `current_uid` is passed in so the guard is pure and testable
+/// without touching a live process. A process reparented to a subreaper
+/// instead of init is deliberately skipped: something owns it, and killing
+/// under a live parent is the one thing this sweep must never do.
+#[cfg(unix)]
+fn stale_managed_child(
+    cmdline: &str,
+    parent: u32,
+    owner: u32,
+    current_uid: u32,
+) -> Option<ManagedChild> {
+    if parent != 1 || owner != current_uid {
+        return None;
+    }
+    managed_child_from_cmdline(cmdline)
+}
+
+/// The parent pid from `/proc/<pid>/stat`: field 4, read after the final `)`
+/// of the comm field (which may itself contain spaces and parentheses).
+#[cfg(unix)]
+fn parent_pid_from_stat(stat: &str) -> Option<u32> {
+    let after_comm = &stat[stat.rfind(')')? + 1..];
+    // the fields after the comm are `state`, `ppid`, …
+    after_comm.split_whitespace().nth(1)?.parse().ok()
+}
+
+/// Stop the managed harness children a previous app run left behind as
+/// orphans.
+///
+/// This runs once in `run()`, before the window opens and before this run
+/// starts a server of its own. A managed server is a child of this process:
+/// a clean quit stops it, but SIGTERM/SIGKILL leaves it parented to init
+/// (PPID 1) while it still holds its port and memory. The sweep only considers
+/// processes that are exactly one of this app's launch argv shapes, are
+/// orphans and belong to this user; the user's own `dsh web --patch …` and any
+/// server of a live instance (its parent is still alive) are never candidates.
+/// A failure is logged and startup continues.
+#[cfg(unix)]
+pub(crate) fn reap_stale_children() {
+    // SAFETY: getuid reads the calling process's own real user id; it has no
+    // preconditions and cannot fail.
+    let current_uid = unsafe { libc::getuid() };
+    let entries = match std::fs::read_dir("/proc") {
+        Ok(entries) => entries,
+        Err(err) => {
+            // no /proc on this Unix: nothing to sweep
+            tracing::debug!("stale child sweep skipped: {err}");
+            return;
+        }
+    };
+    let mut stopped = 0;
+    for entry in entries.flatten() {
+        let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>() else {
+            continue;
+        };
+        if pid == std::process::id() {
+            continue;
+        }
+        let Some(child) = stale_child_at(pid, current_uid) else {
+            continue;
+        };
+        if stop_stale_child(pid, child, current_uid) {
+            stopped += 1;
+        }
+    }
+    if stopped > 0 {
+        tracing::info!("stopped {stopped} stale managed harness child(ren) from a previous run");
+    }
+}
+
+/// Windows has no `/proc/<pid>/cmdline`, so the sweep is a no-op there.
+#[cfg(not(unix))]
+pub(crate) fn reap_stale_children() {}
+
+/// Read one process's parent, owner and command line and reduce them to the
+/// stale managed child they describe.
+#[cfg(unix)]
+fn stale_child_at(pid: u32, current_uid: u32) -> Option<ManagedChild> {
+    use std::os::unix::fs::MetadataExt as _;
+
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let parent = parent_pid_from_stat(&stat)?;
+    let owner = std::fs::metadata(format!("/proc/{pid}")).ok()?.uid();
+    let cmdline = std::fs::read(format!("/proc/{pid}/cmdline")).ok()?;
+    stale_managed_child(
+        &String::from_utf8_lossy(&cmdline),
+        parent,
+        owner,
+        current_uid,
+    )
+}
+
+/// Signal one stale child through a pidfd, after re-reading it through the
+/// same pid. Returns true when the signal was sent.
+#[cfg(target_os = "linux")]
+fn stop_stale_child(pid: u32, child: ManagedChild, current_uid: u32) -> bool {
+    let handle = match pidfd_open(pid) {
+        Ok(handle) => handle,
+        Err(err) => {
+            // it exited between the two reads, or the kernel has no
+            // pidfd_open. Never fall back to a bare kill: a recycled pid
+            // could then belong to an unrelated process.
+            tracing::debug!("kept stale {} child pid {pid}: {err}", child.harness());
+            return false;
+        }
+    };
+    // The scan and this check are two reads, so the pid may have exited and
+    // been reused in between. The handle is the proof: it names one process,
+    // and a signal through it can never reach a later process that reused the
+    // pid (that would be an unrelated kill).
+    if stale_child_at(pid, current_uid) != Some(child) {
+        return false;
+    }
+    match pidfd_terminate(&handle) {
+        Ok(()) => {
+            tracing::info!(
+                "stopped stale {} child (pid {pid}, port {})",
+                child.harness(),
+                child.port()
+            );
+            true
+        }
+        Err(err) => {
+            tracing::warn!(
+                "could not stop stale {} child (pid {pid}): {err}",
+                child.harness()
+            );
+            false
+        }
+    }
+}
+
+/// Non-Linux Unix has no pidfd, so re-read the process immediately before the
+/// signal; the window between the check and the kill is as small as it can be.
+#[cfg(all(unix, not(target_os = "linux")))]
+fn stop_stale_child(pid: u32, child: ManagedChild, current_uid: u32) -> bool {
+    if stale_child_at(pid, current_uid) != Some(child) {
+        return false;
+    }
+    // SAFETY: kill sends a signal to the pid this function just checked is an
+    // orphan owned by this user and one of its managed shapes; a failure is an
+    // errno, not undefined behavior.
+    let sent = unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
+    if sent != 0 {
+        tracing::warn!(
+            "could not stop stale {} child (pid {pid}): {}",
+            child.harness(),
+            std::io::Error::last_os_error()
+        );
+        return false;
+    }
+    tracing::info!(
+        "stopped stale {} child (pid {pid}, port {})",
+        child.harness(),
+        child.port()
+    );
+    true
+}
+
+/// A pidfd for `pid` (Linux 5.3+), so signalling cannot be redirected by pid
+/// reuse.
+#[cfg(target_os = "linux")]
+fn pidfd_open(pid: u32) -> std::io::Result<std::os::fd::OwnedFd> {
+    use std::os::fd::{FromRawFd as _, OwnedFd};
+
+    // SAFETY: pidfd_open takes a pid and a flags word and returns a new fd or
+    // -1 with errno set; both arguments are plain integers.
+    let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid as libc::pid_t, 0u32) };
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: a successful pidfd_open returned a fresh fd owned by this
+    // process; OwnedFd closes it exactly once.
+    Ok(unsafe { OwnedFd::from_raw_fd(fd as libc::c_int) })
+}
+
+/// SIGTERM the process a pidfd names (Linux 5.3+).
+#[cfg(target_os = "linux")]
+fn pidfd_terminate(handle: &std::os::fd::OwnedFd) -> std::io::Result<()> {
+    use std::os::fd::AsRawFd as _;
+
+    // SAFETY: the pidfd is live for this call. A null siginfo asks the kernel
+    // for the signal's standard payload, and flags is 0.
+    let result = unsafe {
+        libc::syscall(
+            libc::SYS_pidfd_send_signal,
+            handle.as_raw_fd(),
+            libc::SIGTERM,
+            std::ptr::null::<libc::siginfo_t>(),
+            0u32,
+        )
+    };
+    if result < 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
 async fn is_healthy(client: &reqwest::Client, base_url: &str) -> bool {
     matches!(
         client
@@ -3061,5 +3386,261 @@ mod tests {
         let mut process = process;
         process.stop();
         assert!(alive, "the managed child was killed with its spawn thread");
+    }
+
+    /// One `/proc/<pid>/cmdline` body: every argument NUL-terminated.
+    #[cfg(unix)]
+    fn argv_line(argv: &[&str]) -> String {
+        let mut line = argv.join("\0");
+        line.push('\0');
+        line
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_managed_dsh_child_is_recognized_in_every_launch_form() {
+        // the configured executable itself, bare or as a path
+        for argv in [
+            ["dsh", "web", "--no-open", "--host", "127.0.0.1", "--port", "4096"].as_slice(),
+            ["/usr/local/bin/dsh", "web", "--no-open", "--host", "127.0.0.1", "--port", "4096"]
+                .as_slice(),
+            // an npm-installed dsh is a shell shim that execs Node; the kernel
+            // records the runtime and the package script, not `dsh`
+            [
+                "node",
+                "/home/u/.local/share/mise/installs/npm-deepseek-ai-dsh/0.2.2/node_modules/@deepseek-ai/dsh/lib/bin.js",
+                "web",
+                "--no-open",
+                "--host",
+                "127.0.0.1",
+                "--port",
+                "4096",
+            ]
+            .as_slice(),
+        ] {
+            assert_eq!(
+                managed_child_from_cmdline(&argv_line(argv)),
+                Some(ManagedChild::DshWeb { port: 4096 }),
+                "argv {argv:?}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_managed_opencode_child_is_recognized_in_every_launch_form() {
+        for argv in [
+            ["opencode", "serve", "--hostname", "127.0.0.1", "--port", "5123"].as_slice(),
+            // the npm package ships its Linux binary with the Windows suffix
+            [
+                "/home/u/.local/share/mise/installs/opencode/2.3.2/node_modules/@opencode/cli/bin/opencode.exe",
+                "serve",
+                "--hostname",
+                "127.0.0.1",
+                "--port",
+                "5123",
+            ]
+            .as_slice(),
+        ] {
+            assert_eq!(
+                managed_child_from_cmdline(&argv_line(argv)),
+                Some(ManagedChild::OpencodeServe { port: 5123 }),
+                "argv {argv:?}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unmanaged_command_lines_are_left_alone() {
+        let dsh_script = "/home/u/.local/share/mise/installs/npm-deepseek-ai-dsh/0.2.2/node_modules/@deepseek-ai/dsh/lib/bin.js";
+        for argv in [
+            // the user's own instance, the one shape called out by name
+            [
+                "dsh",
+                "web",
+                "--patch",
+                "/home/u/.dsh/remote-host.overlay.yml",
+                "--no-open",
+            ]
+            .as_slice(),
+            [
+                "node",
+                dsh_script,
+                "web",
+                "--patch",
+                "/tmp/overlay.yml",
+                "--no-open",
+            ]
+            .as_slice(),
+            // a different host, a reordered flag, an extra flag
+            [
+                "dsh",
+                "web",
+                "--no-open",
+                "--host",
+                "0.0.0.0",
+                "--port",
+                "4096",
+            ]
+            .as_slice(),
+            [
+                "dsh",
+                "web",
+                "--no-open",
+                "--port",
+                "4096",
+                "--host",
+                "127.0.0.1",
+            ]
+            .as_slice(),
+            [
+                "dsh",
+                "web",
+                "--no-open",
+                "--verbose",
+                "--host",
+                "127.0.0.1",
+                "--port",
+                "4096",
+            ]
+            .as_slice(),
+            // opencode's shape with dsh's host flag
+            ["opencode", "serve", "--host", "127.0.0.1", "--port", "4096"].as_slice(),
+            // the same flags under a program that is not one of the harnesses
+            [
+                "node",
+                "/tmp/other-app/lib/bin.js",
+                "web",
+                "--no-open",
+                "--host",
+                "127.0.0.1",
+                "--port",
+                "4096",
+            ]
+            .as_slice(),
+            [
+                "python3",
+                "server.py",
+                "serve",
+                "--hostname",
+                "127.0.0.1",
+                "--port",
+                "4096",
+            ]
+            .as_slice(),
+            // something that merely mentions the shape in a shell command
+            [
+                "bash",
+                "-c",
+                "dsh web --no-open --host 127.0.0.1 --port 4096",
+            ]
+            .as_slice(),
+            // not a port the launch args could have written
+            [
+                "dsh",
+                "web",
+                "--no-open",
+                "--host",
+                "127.0.0.1",
+                "--port",
+                "0",
+            ]
+            .as_slice(),
+            [
+                "dsh",
+                "web",
+                "--no-open",
+                "--host",
+                "127.0.0.1",
+                "--port",
+                "+4096",
+            ]
+            .as_slice(),
+            [
+                "dsh",
+                "web",
+                "--no-open",
+                "--host",
+                "127.0.0.1",
+                "--port",
+                "04096",
+            ]
+            .as_slice(),
+            [
+                "dsh",
+                "web",
+                "--no-open",
+                "--host",
+                "127.0.0.1",
+                "--port",
+                "65536",
+            ]
+            .as_slice(),
+            ["dsh", "web", "--no-open", "--host", "127.0.0.1", "--port"].as_slice(),
+            // an empty argument is not normalized away
+            [
+                "dsh",
+                "web",
+                "",
+                "--no-open",
+                "--host",
+                "127.0.0.1",
+                "--port",
+                "4096",
+            ]
+            .as_slice(),
+            // limits
+            ["dsh"].as_slice(),
+            [""].as_slice(),
+        ] {
+            assert_eq!(
+                managed_child_from_cmdline(&argv_line(argv)),
+                None,
+                "argv {argv:?}"
+            );
+        }
+        assert_eq!(managed_child_from_cmdline(""), None);
+        assert_eq!(managed_child_from_cmdline("\0"), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn only_an_orphan_of_this_user_is_stale() {
+        let opencode = argv_line(&[
+            "opencode",
+            "serve",
+            "--hostname",
+            "127.0.0.1",
+            "--port",
+            "5123",
+        ]);
+        let expected = Some(ManagedChild::OpencodeServe { port: 5123 });
+        // PPID 1 and the same user: the run that spawned it is gone
+        assert_eq!(stale_managed_child(&opencode, 1, 1000, 1000), expected);
+        // a live parent still owns the child
+        assert_eq!(stale_managed_child(&opencode, 4321, 1000, 1000), None);
+        // another user's process is not ours to touch
+        assert_eq!(stale_managed_child(&opencode, 1, 1001, 1000), None);
+        // the user's own patch instance is never a managed shape
+        let patch = argv_line(&["dsh", "web", "--patch", "/tmp/overlay.yml", "--no-open"]);
+        assert_eq!(stale_managed_child(&patch, 1, 1000, 1000), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_parent_pid_is_the_fourth_stat_field() {
+        assert_eq!(
+            parent_pid_from_stat("4242 (dsh web) S 1 4242 4242 0 -1"),
+            Some(1)
+        );
+        // comm may contain spaces and parentheses of its own
+        assert_eq!(
+            parent_pid_from_stat("7 (evil ) name) R 900 7 7 0 -1"),
+            Some(900)
+        );
+        assert_eq!(parent_pid_from_stat("not a stat line"), None);
+        assert_eq!(parent_pid_from_stat("7 (dsh) R"), None);
+        assert_eq!(parent_pid_from_stat(""), None);
     }
 }

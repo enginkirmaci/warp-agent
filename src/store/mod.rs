@@ -465,6 +465,9 @@ pub struct Store {
     /// The workspace's server commands + skills, keyed by workspace folder
     /// path; filled on ServerStarted and refreshed when a slash menu opens.
     pub commands: HashMap<String, Vec<CommandInfo>>,
+    /// The attached harness's location-independent command/skill catalog;
+    /// its slash menu is not tied to a workspace server key.
+    pub attached_commands: BTreeMap<HarnessId, Vec<CommandInfo>>,
     /// Net keys whose command list is in flight (the menu says loading until
     /// the answer lands, instead of the false "no server commands").
     commands_loading: HashSet<String>,
@@ -633,6 +636,7 @@ impl Store {
             ipc_harness_start_calls: Vec::new(),
             next_ipc_harness_call: 1,
             commands: HashMap::new(),
+            attached_commands: BTreeMap::new(),
             commands_loading: HashSet::new(),
             pending_command_tiles: HashSet::new(),
             file_results: None,
@@ -924,6 +928,12 @@ impl Store {
     /// Slash commands for the workspace a tile talks to (its own session's
     /// server, else the selected one). Empty when the server has none.
     pub fn tile_commands(&self, tile_key: &str) -> &[CommandInfo] {
+        if let Some(tile) = self.tile_by_key(tile_key)
+            && crate::harness::attached(&tile.harness)
+            && let Some(commands) = self.attached_commands.get(&tile.harness)
+        {
+            return commands;
+        }
         self.tile_net_key_or(tile_key)
             .and_then(|ws| self.commands.get(&ws).map(Vec::as_slice))
             .unwrap_or(&[])
@@ -1829,6 +1839,7 @@ impl Store {
                 self.models_live.insert(id.clone());
                 self.models_refreshing = None;
                 self.attached_status.remove(id);
+                self.load_attached_commands(id, cx);
                 self.repaint(cx);
             }
             Err(err) => {
@@ -1838,6 +1849,46 @@ impl Store {
                 self.repaint(cx);
             }
         }
+    }
+
+    /// Loads the attached harness's commands and skills once its catalog is
+    /// warm. The trait takes an optional session; the attached adapter's
+    /// catalog is location-scoped by the service and works without one.
+    fn load_attached_commands(&mut self, id: &HarnessId, cx: &mut Context<Self>) {
+        let Some(adapter) = self.attached.get_mut(id) else {
+            return;
+        };
+        let mut commands = Vec::new();
+        match adapter.commands(None) {
+            Ok(items) => {
+                for command in items {
+                    commands.push(CommandInfo {
+                        name: command.name.clone(),
+                        name_lower: command.name.to_lowercase(),
+                        description: command.description,
+                        source: "command".into(),
+                    });
+                }
+            }
+            Err(err) => tracing::debug!("{} commands unavailable: {err}", id.as_str()),
+        }
+        match adapter.skills(None) {
+            Ok(items) => {
+                for skill in items {
+                    commands.push(CommandInfo {
+                        name: skill.name.clone(),
+                        name_lower: skill.name.to_lowercase(),
+                        description: skill.description,
+                        source: "skill".into(),
+                    });
+                }
+            }
+            Err(err) => tracing::debug!("{} skills unavailable: {err}", id.as_str()),
+        }
+        if !commands.is_empty() {
+            self.attached_commands.insert(id.clone(), commands);
+        }
+        let _ = cx;
     }
 
     pub fn harness_enabled(&self, harness: &HarnessId) -> bool {

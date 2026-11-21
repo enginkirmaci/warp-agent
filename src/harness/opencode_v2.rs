@@ -24,6 +24,10 @@ use super::types::*;
 const INFO_TIMEOUT: Duration = Duration::from_secs(10);
 const START_POLLS: usize = 50;
 const START_POLL_INTERVAL: Duration = Duration::from_millis(250);
+/// The app's draft title. A session created with it must stay untitled on
+/// the service: v2 treats an explicit title as final and never auto-names
+/// that session, so the chat would keep "New chat" forever.
+const DRAFT_TITLE: &str = "New chat";
 
 /// The attached opencode v2 adapter.
 pub struct OpenCodeV2Harness {
@@ -397,7 +401,9 @@ impl Harness for OpenCodeV2Harness {
 
     fn create_session(&mut self, spec: NewSession) -> Result<SessionSummary, HarnessError> {
         let mut body = json!({});
-        if let Some(title) = spec.title {
+        // only a real title rides along; the draft placeholder is left out
+        // so the service can generate one and announce it as session.renamed
+        if let Some(title) = spec.title.filter(|title| title != DRAFT_TITLE) {
             body["title"] = json!(title);
         }
         if let Some(parent) = spec.parent {
@@ -1124,7 +1130,7 @@ fn session_summary(value: &Value) -> Option<SessionSummary> {
         title: value
             .get("title")
             .and_then(Value::as_str)
-            .unwrap_or("New chat")
+            .unwrap_or(DRAFT_TITLE)
             .to_string(),
         created_ms: value
             .pointer("/time/created")
@@ -2019,6 +2025,33 @@ mod tests {
     }
 
     #[test]
+    fn a_draft_title_is_left_to_the_service_to_generate() {
+        let _lock = lock_home();
+        let xdg = XdgGuard::new("draft-title");
+        let server = FakeV2::start("secret");
+        xdg.write_registration(&server.url, "secret");
+        let mut harness = v2_harness(&fake_cli(xdg.dir(), &server.url, false));
+        harness.start().expect("attaches to the fake service");
+
+        harness
+            .create_session(NewSession {
+                title: Some(DRAFT_TITLE.into()),
+                ..Default::default()
+            })
+            .expect("create");
+
+        let create = server
+            .requests()
+            .into_iter()
+            .find(|request| request.starts_with("POST /api/session "))
+            .expect("the create request");
+        assert!(
+            !create.contains("\"title\""),
+            "the draft title must not ride the create, or v2 never auto-names the chat: {create}"
+        );
+    }
+
+    #[test]
     fn a_prompt_streams_text_reasoning_tools_and_idle() {
         let _lock = lock_home();
         let xdg = XdgGuard::new("stream");
@@ -2392,6 +2425,30 @@ mod tests {
             Some(HarnessEvent::SessionStatus {
                 session: SessionId::new("s1"),
                 state: SessionState::Idle,
+            })
+        );
+    }
+
+    #[test]
+    fn a_renamed_session_reaches_the_store_as_a_title_change() {
+        let mut state = V2StreamState::default();
+        // the envelope the live 2.3.2 service sends after the first turn
+        // auto-names a chat, and when the user renames one
+        let renamed = json!({
+            "id": "evt_1",
+            "created": 1,
+            "type": "session.renamed",
+            "location": { "directory": "/tmp/work" },
+            "data": { "sessionID": "s1", "title": "Generated title" },
+            "durable": { "aggregateID": "s1", "seq": 15, "version": 1 }
+        });
+        assert_eq!(
+            translate_v2_event(&renamed, &mut state),
+            Some(HarnessEvent::SessionChanged {
+                session: SessionId::new("s1"),
+                title: Some("Generated title".into()),
+                parent: None,
+                agent: None,
             })
         );
     }

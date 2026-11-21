@@ -35,6 +35,13 @@ pub fn run() {
     let _log_guard = logging::initialize();
     services::install_panic_hook();
 
+    // A previous run killed with SIGTERM/SIGKILL leaves its managed
+    // `dsh web` / `opencode serve` children behind as orphans (PPID 1). Stop
+    // them before this run starts its own. Only exact managed argv shapes with
+    // PPID 1 are touched (see `oc::reap_stale_children`); a sweep failure is
+    // logged and never blocks startup.
+    oc::reap_stale_children();
+
     // single instance: a live door owner takes the launch folders (a bare
     // liveness probe when there are none) and this launch exits
     let folders: Vec<String> = std::env::args()

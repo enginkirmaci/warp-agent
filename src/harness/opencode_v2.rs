@@ -102,7 +102,12 @@ impl OpenCodeV2Harness {
         };
         let stop = Arc::new(AtomicBool::new(false));
         let thread_stop = stop.clone();
-        let http = self.http.clone();
+        // the SSE stream is long-lived: the shared client's 10 s total
+        // timeout killed it every reconnect and lost the turn's events
+        let http = reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(10))
+            .build()
+            .unwrap_or_default();
         let tx = self.tx.clone();
         let handle = self.runtime.spawn(async move {
             event_pump(http, base, password, tx, thread_stop).await;
@@ -461,7 +466,12 @@ impl Harness for OpenCodeV2Harness {
 
     fn send_prompt(&mut self, session: &SessionId, prompt: Prompt) -> Result<(), HarnessError> {
         let mut body = json!({ "text": prompt.text });
-        if let Some(agent) = prompt.choice.agent {
+        if let Some(agent) = prompt.choice.agent
+            && self
+                .agents()
+                .map(|agents| agents.iter().any(|known| known.name == agent))
+                .unwrap_or(false)
+        {
             body["agents"] = json!([agent]);
         }
         self.block_on(self.request(
@@ -1257,6 +1267,19 @@ fn translate_v2_event(value: &Value, state: &mut V2StreamState) -> Option<Harnes
         "session.idle" => Some(HarnessEvent::SessionStatus {
             session: event_session(data)?,
             state: SessionState::Idle,
+        }),
+        // the live v2 service ends a turn with execution.* rather than
+        // session.idle; without this the tile stayed "Running" after the
+        // answer had landed
+        "session.execution.succeeded" | "session.execution.cancelled" => {
+            Some(HarnessEvent::SessionStatus {
+                session: event_session(data)?,
+                state: SessionState::Idle,
+            })
+        }
+        "session.execution.started" => Some(HarnessEvent::SessionStatus {
+            session: event_session(data)?,
+            state: SessionState::Busy,
         }),
         "session.text.delta" => text_part(state, data, false),
         "session.reasoning.delta" => text_part(state, data, true),
@@ -2357,6 +2380,18 @@ mod tests {
             Some(HarnessEvent::CommandOutput {
                 session: SessionId::new("s1"),
                 result: Ok("Skill activated: deploy".into()),
+            })
+        );
+
+        let ended = json!({
+            "type": "session.execution.succeeded",
+            "data": { "sessionID": "s1" }
+        });
+        assert_eq!(
+            translate_v2_event(&ended, &mut state),
+            Some(HarnessEvent::SessionStatus {
+                session: SessionId::new("s1"),
+                state: SessionState::Idle,
             })
         );
     }

@@ -165,10 +165,14 @@ impl Store {
             }
             HarnessEvent::PartSnapshot { part } => {
                 let ws_key = self.harness_ws_key(harness, Some(&part.session), directory)?;
-                if matches!(&part.payload, PartPayload::StepStart)
-                    && let Some(tile_key) = self.tile_by_session.get(part.session.as_str()).cloned()
-                {
-                    self.tile_note(&tile_key, "Working…", false, cx);
+                if let Some(tile_key) = self.tile_by_session.get(part.session.as_str()).cloned() {
+                    match &part.payload {
+                        PartPayload::StepStart => self.tile_note(&tile_key, "Working…", false, cx),
+                        PartPayload::StepFinish => {
+                            self.tile_note_remove(&tile_key, "Working…", cx);
+                        }
+                        _ => {}
+                    }
                 }
                 self.stream_event(
                     ws_key,
@@ -568,6 +572,14 @@ mod tests {
                     }),
                 },
             },
+            HarnessEvent::PartSnapshot {
+                part: PartSnapshot {
+                    id: "step2".into(),
+                    session: session.clone(),
+                    message_id: "m1".into(),
+                    payload: PartPayload::StepFinish,
+                },
+            },
             HarnessEvent::QuestionAsked {
                 request: FormRequest {
                     id: "q1".into(),
@@ -723,7 +735,7 @@ mod tests {
                 ChatItem::AssistantText { text, meta_label, .. }
                     if text == "hello from the fake, streamed" && meta_label.contains("↑10")
             )));
-            assert!(tile.items.iter().any(|item| matches!(
+            assert!(!tile.items.iter().any(|item| matches!(
                 item.as_ref(),
                 ChatItem::SystemNote { text, .. } if text == "Working…"
             )));

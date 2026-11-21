@@ -2373,6 +2373,17 @@ impl Store {
         let Some(harness) = crate::harness::workspace_harness() else {
             return;
         };
+        // a disabled harness must not be started behind the user's back:
+        // opening a workspace used to spawn the managed v1 server even after
+        // its toggle was off, which then crash-restarted forever
+        if !self.harness_enabled(&harness) {
+            tracing::info!(
+                "not starting the {} server for {}: the harness is disabled",
+                harness.as_str(),
+                ws.name
+            );
+            return;
+        }
         let executable = self.settings.harness_executable(harness.as_str());
         tracing::info!("starting server for {}", ws.name);
         self.net.send(NetCommand::StartServer {
@@ -3823,5 +3834,63 @@ mod harness_settings_tests {
             )));
             assert!(!store.is_busy("s1"));
         });
+    }
+
+    #[gpui_kit::gpui::test]
+    fn a_v2_draft_does_not_inherit_the_dsh_agent(cx: &mut gpui::TestAppContext) {
+        let _lock = lock_home();
+        let _home = HomeGuard::new();
+        let store = cx.update(Store::for_probe);
+        cx.update(|cx| {
+            store.update(cx, |store, cx| {
+                store
+                    .set_harness_enabled("opencode-v2", true, cx)
+                    .expect("v2 can be enabled");
+                store
+                    .set_harness_enabled("opencode", false, cx)
+                    .expect("dsh keeps the app usable");
+                store.settings.default_harness = HarnessId::from("opencode-v2");
+                store.ui.agent = Some("standard".into());
+                let tile = store.create_tile(cx);
+                assert_eq!(tile.harness, HarnessId::from("opencode-v2"));
+                assert!(
+                    tile.selected_agent.is_none(),
+                    "v2 must not carry dsh's standard agent"
+                );
+            });
+        });
+    }
+
+    #[gpui_kit::gpui::test]
+    fn a_disabled_workspace_harness_does_not_start_its_server(cx: &mut gpui::TestAppContext) {
+        let _lock = lock_home();
+        let home = HomeGuard::new();
+        let folder = home.home.join("workspace");
+        std::fs::create_dir_all(&folder).expect("workspace");
+        let folder = folder.to_string_lossy().to_string();
+        let (store, net) = cx.update(Store::for_probe_with_net);
+        cx.update(|cx| {
+            store.update(cx, |store, cx| {
+                store.add_workspace(&folder, cx);
+                store
+                    .set_harness_enabled("opencode", false, cx)
+                    .expect("dsh keeps the app usable");
+            });
+        });
+        while net.try_recv().is_ok() {}
+
+        cx.update(|cx| {
+            store.update(cx, |store, cx| store.start_workspace(&folder, cx));
+        });
+        let mut starts = Vec::new();
+        while let Ok(command) = net.try_recv() {
+            if let NetCommand::StartServer { harness, .. } = command {
+                starts.push(harness);
+            }
+        }
+        assert!(
+            starts.is_empty(),
+            "a disabled workspace harness must not be started: {starts:?}"
+        );
     }
 }

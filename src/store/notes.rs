@@ -48,6 +48,17 @@ impl Store {
         self.repaint(cx);
     }
 
+    /// Drops a note the typed stream added for a transient step. The step
+    /// note is status, not history: it must not stay behind after the step.
+    pub fn tile_note_remove(&mut self, tile_key: &str, text: &str, cx: &mut Context<Self>) {
+        if let Some(tile) = self.tile_by_key_mut(tile_key) {
+            tile.items.retain(|item| {
+                !matches!(item.as_ref(), ChatItem::SystemNote { text: note, .. } if note == text)
+            });
+        }
+        self.repaint(cx);
+    }
+
     /// Create or evolve the workspace's single "connection lost" note. A drop
     /// within oc::RECONNECT_RESET_AFTER of the previous event rewrites that
     /// note in place (its attempt count climbs); an older drop starts a new

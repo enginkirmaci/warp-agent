@@ -186,18 +186,12 @@ impl ServerProcess {
         // for the console-subsystem child process
         #[cfg(windows)]
         command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
-        // A process quit races the net thread's StopServer: on Linux the
-        // child must die with us instead of surviving as an orphan that keeps
-        // its port and memory (audit B4).
-        #[cfg(target_os = "linux")]
-        unsafe {
-            command.pre_exec(|| {
-                if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) != 0 {
-                    return Err(std::io::Error::last_os_error());
-                }
-                Ok(())
-            });
-        }
+        // No PR_SET_PDEATHSIG here. Linux delivers that signal when the
+        // *parent thread* exits, and this start runs on a transient
+        // spawn_blocking worker: the worker retiring killed every managed
+        // child ~20 s after launch (opencode restarts and dsh connection
+        // resets). The app owns the child through `kill_on_drop` and the
+        // net thread's StopServer; that is the lifetime that matches the app.
 
         let mut child = command
             .spawn()
@@ -3016,5 +3010,56 @@ mod tests {
         )))
         .unwrap_err();
         assert!(err.to_string().contains("opencode is not running"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_managed_child_outlives_the_spawn_blocking_worker() {
+        fn args(_port: u16) -> Vec<String> {
+            vec![
+                "-c".into(),
+                "echo 'http://127.0.0.1:1/?token=abc'; sleep 5".into(),
+            ]
+        }
+        fn env() -> Vec<(&'static str, &'static str)> {
+            Vec::new()
+        }
+        fn capture(line: &str) -> Option<String> {
+            crate::dsh::token_from_line(line).map(str::to_string)
+        }
+        let spec = crate::harness::LaunchSpec {
+            args,
+            env,
+            readiness: crate::harness::Readiness::LaunchCredential,
+            timeout: Duration::from_secs(5),
+            attach_healthy: false,
+            capture_line: Some(capture),
+            timeout_message: "fake child did not print its token",
+        };
+        // the real start path runs on a spawn_blocking worker, and Linux's
+        // parent-death signal is tied to that thread: the child must survive
+        // the worker retiring, or every managed server dies ~20 s in
+        let process = std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .expect("runtime");
+            runtime.block_on(ServerProcess::start(spec, "sh", ".", 0, |_| {}))
+        })
+        .join()
+        .expect("start thread")
+        .expect("fake child starts");
+
+        std::thread::sleep(Duration::from_millis(500));
+        let alive = process
+            .child
+            .lock()
+            .expect("child lock")
+            .as_mut()
+            .and_then(|child| child.try_wait().ok())
+            .is_some_and(|status| status.is_none());
+        let mut process = process;
+        process.stop();
+        assert!(alive, "the managed child was killed with its spawn thread");
     }
 }

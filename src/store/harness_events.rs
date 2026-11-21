@@ -11,7 +11,7 @@ use std::path::Path;
 use super::Store;
 use crate::harness::bridge;
 use crate::harness::{
-    FormFieldKind, HarnessError, HarnessEvent, HarnessId, SessionId, SessionState,
+    FormFieldKind, HarnessError, HarnessEvent, HarnessId, PartPayload, SessionId, SessionState,
 };
 use crate::oc::{AgentInfo, CommandInfo, ModelInfo, UiEvent};
 use gpui::Context;
@@ -165,6 +165,11 @@ impl Store {
             }
             HarnessEvent::PartSnapshot { part } => {
                 let ws_key = self.harness_ws_key(harness, Some(&part.session), directory)?;
+                if matches!(&part.payload, PartPayload::StepStart)
+                    && let Some(tile_key) = self.tile_by_session.get(part.session.as_str()).cloned()
+                {
+                    self.tile_note(&tile_key, "Working…", false, cx);
+                }
                 self.stream_event(
                     ws_key,
                     json!({
@@ -535,6 +540,14 @@ mod tests {
             },
             HarnessEvent::PartSnapshot {
                 part: PartSnapshot {
+                    id: "step1".into(),
+                    session: session.clone(),
+                    message_id: "m1".into(),
+                    payload: PartPayload::StepStart,
+                },
+            },
+            HarnessEvent::PartSnapshot {
+                part: PartSnapshot {
                     id: "tool1".into(),
                     session: session.clone(),
                     message_id: "m1".into(),
@@ -709,6 +722,10 @@ mod tests {
                 item.as_ref(),
                 ChatItem::AssistantText { text, meta_label, .. }
                     if text == "hello from the fake, streamed" && meta_label.contains("↑10")
+            )));
+            assert!(tile.items.iter().any(|item| matches!(
+                item.as_ref(),
+                ChatItem::SystemNote { text, .. } if text == "Working…"
             )));
             assert!(tile.items.iter().any(|item| matches!(
                 item.as_ref(),

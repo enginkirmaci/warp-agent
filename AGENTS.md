@@ -4,6 +4,9 @@ Read [`../../AGENTS.md`](../../AGENTS.md) first. This file adds only the
 app-specific facts. The user-facing description is in
 [`README.md`](README.md).
 
+Design plans live in `plans/`: a plan is deleted when its work lands, and the
+rules that still matter move into `README.md` or this file.
+
 ## Shape
 
 warp-agent is a library (`warp_agent`) plus a thin binary. `src/lib.rs` owns
@@ -142,8 +145,9 @@ server and Warp Station is the client. Endpoint files are
 
 `src/flow.rs` is the app's client of warp-flow's own loopback door
 (`~/.warp/flow/ipc.port` + `ipc.token`, protocol 1); the contract is
-[`../../README.md#cross-app-contracts`](../../README.md#cross-app-contracts)
-and [ADR-0012](../../docs/adr/0012-warp-flow-publishes-a-door-of-its-own.md),
+[warp-suite's cross-app
+contracts](https://github.com/enginkirmaci/warp-suite/blob/main/README.md#cross-app-contracts)
+and [ADR-0012](https://github.com/enginkirmaci/warp-suite/blob/main/docs/adr/0012-warp-flow-publishes-a-door-of-its-own.md),
 and warp-flow owns it. Two connections: one for `runs`, `run`, `answer`,
 `pause`, `resume`, `abandon`; one subscribed connection for `subscribe`'s
 pushes. `runs` is pull-only, so it is polled every 3 s; a `{"push": "board"}`

@@ -72,6 +72,9 @@ A local build is `cargo build --release`. The assets stay here:
   with status and expandable details/diffs.
 - **Queued messages**: Enter while a turn runs queues the message (Steer /
   Edit / Remove); it is sent automatically when the session goes idle.
+- **Slash commands from a fresh chat**: `/compact` included — dsh fills the
+  menu from `skills/list`, opencode from an app-owned command that summarizes
+  the session; both work before the first turn is sent.
 - **Permission cards** with Allow / Always / Deny and an auto-allow countdown
   (quick during working hours, long at lunch/off hours; *allow immediately*
   skips the wait). `question` tool asks render as answer cards with options and

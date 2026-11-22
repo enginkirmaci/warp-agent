@@ -292,6 +292,16 @@ pub struct SubagentInfo {
     pub agent: String,
 }
 
+/// A subagent chat the session list named. The sidebar lists only top-level
+/// chats, so a parent's Agents section is where a finished subagent transcript
+/// stays reachable; this row carries the ordering the listing gave it.
+#[derive(Clone, Debug)]
+pub struct SubagentChat {
+    pub session_id: String,
+    pub parent_session_id: String,
+    pub updated_ms: i64,
+}
+
 /// One live chat in the title bar's running panel, worded for display. The
 /// chip shows the only job's title when one runs; the panel lists every job
 /// in started order.
@@ -397,6 +407,10 @@ pub struct Store {
     variants_by_model: HashMap<String, Vec<String>>,
     context_limit_by_model: HashMap<String, i64>,
     subagent_by_session: HashMap<String, SubagentInfo>,
+    /// parent session id → its known subagent chats, newest first. Kept from
+    /// `session/list` (which still names children after they finish) so an
+    /// open parent can offer them even though the sidebar cannot.
+    subagent_chats: HashMap<String, Vec<SubagentChat>>,
     running_subagents: HashSet<String>,
     /// auto-allow countdowns keyed by permission id
     countdowns: HashMap<String, i64>,
@@ -623,6 +637,7 @@ impl Store {
             variants_by_model,
             context_limit_by_model,
             subagent_by_session: HashMap::new(),
+            subagent_chats: HashMap::new(),
             running_subagents: HashSet::new(),
             countdowns: HashMap::new(),
             prompt_history: Vec::new(),
@@ -3368,6 +3383,90 @@ mod command_flow_tests {
     /// A settled assistant message stamps both ends of its window, so the
     /// tile keeps its generated-token pace for the header readout; a later
     /// streaming snapshot must not wipe the number that is already there.
+    ///
+    /// A listed subagent chat is not a top-level chat: the sidebar drops it and
+    /// the parent's Agents section is what keeps it reachable, live or done.
+    #[gpui_kit::gpui::test]
+    fn a_subagent_chat_leaves_the_sidebar_but_stays_in_the_parent_agents(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let _lock = super::test_support::lock_home();
+        let home = HomeGuard::new();
+        let folder = home.home.join("workspace");
+        std::fs::create_dir_all(&folder).expect("workspace");
+        let folder = folder.to_string_lossy().to_string();
+        let store = cx.update(Store::for_probe);
+        let key = cx.update(|cx| {
+            store.update(cx, |store, cx| {
+                store.add_workspace(&folder, cx);
+                if let Some(ws) = store.workspace_by_path_mut(&folder) {
+                    // an earlier build persisted the child as a sidebar chat
+                    ws.state.sessions.push("session-root".into());
+                    ws.state.sessions.push("session-child".into());
+                }
+                store.seed_probe_tile(&folder, "session-root", "Root chat", Vec::new(), false, cx)
+            })
+        });
+
+        store.update(cx, |store, cx| {
+            store.on_net_event(
+                UiEvent::SessionsLoaded {
+                    ws_key: folder.clone(),
+                    shared: true,
+                    result: Ok(vec![
+                        SessionInfo {
+                            id: "session-root".into(),
+                            title: "Root chat".into(),
+                            updated_ms: 2,
+                            created_ms: 1,
+                            parent_id: None,
+                        },
+                        SessionInfo {
+                            id: "session-child".into(),
+                            title: "Child chat".into(),
+                            updated_ms: 3,
+                            created_ms: 1,
+                            parent_id: Some("session-root".into()),
+                        },
+                    ]),
+                },
+                cx,
+            );
+        });
+
+        store.read_with(cx, |store, _| {
+            assert!(
+                store.sessions.iter().all(|chat| chat.id != "session-child"),
+                "the child is not a sidebar chat"
+            );
+            let ws = store
+                .workspaces
+                .iter()
+                .find(|ws| ws.folder_path() == folder)
+                .expect("workspace");
+            assert!(
+                !ws.state.sessions.iter().any(|id| id == "session-child"),
+                "the persisted list drops the child"
+            );
+            let tile = store.tile_by_key(&key).expect("parent tile");
+            assert_eq!(tile.tile_agents.len(), 1, "the parent lists its child");
+            assert_eq!(tile.tile_agents[0].session_id, "session-child");
+            assert!(!tile.tile_agents[0].is_running);
+            assert_eq!(tile.tile_agents_summary(), "1 done");
+        });
+
+        // the child's own status event turns its Agents row live
+        store.update(cx, |store, cx| {
+            store.set_subagent_running("session-child", true);
+            store.repaint(cx);
+        });
+        store.read_with(cx, |store, _| {
+            let tile = store.tile_by_key(&key).expect("parent tile");
+            assert!(tile.tile_agents.iter().all(|agent| agent.is_running));
+            assert_eq!(tile.tile_agents_summary(), "1 running");
+        });
+    }
+
     #[gpui_kit::gpui::test]
     fn a_settled_reply_sets_the_header_pace(cx: &mut gpui::TestAppContext) {
         let _lock = super::test_support::lock_home();

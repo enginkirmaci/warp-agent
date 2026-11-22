@@ -16,12 +16,47 @@ impl Store {
             .into_iter()
             .filter(|s| !self.deleted_sessions.contains(&s.id))
             .collect();
+        // A subagent chat is not a top-level chat: file it under its parent for
+        // its Agents section (the only place it stays reachable) and keep it
+        // out of every sidebar list below. dsh's own web client draws the same
+        // line, and opencode's CLI lists top-level sessions only.
+        self.note_subagent_chats(ws_key, &sessions);
+        if is_shared_list {
+            for s in &sessions {
+                self.ui.harness_by_session.insert(
+                    s.id.clone(),
+                    crate::harness::shared_server_id().unwrap_or_default(),
+                );
+            }
+        }
+        let children: HashSet<String> = sessions
+            .iter()
+            .filter(|s| s.parent_id.is_some())
+            .map(|s| s.id.clone())
+            .collect();
+        if !children.is_empty() {
+            // an earlier build listed children as chats: drop those persisted
+            // rows without closing a tile a person may have opened from the
+            // parent's Agents section
+            for ws in &mut self.workspaces {
+                ws.chats.retain(|chat| !children.contains(&chat.id));
+            }
+            self.sessions.retain(|item| !children.contains(&item.id));
+            if let Some(ws) = self.workspace_by_path_mut(ws_key) {
+                ws.state.sessions.retain(|id| !children.contains(id));
+            }
+        }
         // keep the subagent→parent map warm from the listing too
         for s in &sessions {
             if let Some(parent_id) = &s.parent_id {
                 self.track_session_info(Some(&s.id), Some(parent_id), None);
             }
         }
+        self.refresh_tile_agents();
+        let sessions: Vec<SessionInfo> = sessions
+            .into_iter()
+            .filter(|s| s.parent_id.is_none())
+            .collect();
         // a shared-server list's entries are its chats by definition: mark them and
         // track the ones this workspace doesn't know yet (revealed here by
         // cwd, e.g. created from another window)
@@ -41,12 +76,6 @@ impl Store {
                     .cloned()
                     .collect()
             };
-            for s in &sessions {
-                self.ui.harness_by_session.insert(
-                    s.id.clone(),
-                    crate::harness::shared_server_id().unwrap_or_default(),
-                );
-            }
             if !unknown.is_empty() {
                 if let Some(ws) = self.workspace_by_path_mut(ws_key) {
                     for s in &unknown {
@@ -119,6 +148,7 @@ impl Store {
                 existing
                     .into_iter()
                     .filter(|chat| self.session_is_shared(&chat.id) != is_shared_list)
+                    .filter(|chat| !self.is_subagent_chat(&chat.id))
                     .collect()
             };
             for chat in keep {
@@ -209,6 +239,7 @@ impl Store {
             existing
                 .into_iter()
                 .filter(|item| self.session_is_shared(&item.id) != is_shared_list)
+                .filter(|item| !self.is_subagent_chat(&item.id))
                 .collect()
         };
         for item in keep {
@@ -260,6 +291,50 @@ impl Store {
         self.sync_workspace_chats(cx);
         self.save_state();
         self.repaint(cx);
+    }
+
+    /// Files every subagent session a listing named under its parent, newest
+    /// first, so the parent's Agents section can reopen a finished child even
+    /// though the sidebar lists top-level chats only.
+    fn note_subagent_chats(&mut self, ws_key: &str, sessions: &[SessionInfo]) {
+        for session in sessions {
+            let Some(parent_id) = &session.parent_id else {
+                continue;
+            };
+            // a child never gets a sidebar row; its tile and its Agents row
+            // read the title from this map. The workspace mapping lets a child
+            // tab persist across launches and route back to its parent's server.
+            self.title_by_session
+                .insert(session.id.clone(), session.title.clone());
+            self.workspace_by_session
+                .entry(session.id.clone())
+                .or_insert_with(|| ws_key.to_string());
+            let entry = SubagentChat {
+                session_id: session.id.clone(),
+                parent_session_id: parent_id.clone(),
+                updated_ms: session.updated_ms,
+            };
+            let children = self.subagent_chats.entry(parent_id.clone()).or_default();
+            match children
+                .iter_mut()
+                .find(|child| child.session_id == session.id)
+            {
+                Some(child) => *child = entry,
+                None => children.push(entry),
+            }
+            children.sort_by_key(|child| std::cmp::Reverse(child.updated_ms));
+        }
+    }
+
+    /// Whether a session is a subagent child rather than a top-level chat. Both
+    /// maps answer: the parent link outlives a stopped workspace runtime, and
+    /// the listed children carry chats whose mapping an earlier stop dropped.
+    fn is_subagent_chat(&self, session_id: &str) -> bool {
+        self.subagent_by_session.contains_key(session_id)
+            || self
+                .subagent_chats
+                .values()
+                .any(|children| children.iter().any(|child| child.session_id == session_id))
     }
 
     pub fn sort_sessions(&mut self) {
@@ -327,6 +402,11 @@ impl Store {
         }
         if !changed {
             return;
+        }
+        // a subagent's Agents row carries its title; a rename of the child
+        // must reach the parent's flyout
+        if self.subagent_by_session.contains_key(session_id) {
+            self.refresh_tile_agents();
         }
         let selected = path
             .as_deref()
@@ -509,6 +589,14 @@ impl Store {
         self.user_stopped_by_session.remove(id);
         self.workspace_by_session.remove(id);
         self.hidden_sessions.remove(id);
+        // a deleted parent takes its Agents section with it; a deleted child
+        // leaves its parent's list
+        self.subagent_chats.remove(id);
+        for children in self.subagent_chats.values_mut() {
+            children.retain(|child| child.session_id != id);
+        }
+        self.subagent_by_session.remove(id);
+        self.refresh_tile_agents();
         // dsh's `session/list` keeps naming archived chats after a restart;
         // remembering the id here is what keeps a deleted chat deleted
         self.deleted_sessions.insert(id.to_string());
@@ -586,7 +674,10 @@ impl Store {
                 .iter()
                 .find(|w| w.folder_path() == ws_key)
                 .map(|w| w.state.sessions.contains(&id))
-                .unwrap_or(false);
+                .unwrap_or(false)
+                // a restored subagent tab has no sidebar row; its parent link
+                // is the whole of what makes it known
+                || self.subagent_by_session.contains_key(&id);
             if !known || self.tile_by_session.contains_key(&id) {
                 continue;
             }

@@ -121,6 +121,7 @@ impl Store {
                     workspace: self.workspace_name_for(session_id),
                     title: self.title_for(session_id),
                     is_subagent: false,
+                    is_running: true,
                     needs_attention: self.pending_by_session.contains_key(session_id),
                 });
             }
@@ -237,6 +238,7 @@ impl Store {
                     workspace: self.workspace_name_for(child_id),
                     title,
                     is_subagent: true,
+                    is_running: true,
                     needs_attention: false,
                 });
             }
@@ -246,17 +248,50 @@ impl Store {
         self.refresh_tile_agents();
     }
 
-    /// Mirrors the owner's running set into each chat's flyout: only rows whose
-    /// parent is that session (the subagent runs it spawned).
+    /// Mirrors the owner's running set and its listed subagent chats into each
+    /// chat's flyout: only rows whose parent is that session. A finished child
+    /// keeps a row so its transcript stays reachable from the parent now that
+    /// the sidebar lists top-level chats only.
     pub(super) fn refresh_tile_agents(&mut self) {
-        for tile in &mut self.open_tiles {
-            tile.tile_agents = self
-                .running_agents
-                .iter()
-                .filter(|r| r.parent_session_id.as_deref() == tile.session_id.as_deref())
-                .cloned()
-                .collect();
+        let rows: Vec<Vec<RunningAgentItem>> = self
+            .open_tiles
+            .iter()
+            .map(|tile| self.tile_agent_rows(tile.session_id.as_deref()))
+            .collect();
+        for (tile, rows) in self.open_tiles.iter_mut().zip(rows) {
+            tile.tile_agents = rows;
         }
+    }
+
+    /// The flyout rows of one chat: live subagent runs first (they carry the
+    /// attention and stop state), then the finished children the session
+    /// listing named, newest first.
+    fn tile_agent_rows(&self, parent: Option<&str>) -> Vec<RunningAgentItem> {
+        let Some(parent) = parent else {
+            return Vec::new();
+        };
+        let mut rows: Vec<RunningAgentItem> = self
+            .running_agents
+            .iter()
+            .filter(|row| row.parent_session_id.as_deref() == Some(parent))
+            .cloned()
+            .collect();
+        let known = self.subagent_chats.get(parent).cloned().unwrap_or_default();
+        for child in known {
+            if rows.iter().any(|row| row.session_id == child.session_id) {
+                continue;
+            }
+            rows.push(RunningAgentItem {
+                session_id: child.session_id.clone(),
+                parent_session_id: Some(child.parent_session_id.clone()),
+                workspace: self.workspace_name_for(&child.session_id),
+                title: self.title_for(&child.session_id),
+                is_subagent: true,
+                is_running: false,
+                needs_attention: false,
+            });
+        }
+        rows
     }
 
     pub(super) fn drop_subagent_rows(&mut self, folder_path: &str) {

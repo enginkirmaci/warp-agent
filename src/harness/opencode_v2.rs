@@ -1161,11 +1161,17 @@ fn session_summary(value: &Value) -> Option<SessionSummary> {
             .and_then(Value::as_i64)
             .or_else(|| value.get("createdAt").and_then(Value::as_i64))
             .unwrap_or(0),
-        parent: value
-            .get("parentID")
-            .and_then(Value::as_str)
-            .or_else(|| value.get("parentId").and_then(Value::as_str))
-            .map(SessionId::new),
+        // a forked chat names its source in `fork` (and may also carry
+        // parentID); it is a top-level chat, not a subagent child, so the
+        // store must not file it under the parent's Agents section
+        parent: match value.get("fork") {
+            Some(_) => None,
+            None => value
+                .get("parentID")
+                .and_then(Value::as_str)
+                .or_else(|| value.get("parentId").and_then(Value::as_str))
+                .map(SessionId::new),
+        },
         directory: value
             .pointer("/location/directory")
             .and_then(Value::as_str)
@@ -1973,6 +1979,33 @@ mod tests {
 
     fn v2_harness(cli: &str) -> OpenCodeV2Harness {
         OpenCodeV2Harness::new(HarnessConfig::new(cli))
+    }
+
+    #[test]
+    fn a_v2_fork_is_top_level_but_a_subagent_child_is_parented() {
+        let fork = session_summary(&json!({
+            "id": "ses-fork",
+            "title": "Forked chat",
+            "parentID": "ses-source",
+            "fork": { "sessionID": "ses-source", "boundary": "turn" },
+            "time": { "updated": 9 },
+        }))
+        .expect("a forked session parses");
+        assert_eq!(
+            fork.parent, None,
+            "a fork is a top-level chat, not a subagent child"
+        );
+        let child = session_summary(&json!({
+            "id": "ses-child",
+            "title": "Child chat",
+            "parentID": "ses-source",
+            "time": { "updated": 9 },
+        }))
+        .expect("a subagent child parses");
+        assert_eq!(
+            child.parent.as_ref().map(SessionId::as_str),
+            Some("ses-source")
+        );
     }
 
     #[test]

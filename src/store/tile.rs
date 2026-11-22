@@ -14,6 +14,9 @@ pub struct RunningAgentItem {
     pub workspace: String,
     pub title: String,
     pub is_subagent: bool,
+    /// The agent holds a live turn. A finished subagent keeps its row (so its
+    /// chat stays reachable from the parent's Agents section) but not this.
+    pub is_running: bool,
     pub needs_attention: bool,
 }
 
@@ -264,7 +267,17 @@ impl ChatTile {
         !self.tile_agents.is_empty()
     }
     pub fn tile_agents_summary(&self) -> String {
-        format!("{} running", self.tile_agents.len())
+        let running = self
+            .tile_agents
+            .iter()
+            .filter(|agent| agent.is_running)
+            .count();
+        let done = self.tile_agents.len().saturating_sub(running);
+        match (running, done) {
+            (0, done) => format!("{done} done"),
+            (running, 0) => format!("{running} running"),
+            (running, done) => format!("{running} running · {done} done"),
+        }
     }
     pub fn has_tasks_or_agents(&self) -> bool {
         self.has_tasks() || self.has_tile_agents()

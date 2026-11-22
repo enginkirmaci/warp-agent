@@ -3765,12 +3765,22 @@ impl TileView {
                                             });
                                         }
                                     })
-                                    .child(div().size(px(5.)).rounded_full().bg(accent))
+                                    .child(div().size(px(5.)).rounded_full().bg(
+                                        if agent.is_running {
+                                            accent
+                                        } else {
+                                            theme::text_muted()
+                                        },
+                                    ))
                                     .when(agent.is_subagent, |d| {
                                         d.child(crate::ui::icon(
                                             "icons/play.svg",
                                             px(fonts.icon_nano),
-                                            accent,
+                                            if agent.is_running {
+                                                accent
+                                            } else {
+                                                theme::text_muted()
+                                            },
                                         ))
                                     })
                                     .when(agent.needs_attention, |d| {
@@ -3809,36 +3819,38 @@ impl TileView {
                                         px(fonts.icon_tiny),
                                         theme::text_muted(),
                                     ))
-                                    .child(
-                                        div()
-                                            .id(gpui::ElementId::NamedInteger(
-                                                "stop-agent".into(),
-                                                TileView::hash(&sid_stop),
-                                            ))
-                                            .role(Role::Button)
-                                            .aria_label(SharedString::from(format!(
-                                                "Stop agent {}",
-                                                agent.title
-                                            )))
-                                            .cursor_pointer()
-                                            .p_1()
-                                            .rounded_sm()
-                                            .hover(|s| s.bg(theme::HOVER))
-                                            .on_click({
-                                                let store = store_handle.clone();
-                                                move |_, _, cx| {
-                                                    cx.stop_propagation(); // the row under this button must not open
-                                                    store.update(cx, |s, cx| {
-                                                        s.stop_running(&sid_stop, cx)
-                                                    });
-                                                }
-                                            })
-                                            .child(crate::ui::icon(
-                                                "icons/stop.svg",
-                                                px(fonts.icon_small),
-                                                theme::text_muted(),
-                                            )),
-                                    ),
+                                    .when(agent.is_running, |d| {
+                                        d.child(
+                                            div()
+                                                .id(gpui::ElementId::NamedInteger(
+                                                    "stop-agent".into(),
+                                                    TileView::hash(&sid_stop),
+                                                ))
+                                                .role(Role::Button)
+                                                .aria_label(SharedString::from(format!(
+                                                    "Stop agent {}",
+                                                    agent.title
+                                                )))
+                                                .cursor_pointer()
+                                                .p_1()
+                                                .rounded_sm()
+                                                .hover(|s| s.bg(theme::HOVER))
+                                                .on_click({
+                                                    let store = store_handle.clone();
+                                                    move |_, _, cx| {
+                                                        cx.stop_propagation(); // the row under this button must not open
+                                                        store.update(cx, |s, cx| {
+                                                            s.stop_running(&sid_stop, cx)
+                                                        });
+                                                    }
+                                                })
+                                                .child(crate::ui::icon(
+                                                    "icons/stop.svg",
+                                                    px(fonts.icon_small),
+                                                    theme::text_muted(),
+                                                )),
+                                        )
+                                    }),
                             );
                         }
                         list

@@ -160,6 +160,13 @@ struct Inner {
     /// outbound WS frames (open/cancel) → the pump's writer half
     ws_tx: async_channel::Sender<String>,
     pub sessions: Mutex<HashMap<String, DshSessionState>>,
+    /// child session id → its parent, learned from `session/list`. A subagent
+    /// session is only addressable through its durable parent address; the
+    /// plain `session` address is refused with `session/agent-busy`.
+    parents: Mutex<HashMap<String, String>>,
+    /// last follow-stream error code per session, so a wait can retry a
+    /// subagent address the list named after the stream had already opened
+    follow_errors: Mutex<HashMap<String, String>>,
     /// `$events` ready clientId — answers to waterfalls are keyed by it
     client_id: Mutex<Option<String>>,
     /// open question waterfalls by eventId, for reply mapping
@@ -193,6 +200,8 @@ impl DshHandle {
                 cookie: RwLock::new(String::new()),
                 ws_tx,
                 sessions: Mutex::new(HashMap::new()),
+                parents: Mutex::new(HashMap::new()),
+                follow_errors: Mutex::new(HashMap::new()),
                 client_id: Mutex::new(None),
                 pending_questions: Mutex::new(HashMap::new()),
                 recent_errors: Mutex::new(HashMap::new()),
@@ -242,6 +251,81 @@ impl DshHandle {
             .lock()
             .expect("dsh archived")
             .contains(session_id)
+    }
+
+    /// Remembers the parent a `session/list` row named, so this chat can be
+    /// followed through its subagent address.
+    fn note_parent(&self, session_id: &str, parent_id: &str) {
+        self.inner
+            .parents
+            .lock()
+            .expect("dsh parents")
+            .insert(session_id.to_string(), parent_id.to_string());
+    }
+
+    fn parent_of(&self, session_id: &str) -> Option<String> {
+        self.inner
+            .parents
+            .lock()
+            .expect("dsh parents")
+            .get(session_id)
+            .cloned()
+    }
+
+    /// Records an error frame for a follow stream, so `messages` can tell an
+    /// address refusal from a slow snapshot.
+    fn note_follow_error(&self, session_id: &str, code: &str) {
+        self.inner
+            .follow_errors
+            .lock()
+            .expect("dsh follow errors")
+            .insert(session_id.to_string(), code.to_string());
+    }
+
+    fn follow_errored(&self, session_id: &str, code: &str) -> bool {
+        self.inner
+            .follow_errors
+            .lock()
+            .expect("dsh follow errors")
+            .get(session_id)
+            .is_some_and(|last| last == code)
+    }
+
+    /// Re-reads `session/list` only for its parent fields: a chat can be
+    /// opened from a restored tile before the workspace list lands, so the
+    /// follow address may not know yet that it is a subagent.
+    async fn refresh_parents(&self) -> Result<()> {
+        let value = self.rpc("session/list", json!({ "_request": {} })).await?;
+        for item in value
+            .pointer("/items")
+            .and_then(Value::as_array)
+            .unwrap_or(&Vec::new())
+        {
+            let (Some(id), Some(parent)) = (
+                item.get("sessionId").and_then(Value::as_str),
+                item.get("parentSessionId").and_then(Value::as_str),
+            ) else {
+                continue;
+            };
+            self.note_parent(id, parent);
+        }
+        Ok(())
+    }
+
+    /// The durable address a follow stream opens with. `session/list` names a
+    /// subagent's parent; a child followed as an ordinary session is refused
+    /// (`session/agent-busy: subagent Sessions require their durable parent
+    /// address`), so the parent turns the address into the `subagent` kind.
+    fn follow_address(&self, session_id: &str) -> Value {
+        match self.parent_of(session_id) {
+            Some(parent_session_id) => json!({
+                "kind": "subagent",
+                "parentSessionId": parent_session_id,
+                "childSessionId": session_id,
+                "mode": "unknown",
+            }),
+            None => json!({ "kind": "session", "sessionId": session_id }),
+        }
     }
 
     pub fn cookie(&self) -> String {
@@ -334,6 +418,7 @@ impl DshHandle {
     pub async fn messages(&self, session_id: &str) -> Result<Vec<StoredMessage>> {
         self.ensure_follow(session_id).await?;
         let deadline = std::time::Instant::now() + SNAPSHOT_WAIT;
+        let mut retried = false;
         loop {
             {
                 let sessions = self.inner.sessions.lock().expect("dsh sessions");
@@ -345,6 +430,18 @@ impl DshHandle {
                         .iter()
                         .map(MessageAcc::opencode_message)
                         .collect());
+                }
+            }
+            // A restored child tile opens before its workspace list has named
+            // the parent, so the first follow used the plain session address
+            // and the server refused it. Learn the parent and reopen once.
+            if !retried && self.follow_errored(session_id, "session/agent-busy") {
+                retried = true;
+                self.forget_session(session_id);
+                self.refresh_parents().await.ok();
+                if self.parent_of(session_id).is_some() {
+                    self.ensure_follow(session_id).await?;
+                    continue;
                 }
             }
             if std::time::Instant::now() >= deadline {
@@ -367,12 +464,17 @@ impl DshHandle {
                 return Ok(());
             }
         }
+        self.inner
+            .follow_errors
+            .lock()
+            .expect("dsh follow errors")
+            .remove(session_id);
         let frame = json!({
             "type": "open",
             "streamId": follow_stream_id(session_id),
             "endpoint": "session/follow",
             "payload": { "args": { "request": {
-                "address": { "kind": "session", "sessionId": session_id },
+                "address": self.follow_address(session_id),
                 "maxMessages": 120,
             } } },
         });
@@ -650,6 +752,9 @@ pub(crate) async fn list_sessions(
                 .and_then(Value::as_str)
                 .map(String::from),
         };
+        if let Some(parent_id) = &info.parent_id {
+            handle.note_parent(&info.id, parent_id);
+        }
         sessions.push((info, cwd.map(str::to_string)));
     }
     Ok(sessions)
@@ -1682,7 +1787,7 @@ pub async fn run_pump(
                 "streamId": follow_stream_id(id),
                 "endpoint": "session/follow",
                 "payload": { "args": { "request": {
-                    "address": { "kind": "session", "sessionId": id },
+                    "address": handle.follow_address(id),
                     "maxMessages": 120,
                 } } },
             })
@@ -1845,6 +1950,9 @@ fn dispatch_frame(
             .and_then(Value::as_str)
             .unwrap_or("");
         tracing::warn!("[{ws_key}] dsh stream {stream_id} error: {code} {message}");
+        if let Some(session_id) = stream_id.strip_prefix("follow-") {
+            handle.note_follow_error(session_id, code);
+        }
         return;
     }
     if frame_type != "item" {
@@ -2381,6 +2489,51 @@ mod tests {
         assert!(!handle.inner.sessions.lock().unwrap().contains_key("chat-1"));
     }
 
+    #[test]
+    fn a_child_session_follows_through_its_parent_address() {
+        let (tx, _rx) = async_channel::bounded(4);
+        let handle = DshHandle::new("http://127.0.0.1:1", "token", tx);
+        // an unknown id is an ordinary session: the plain address is right
+        assert_eq!(
+            handle.follow_address("session-root"),
+            json!({ "kind": "session", "sessionId": "session-root" })
+        );
+        handle.note_parent("child-1", "session-root");
+        assert_eq!(
+            handle.follow_address("child-1"),
+            json!({
+                "kind": "subagent",
+                "parentSessionId": "session-root",
+                "childSessionId": "child-1",
+                "mode": "unknown",
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn a_listed_subagent_session_learns_its_parent_address() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let base = fake_dsh(Arc::clone(&seen)).await;
+        let (tx, _rx) = async_channel::bounded(4);
+        let handle = DshHandle::new(&base, "token", tx);
+
+        let listed = list_sessions(&handle, None).await.unwrap();
+        assert_eq!(listed.len(), 2);
+        assert_eq!(
+            handle.follow_address("child-1"),
+            json!({
+                "kind": "subagent",
+                "parentSessionId": "session-root",
+                "childSessionId": "child-1",
+                "mode": "unknown",
+            })
+        );
+        assert_eq!(
+            handle.follow_address("session-root"),
+            json!({ "kind": "session", "sessionId": "session-root" })
+        );
+    }
+
     /// One HTTP request from a reqwest client: returns (path, body).
     async fn read_request(socket: &mut tokio::net::TcpStream) -> Option<(String, String)> {
         use tokio::io::AsyncReadExt;
@@ -2446,6 +2599,20 @@ mod tests {
                             "commandId":"cmd-1",
                             "result":{"kind":"error","text":"No compactable history yet."}
                         }}}),
+                        "session/list" => json!({"result":{"ok":true,"value":{"items":[
+                            {
+                                "sessionId":"session-root",
+                                "cwd":"/tmp/workspace",
+                                "projections":{"values":{"title":"Root chat"}},
+                            },
+                            {
+                                "sessionId":"child-1",
+                                "cwd":"/tmp/workspace",
+                                "parentSessionId":"session-root",
+                                "origin":"subagent",
+                                "projections":{"values":{"title":"Child chat"}},
+                            },
+                        ]}}}),
                         _ => {
                             json!({"result":{"ok":false,"error":{"message":"unknown","code":"test"}}})
                         }

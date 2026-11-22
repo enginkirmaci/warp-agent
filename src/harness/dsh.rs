@@ -57,6 +57,16 @@ fn launch_env() -> Vec<(&'static str, &'static str)> {
     Vec::new()
 }
 
+/// The archive request a chat deletion sends. `stopActivity` is what makes
+/// deletion also stop a turn (and its running subagent descendants) the chat
+/// still holds; without it dsh refuses the archive with
+/// `workspace/session-active` and the run outlives the row the app removed.
+fn archive_request(session: &str) -> serde_json::Value {
+    serde_json::json!({
+        "request": { "sessionId": session, "stopActivity": true },
+    })
+}
+
 /// The managed dsh adapter.
 pub struct DshHarness {
     id: HarnessId,
@@ -454,7 +464,7 @@ impl Harness for DshHarness {
         let handle = self.handle()?;
         let reply = self.block_on(handle.rpc(
             "workspace/archiveSession",
-            json!({ "request": { "sessionId": session.as_str() } }),
+            archive_request(session.as_str()),
         ))?;
         let ids: Vec<String> = reply
             .get("archivedSessionIds")
@@ -688,7 +698,7 @@ impl Drop for DshHarness {
 
 #[cfg(test)]
 mod tests {
-    use super::{DshHarness, filediffs, translate_event};
+    use super::{DshHarness, archive_request, filediffs, translate_event};
     use crate::harness::{
         FormFieldKind, Harness, HarnessConfig, HarnessError, HarnessEvent, HealthState,
         MessageRole, PartPayload, PermissionDecision, SessionId,
@@ -705,6 +715,16 @@ mod tests {
         ));
         assert_eq!(harness.health().state, HealthState::Unavailable);
         harness.stop().expect("a failed start still stops");
+    }
+
+    #[test]
+    fn deleting_a_chat_asks_dsh_to_stop_its_running_work() {
+        let request = archive_request("session-1");
+        assert_eq!(
+            request.pointer("/request/sessionId"),
+            Some(&json!("session-1"))
+        );
+        assert_eq!(request.pointer("/request/stopActivity"), Some(&json!(true)));
     }
 
     #[test]

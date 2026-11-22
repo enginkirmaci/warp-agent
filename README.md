@@ -1,19 +1,29 @@
-# Warp Agent — a chat client over `opencode serve` and `dsh web`
+# Warp Agent
 
-Rust + [GPUI](https://github.com/zed-industries/zed) desktop client (the Avalonia
-prototype that preceded it lives in git history). One `opencode serve` per
-workspace, a shared tile grid of chats, streaming markdown replies, inline
-permission / question cards, and per-chat message queues. Chats can also run
-on DeepSeek Harness: the composer's harness pill picks `dsh` per chat, and one
-shared `dsh web` process serves every dsh chat (dsh sessions carry their own
-working directory).
+A desktop chat client for coding agents. One `opencode serve` per workspace, a
+shared tile grid of chats, streaming markdown replies, inline permission and
+question cards, and per-chat message queues. Chats can also run on DeepSeek
+Harness, and each chat can run in its own git worktree.
 
-A chat can also run in a **worktree**: the composer's worktree toggle (off by
-default, offered only where the workspace is a git repository) creates
-`<repo>/.worktrees/<branch>` on the first send and runs the chat there, so the
-main checkout stays where its owner left it. Its chats appear under the
-repository's row in the sidebar, grouped by branch, and a checkout whose folder
-disappears refuses to send until it is restored on the same branch.
+Part of the [warp suite](https://github.com/enginkirmaci/warp-suite). Rust and
+GPUI.
+
+## Install
+
+The normal way is the suite bundle, which installs every warp app at once:
+
+- **Linux** — download `warp-suite-<version>-linux.tar.gz` from the
+  [suite release](https://github.com/enginkirmaci/warp-suite/releases), extract
+  it, and run `./install.sh`. Binaries go to `~/.local/bin`, desktop entries
+  and icons to `~/.local/share`; everything is per-user, no root needed.
+- **Windows** — download `warp-suite-<version>-windows-x64.zip`, extract it,
+  and run `install.cmd`. It installs under
+  `%LOCALAPPDATA%\Programs\warp-suite` with a Start Menu folder. The same ZIP
+  is portable: run the executables under `apps\` without installing.
+
+Warp Agent also ships on its own: the Linux tarball and the Windows portable
+zip and installer are on
+[this repository's releases](https://github.com/enginkirmaci/warp-agent/releases).
 
 ## Run
 
@@ -22,93 +32,70 @@ cargo run            # debug build
 cargo run --release  # release build (LTO, stripped)
 ```
 
-First build fetches GPUI from the zed git repo and takes a while. Needs the
-usual Wayland/Vulkan dev packages. State (versioned `settings.json` and
-`ui.json`, `cache/models.json`, the built-in General workspace and the door
-endpoint) lives in `~/.warp/agent`; the rolling logs go to the suite's shared
-`~/.warp/logs`.
+The first build fetches GPUI from the zed git repository and takes a while. It
+needs the usual Wayland/Vulkan development packages.
 
-## DevTools door
+Warp Agent needs a harness to talk to: `opencode` on your `PATH`, or `dsh` for
+DeepSeek Harness chats. The app works fully standalone; its door is only an
+integration surface for the other warp apps.
 
-At startup the app binds a token-authenticated NDJSON server on
-`127.0.0.1` (port + token under `~/.warp/agent/ipc.*`). DevTools drives it:
-`open-workspace` (folder args on the command line do the same, forwarded to
-a running instance — second launches exit), `new-chat`, `run-prompt`
-(one-shot wand runs as real chats, answered at idle; both accept a
-`harness`, `model` and `variant`), `models` (the flat key list plus the
-harnesses and per-model variants the settings pickers need), `status`
-(+ status pushes). The app works fully standalone; the door is only an
-integration surface.
+## What it does
 
-## Package
-
-The `release` workflow packages this repository alone:
-
-- Linux: the tag job stages the binary, the desktop entry and hicolor icons
-  into a tarball.
-- Windows: the tag job writes the portable zip and the Inno Setup installer.
-  The app icon is embedded into the exe by `build.rs` from
-  `packaging/windows/warp-agent.ico`.
-
-A local build is `cargo build --release`. The assets stay here:
-`packaging/linux/{*.desktop,icons}`, `packaging/windows/{*.ico,*.iss}`.
-
-## Features
-
-- **Workspaces**: the sidebar lists folders; each spawns (or attaches to) its own
-  `opencode serve` on a free port — several run at once. Sections start collapsed
-  every launch; expanding one auto-connects. A built-in **General** workspace
-  leads the list.
-- **Shared tile grid**: open chats of different workspaces sit side by side;
-  switching workspaces never clears the grid. Opening a chat loads its transcript
-  from its own server (auto-started if stopped). Restarts offer a restore banner
-  for the chats that were open.
-- **Chat list per workspace**: pinned first, then newest; rename, pin, delete,
-  remove-from-workspace. Only chats created from the app are listed (client-side
-  tracking — the serve bus is shared).
-- **Streaming replies** with the own markdown renderer: headings, lists, inline
-  code, fenced code with highlighting + copy button, tables, quotes, links.
-  Reasoning shows as collapsible *thinking* folds; tool calls as compact rows
-  with status and expandable details/diffs.
-- **Queued messages**: Enter while a turn runs queues the message (Steer /
-  Edit / Remove); it is sent automatically when the session goes idle.
-- **Slash commands from a fresh chat**: `/compact` included — dsh fills the
-  menu from `skills/list`, opencode from an app-owned command that summarizes
-  the session; both work before the first turn is sent.
+- **Workspaces**: the sidebar lists folders, and each spawns or attaches to its
+  own `opencode serve` on a free port — several run at once. A built-in
+  **General** workspace leads the list.
+- **A shared tile grid**: chats from different workspaces sit side by side, and
+  switching workspaces never clears the grid.
+- **Streaming replies** through the family's markdown renderer: headings,
+  lists, fenced code with highlighting and a copy button, tables, quotes and
+  links. Reasoning shows as collapsible *thinking* folds; tool calls as compact
+  rows with expandable details and diffs.
+- **Queued messages**: Enter while a turn runs queues the message (Steer / Edit
+  / Remove), and it is sent when the session goes idle.
 - **Permission cards** with Allow / Always / Deny and an auto-allow countdown
-  (quick during working hours, long at lunch/off hours; *allow immediately*
-  skips the wait). `question` tool asks render as answer cards with options and
-  a custom answer field.
-- **Model / variant / agent pickers** fed by every running server; per-tile
-  selection; context-usage readout in the tile corner (last-turn tokens vs the
-  model's context limit).
-- **Prompt history** (Up/Down in the composer), clipboard image paste, and a
-  Settings page with the family's four sections (Appearance, Chat defaults,
-  Permissions, Server), the shared text size and reduce motion, persisted to
-  `~/.warp/agent/settings.json`.
-- Stop aborts the running turn (*stopped in Xs*); *done in Xs* closes a normal
-  one.
+  that is quick during working hours and long at lunch and off hours.
+- **Worktree chats**: the composer's worktree toggle creates
+  `<repo>/.worktrees/<branch>` on the first send and runs the chat there, so
+  the main checkout stays where its owner left it.
+- **Model, variant and agent pickers** fed by every running server, with a
+  context-usage readout in the tile corner.
 
-## Layout
+## Where it keeps its files
 
-| Module | Ported from | Notes |
-|---|---|---|
-| `src/store/mod.rs` | MainViewModel + ChatTileViewModel + ChatItems | All app logic: workspaces (one `opencode serve` each), the shared tile grid, transcripts, queue w/ Steer/Edit/Remove, permission asks + auto-allow countdowns (lunch/off-hours ranges), `question` tool cards, subagent tracking, prompt history, restore banner |
-| `src/oc.rs` | OpenCodeServer + OpenCodeApiClient | Serve spawn/attach, OPENCODE_CONFIG_CONTENT ask-forcing, free-port pick, 25 s health wait; REST + SSE on a dedicated tokio thread talking to the UI via channels |
-| `src/theme.rs` | App.xaml resources | Re-exports warpui-kit-core's family palette and type ladder; the app keeps no colours or font sizes of its own |
-| `src/ui/markdown.rs` | MarkdownViewerKit.Avalonia **(replaced)** | gpui-kit TextView markdown: tree-sitter syntax highlighting for fenced code (12 languages, per-block copy button), selectable text, clickable links |
-| `src/ui/diff.rs` | DiffTextBlock | GitHub-style unified diff: line-number gutter, add/del tints, hunk separators |
-| gpui-kit `Textarea` | — (was src/ui/input.rs, deleted) | Multi-line composer input: wrapping, auto-grow, Enter/Shift+Enter submit, Up/Down prompt history, paste-image hook |
-| `src/ui/tile.rs` | ChatTile.axaml(+cs) | Transcript item cards (user/assistant/reasoning/tool/image/permission/question/note), tasks+agents flyout, model/variant/agent pickers, queue rows, attachments |
-| `src/ui/window.rs` | MainWindow.axaml(+cs) | Titlebar (drag/zoom/close/toggle), workspace + chat tree with context menus, drag-resizable sidebar, settings page, restore banner |
-| `src/services.rs` | TerminalLauncher + SystemFontScale | `Open in opencode` terminal probe (alacritty→…), gsettings text-scale follower |
-| `src/settings.rs`, `src/paths.rs`, `src/logging.rs` | AppSettings/UiState/AppPaths/AppLogging | Versioned snake_case settings/UI state, one-time legacy import; `~/.warp-agent` is adopted on first run |
-| `assets/` | — | Icons + spark logo (embedded) |
+| Path | What |
+| --- | --- |
+| `~/.warp/agent/settings.json` | the versioned settings |
+| `~/.warp/agent/ui.json` | the window and layout state |
+| `~/.warp/agent/cache/models.json` | the model catalog cache |
+| `~/.warp/agent/ipc.port`, `ipc.token` | the loopback door endpoint |
+| `~/.warp/logs/` | the suite's shared rolling logs |
 
-Verified against opencode 1.18.32.
+The door is a token-authenticated NDJSON server on `127.0.0.1` that the other
+warp apps drive: `open-workspace`, `new-chat`, `run-prompt`, `models` and
+`status`. Changing its commands, file names or location is a cross-app
+contract change.
 
-## Known gaps
+## Siblings
 
-- Tooltips render on hover (built on gpui_base's overlay); the "Show tooltips on hover" setting gates them.
-- The transcript is not virtualized (the C# one wasn't either).
-- IME composition is not wired (dead-key/CJK input in the composer falls back to plain key events).
+| App | What it adds |
+| --- | --- |
+| [warp-station](https://github.com/enginkirmaci/warp-station) | the repository workbench that drives this app's door |
+| [warp-flow](https://github.com/enginkirmaci/warp-flow) | the workflow engine, whose steps are chats here |
+| [warp-notes](https://github.com/enginkirmaci/warp-notes) | per-repo markdown notes |
+| [warp-pomodoro](https://github.com/enginkirmaci/warp-pomodoro) | the focus timer |
+| [warp-snapit](https://github.com/enginkirmaci/warp-snapit) | the Windows zone snapper |
+
+## Build and package
+
+```sh
+cargo build --release
+```
+
+The `release` workflow packages this repository alone: on Linux it stages the
+binary, the desktop entry and the hicolor icons into a tarball; on Windows it
+writes the portable zip and the Inno Setup installer. The assets stay here
+under `packaging/linux/` and `packaging/windows/`.
+
+## License
+
+GPL-3.0. See [LICENSE](LICENSE).

@@ -3380,10 +3380,6 @@ mod command_flow_tests {
         });
     }
 
-    /// A settled assistant message stamps both ends of its window, so the
-    /// tile keeps its generated-token pace for the header readout; a later
-    /// streaming snapshot must not wipe the number that is already there.
-    ///
     /// A listed subagent chat is not a top-level chat: the sidebar drops it and
     /// the parent's Agents section is what keeps it reachable, live or done.
     #[gpui_kit::gpui::test]
@@ -3464,83 +3460,6 @@ mod command_flow_tests {
             let tile = store.tile_by_key(&key).expect("parent tile");
             assert!(tile.tile_agents.iter().all(|agent| agent.is_running));
             assert_eq!(tile.tile_agents_summary(), "1 running");
-        });
-    }
-
-    #[gpui_kit::gpui::test]
-    fn a_settled_reply_sets_the_header_pace(cx: &mut gpui::TestAppContext) {
-        let _lock = super::test_support::lock_home();
-        let home = HomeGuard::new();
-        let folder = home.home.join("workspace");
-        std::fs::create_dir_all(&folder).expect("workspace");
-        let folder = folder.to_string_lossy().to_string();
-        let store = cx.update(Store::for_probe);
-        let key = cx.update(|cx| {
-            store.update(cx, |store, cx| {
-                store.add_workspace(&folder, cx);
-                store.seed_probe_tile(&folder, "probe-session", "Pace", Vec::new(), false, cx)
-            })
-        });
-
-        store.update(cx, |store, cx| {
-            store.on_net_event(
-                UiEvent::Event {
-                    ws_key: folder.clone(),
-                    event: json!({
-                        "type": "message.updated",
-                        "properties": {
-                            "sessionID": "probe-session",
-                            "info": {
-                                "id": "msg_1",
-                                "role": "assistant",
-                                "providerID": "opencode",
-                                "modelID": "deepseek-v4.1-flash",
-                                "time": { "created": 1_000, "completed": 3_000 },
-                                "tokens": { "input": 100, "output": 80, "reasoning": 20 },
-                            },
-                        },
-                    }),
-                },
-                cx,
-            );
-        });
-
-        store.read_with(cx, |store, _| {
-            let pace = store
-                .tile_by_key(&key)
-                .and_then(|tile| tile.tok_s)
-                .expect("a settled reply leaves a pace on the tile");
-            assert_eq!(pace.generated, 100);
-            assert!((pace.rate - 50.0).abs() < f64::EPSILON);
-        });
-
-        // the same message mid-stream (no completed stamp) keeps the number
-        store.update(cx, |store, cx| {
-            store.on_net_event(
-                UiEvent::Event {
-                    ws_key: folder.clone(),
-                    event: json!({
-                        "type": "message.updated",
-                        "properties": {
-                            "sessionID": "probe-session",
-                            "info": {
-                                "id": "msg_1",
-                                "role": "assistant",
-                                "time": { "created": 1_000 },
-                                "tokens": { "output": 10 },
-                            },
-                        },
-                    }),
-                },
-                cx,
-            );
-        });
-        store.read_with(cx, |store, _| {
-            let pace = store
-                .tile_by_key(&key)
-                .and_then(|tile| tile.tok_s)
-                .expect("a streaming snapshot does not clear the pace");
-            assert!((pace.rate - 50.0).abs() < f64::EPSILON);
         });
     }
 

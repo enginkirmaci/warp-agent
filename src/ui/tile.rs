@@ -3,9 +3,7 @@
 
 use crate::harness::HarnessId;
 use crate::oc::CommandInfo;
-use crate::store::{
-    ChatItem, DEFAULT_MODEL_ENTRY, QuestionEntry, Store, TokenPace, ToolItem, at_token_start,
-};
+use crate::store::{ChatItem, DEFAULT_MODEL_ENTRY, QuestionEntry, Store, ToolItem, at_token_start};
 use crate::theme;
 use crate::ui::{BtnKind, menu_row, popover_card};
 use warpui_kit_picker::{
@@ -687,16 +685,6 @@ fn waiting_word<'a>(items: impl DoubleEndedIterator<Item = &'a ChatItem>) -> Opt
         ChatItem::Question(question) if question.is_pending() => Some("Has a question"),
         _ => None,
     })
-}
-
-/// Header pace: whole numbers read better above ten; below that keep the
-/// decimal so a slow model does not round to a different story.
-fn format_tok_s(rate: f64) -> String {
-    if rate >= 10.0 {
-        format!("{rate:.0} tok/s")
-    } else {
-        format!("{rate:.1} tok/s")
-    }
 }
 
 impl TileView {
@@ -2595,8 +2583,6 @@ struct TileSnap {
     ctx: String,
     ctx_frac: f32,
     has_ctx: bool,
-    /// Pace of the newest finished reply; hidden until one lands.
-    pace: Option<TokenPace>,
     /// Transcript rows, built with the fold state applied: a tool run is one
     /// row when it is longer than one call. `None` when the last render's rows
     /// still describe the tile.
@@ -2684,8 +2670,7 @@ impl TileView {
     }
 
     /// Header row: close, busy pulse, title, then the right cluster —
-    /// reconnecting pill, last-reply pace, context ring readout, tasks/agents
-    /// toggle.
+    /// reconnecting pill, context ring readout, tasks/agents toggle.
     fn render_header(&mut self, snap: &TileSnap, cx: &mut Context<Self>) -> gpui::AnyElement {
         let fonts = snap.fonts;
         let close_store = self.store.clone();
@@ -2720,33 +2705,6 @@ impl TileView {
                         .text_size(px(fonts.font_meta))
                         .text_color(theme::WARN)
                         .child("reconnecting"),
-                ),
-            );
-        }
-        // the last reply's pace: generated tokens over that reply's own time.
-        // Quiet on purpose — the context readout stays the headline number.
-        if let Some(pace) = snap.pace {
-            header_right = header_right.child(
-                tip(
-                    div()
-                        .id("pace-readout")
-                        .role(Role::Label)
-                        .aria_label(SharedString::from(format!(
-                            "Last reply speed: {:.0} tokens per second",
-                            pace.rate
-                        )))
-                        .px_1p5(),
-                    format!(
-                        "Last reply: {} generated tokens (output + reasoning) in {:.1} s",
-                        crate::store::format_tokens(pace.generated),
-                        pace.seconds
-                    ),
-                )
-                .child(
-                    div()
-                        .text_size(px(fonts.font_meta))
-                        .text_color(theme::text_dim())
-                        .child(SharedString::from(format_tok_s(pace.rate))),
                 ),
             );
         }
@@ -4665,7 +4623,6 @@ impl Render for TileView {
                 ctx: tile.context_text.clone().unwrap_or_default(),
                 ctx_frac: tile.context_frac,
                 has_ctx: tile.has_context(),
-                pace: tile.tok_s,
                 // built only when the items or the folds moved: a scroll
                 // repaint reuses the rows (see rows_match)
                 rows: (!self.rows_match(&tile.items))

@@ -1,6 +1,5 @@
 use super::parsing::{
-    TokenPace, apply_tool_metadata, apply_tool_state, decode_data_url, lookup_context_limit,
-    todos_from_part,
+    apply_tool_metadata, apply_tool_state, decode_data_url, lookup_context_limit, todos_from_part,
 };
 use super::*;
 
@@ -53,9 +52,6 @@ pub struct ChatTile {
     pub context_text: Option<String>,
     /// fraction of the context window consumed, 0..1 (0 when the limit is unknown)
     pub context_frac: f32,
-    /// Pace of the newest finished reply, for the header readout; `None`
-    /// until one lands or when the harness did not stamp both ends.
-    pub tok_s: Option<TokenPace>,
     pub auto_title_pending: bool,
     /// Shared items: the tile view snapshots this list on every render, so the
     /// payload rides an Arc and a snapshot costs pointer copies, not deep clones.
@@ -164,7 +160,6 @@ impl ChatTile {
             selected_agent: seed_agent,
             context_text: None,
             context_frac: 0.0,
-            tok_s: None,
             auto_title_pending: false,
             items: Vec::new(),
             tile_agents: Vec::new(),
@@ -415,13 +410,6 @@ impl ChatTile {
                 self.token_order.push(id);
             }
             self.update_context_text();
-        }
-        // a settled reply replaces the header pace; until then the previous
-        // reply's number stays put instead of flickering to nothing
-        if let Some(pace) = TokenPace::from_info(info)
-            && self.tok_s != Some(pace)
-        {
-            self.tok_s = Some(pace);
         }
     }
 
@@ -795,13 +783,6 @@ impl ChatTile {
         if let Some(todos) = todos {
             self.tasks.extend(todos);
         }
-        // the newest settled reply owns the header pace; a transcript whose
-        // harness never stamped `completed` simply leaves it empty
-        self.tok_s = messages
-            .iter()
-            .rev()
-            .filter(|msg| msg.role == "assistant")
-            .find_map(|msg| TokenPace::from_info(&msg.info));
         self.update_context_text();
     }
 }
